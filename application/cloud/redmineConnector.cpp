@@ -88,36 +88,37 @@ namespace AIAssistant
         return errorMessage.empty();
     }
 
-    bool RedmineConnector::TestConnection(CloudConnection const& connection, std::string& errorMessage)
+    std::expected<void, ConnectorError> RedmineConnector::TestConnection(CloudConnection const& connection)
     {
         if (connection.m_Endpoint.empty())
         {
-            errorMessage = "Redmine connection requires an endpoint (e.g. 'http://localhost:3000')";
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::InvalidConfig,
+                "Redmine connection requires an endpoint (e.g. 'http://localhost:3000')"));
         }
 
         // Note: Redmine commonly runs on local-network hosts in dev (e.g.
         // http://localhost:3000) — ValidatePublicHttpEndpoint allows local-net
         // for the http scheme, blocks it for https.  Same posture as email.
-        if (!ConnectorHttp::ValidatePublicHttpEndpoint(connection.m_Endpoint, errorMessage))
+        if (auto r = ConnectorHttp::ValidatePublicHttpEndpoint(connection.m_Endpoint); !r)
         {
             LOG_SECURITY_WARN("[security] redmine_endpoint_rejected connection='{}' reason='{}'",
-                              connection.m_Name, errorMessage);
-            return false;
+                              connection.m_Name, r.error().m_Details);
+            return std::unexpected(std::move(r.error()));
         }
 
         CloudCredentials credentials;
-        if (!ResolveCredentials(connection, credentials, errorMessage))
+        std::string credErr;
+        if (!ResolveCredentials(connection, credentials, credErr))
         {
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::CredentialMissing, std::move(credErr)));
         }
 
         if (ICloudTaskExecutor::ContainsCrlf(credentials.m_Token))
         {
-            errorMessage = "Redmine API key contains CR/LF — refusing to send";
             ConnectorHttp::IncrementCredentialCrlfRejection();
             LOG_SECURITY_WARN("[security] redmine_test_apikey_crlf_rejected connection='{}'", connection.m_Name);
-            return false;
+            return std::unexpected(ConnectorError::Make(
+                ConnectorErrorCode::CredentialInvalid, "Redmine API key contains CR/LF — refusing to send"));
         }
 
         // GET /users/current.json -- verifies the API key and returns the current user
@@ -126,8 +127,7 @@ namespace AIAssistant
         CURL* curl = curl_easy_init();
         if (!curl)
         {
-            errorMessage = "curl_easy_init() failed";
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::NetworkError, "curl_easy_init() failed"));
         }
 
         std::string responseBody;
@@ -153,26 +153,26 @@ namespace AIAssistant
 
         if (res != CURLE_OK)
         {
-            errorMessage = std::string("Redmine test failed: ") + curl_easy_strerror(res);
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::NetworkError,
+                std::string("Redmine test failed: ") + curl_easy_strerror(res)));
         }
 
-        if (httpCode == 401)
+        if (httpCode == 401 || httpCode == 403)
         {
-            errorMessage = "Redmine test failed: unauthorized (HTTP 401) — check API key";
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::AuthFailure,
+                "Redmine test failed: HTTP " + std::to_string(httpCode) + " — check API key"));
         }
 
         if (httpCode >= 400)
         {
-            errorMessage = "Redmine test failed: HTTP " + std::to_string(httpCode);
+            std::string details = "Redmine test failed: HTTP " + std::to_string(httpCode);
             if (!responseBody.empty() && responseBody.size() < 500)
             {
-                errorMessage += ": " + responseBody;
+                details += ": " + responseBody;
             }
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::HttpError, std::move(details)));
         }
 
-        return true;
+        return {};
     }
 } // namespace AIAssistant

@@ -152,43 +152,46 @@ namespace AIAssistant
         return "https://" + accountName + ".blob.core.windows.net";
     }
 
-    bool AzureBlobConnector::TestConnection(CloudConnection const& connection, std::string& errorMessage)
+    std::expected<void, ConnectorError> AzureBlobConnector::TestConnection(CloudConnection const& connection)
     {
         auto accountIt = connection.m_Params.find("account_name");
         if (accountIt == connection.m_Params.end() || accountIt->second.empty())
         {
-            errorMessage = "Azure Blob connection requires 'account_name' parameter";
-            return false;
+            return std::unexpected(ConnectorError::Make(
+                ConnectorErrorCode::InvalidConfig, "Azure Blob connection requires 'account_name' parameter"));
         }
 
         auto containerIt = connection.m_Params.find("container");
         if (containerIt == connection.m_Params.end() || containerIt->second.empty())
         {
-            errorMessage = "Azure Blob connection requires 'container' parameter";
-            return false;
+            return std::unexpected(ConnectorError::Make(
+                ConnectorErrorCode::InvalidConfig, "Azure Blob connection requires 'container' parameter"));
         }
 
-        if (!connection.m_Endpoint.empty() &&
-            !ConnectorHttp::ValidatePublicHttpEndpoint(connection.m_Endpoint, errorMessage))
+        if (!connection.m_Endpoint.empty())
         {
-            LOG_SECURITY_WARN("[security] azure_blob_endpoint_rejected connection='{}' reason='{}'",
-                              connection.m_Name, errorMessage);
-            return false;
+            if (auto endpointResult = ConnectorHttp::ValidatePublicHttpEndpoint(connection.m_Endpoint); !endpointResult)
+            {
+                LOG_SECURITY_WARN("[security] azure_blob_endpoint_rejected connection='{}' reason='{}'",
+                                  connection.m_Name, endpointResult.error().m_Details);
+                return std::unexpected(std::move(endpointResult.error()));
+            }
         }
 
         CloudCredentials credentials;
-        if (!ResolveCredentials(connection, credentials, errorMessage))
+        std::string credErr;
+        if (!ResolveCredentials(connection, credentials, credErr))
         {
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::CredentialMissing, std::move(credErr)));
         }
 
         if (credentials.m_AuthType == CloudAuthType::OAuth2 &&
             ICloudTaskExecutor::ContainsCrlf(credentials.m_Token))
         {
-            errorMessage = "Azure Blob bearer token contains CR/LF — refusing to send";
             ConnectorHttp::IncrementCredentialCrlfRejection();
             LOG_SECURITY_WARN("[security] azure_blob_test_bearer_crlf_rejected connection='{}'", connection.m_Name);
-            return false;
+            return std::unexpected(ConnectorError::Make(
+                ConnectorErrorCode::CredentialInvalid, "Azure Blob bearer token contains CR/LF — refusing to send"));
         }
 
         // Test: GET /{container}?restype=container — checks container exists and credentials work
@@ -198,8 +201,7 @@ namespace AIAssistant
         CURL* curl = curl_easy_init();
         if (!curl)
         {
-            errorMessage = "curl_easy_init() failed";
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::NetworkError, "curl_easy_init() failed"));
         }
 
         std::string responseBody;
@@ -237,20 +239,30 @@ namespace AIAssistant
 
         if (res != CURLE_OK)
         {
-            errorMessage = std::string("Azure Blob test failed: ") + curl_easy_strerror(res);
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::NetworkError,
+                std::string("Azure Blob test failed: ") + curl_easy_strerror(res)));
+        }
+
+        if (httpCode == 401 || httpCode == 403)
+        {
+            std::string details = "Azure Blob test failed: HTTP " + std::to_string(httpCode);
+            if (!responseBody.empty() && responseBody.size() < 500)
+            {
+                details += ": " + responseBody;
+            }
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::AuthFailure, std::move(details)));
         }
 
         if (httpCode >= 400)
         {
-            errorMessage = "Azure Blob test failed: HTTP " + std::to_string(httpCode);
+            std::string details = "Azure Blob test failed: HTTP " + std::to_string(httpCode);
             if (!responseBody.empty() && responseBody.size() < 500)
             {
-                errorMessage += ": " + responseBody;
+                details += ": " + responseBody;
             }
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::HttpError, std::move(details)));
         }
 
-        return true;
+        return {};
     }
 } // namespace AIAssistant

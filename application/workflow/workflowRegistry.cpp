@@ -29,6 +29,7 @@
 #include "file/pathConfinement.h"
 #include "simdjson/simdjson.h"
 #include "workflow/jcwfContainer.h"
+#include "workflow/templateEngine.h"
 #include "workflow/workflowJsonParser.h"
 
 #include <algorithm>
@@ -66,13 +67,12 @@ static bool ReadFileToStringStatic(std::filesystem::path const& filePath, std::s
 namespace
 {
     // Pull the resolved provider name from an ai_call task's `m_ParamsJson`.
-    // Mirrors what AiCallTaskExecutor::TryExtractStringParam does for the same
-    // field at dispatch time — kept inline (not extracted to a shared helper
-    // yet — `feedback_cpp_discipline` "extract before the third site"; today
-    // there are two read sites, executor + registry).  Returns the empty
-    // string for tasks that don't specify a provider; that's the wire
-    // contract — empty in `m_RequiredAiProviders` means "system default".
-    std::string ExtractProviderFromParams(std::string const& paramsJson)
+    // Templates referencing `{{defaults.X.Y}}` are expanded against the
+    // workflow's `m_DefaultsJson` so the prereq check + dashboard
+    // `interface_names` carry the resolved interface name (not the raw
+    // template).  Empty return = "task didn't pin a provider, uses system
+    // default" per the wire contract on `m_RequiredAiProviders`.
+    std::string ExtractProviderFromParams(std::string const& paramsJson, std::string const& defaultsJson)
     {
         if (paramsJson.empty()) return {};
         simdjson::ondemand::parser parser;
@@ -82,7 +82,9 @@ namespace
         simdjson::ondemand::document doc = std::move(docResult.value());
         std::string_view sv;
         if (doc["provider"].get_string().get(sv) != simdjson::SUCCESS) return {};
-        return std::string(sv);
+        std::string const raw(sv);
+        if (raw.find("{{") == std::string::npos) return raw;
+        return AIAssistant::ExpandWithDefaults(raw, AIAssistant::BuildDefaultsMap(defaultsJson));
     }
 }
 
@@ -375,8 +377,9 @@ bool WorkflowRegistry::SaveOrUpdateWorkflowFromJson(std::string const& workflowJ
     // We split it: metadata → global.json, tasks/dataflow → canvas JSON.
     WorkflowJsonParser parser;
     WorkflowDefinition workflowDefinition;
-    if (!parser.ParseWorkflowJson(workflowJson, workflowDefinition, errorMessage))
+    if (auto r = parser.ParseWorkflowJson(workflowJson, workflowDefinition); !r)
     {
+        errorMessage = r.error().m_Details;
         return false;
     }
 
@@ -418,8 +421,7 @@ bool WorkflowRegistry::SaveOrUpdateWorkflowFromJson(std::string const& workflowJ
             {
                 WorkflowJsonParser globalParser;
                 WorkflowDefinition existingGlobal;
-                std::string globalParseError;
-                if (globalParser.ParseGlobalJson(existingGlobalContent, existingGlobal, globalParseError))
+                if (globalParser.ParseGlobalJson(existingGlobalContent, existingGlobal))
                 {
                     if (workflowDefinition.m_Label.empty() && !existingGlobal.m_Label.empty())
                     {
@@ -708,10 +710,9 @@ bool WorkflowRegistry::LoadContainer(std::filesystem::path const& jcwfContainerP
         if (ReadFileToStringStatic(globalJsonPath, globalContent))
         {
             WorkflowJsonParser parser;
-            std::string parseError;
-            if (!parser.ParseGlobalJson(globalContent, globalMetadata, parseError))
+            if (auto r = parser.ParseGlobalJson(globalContent, globalMetadata); !r)
             {
-                LOG_APP_WARN("WorkflowRegistry: failed to parse global.json in '{}': {}", stem, parseError);
+                LOG_APP_WARN("WorkflowRegistry: failed to parse global.json in '{}': {}", stem, r.error().m_Details);
             }
         }
     }
@@ -757,12 +758,12 @@ bool WorkflowRegistry::LoadContainer(std::filesystem::path const& jcwfContainerP
 
     WorkflowDefinition rootDef = globalMetadata; // Start with global metadata.
     WorkflowJsonParser parser;
-    std::string parseError;
 
-    if (!parser.ParseCanvasJson(canvasContent, rootDef, parseError))
+    if (auto r = parser.ParseCanvasJson(canvasContent, rootDef); !r)
     {
-        m_LastContainerError = parseError;
-        LOG_APP_ERROR("WorkflowRegistry: failed to parse root canvas '{}': {}", rootCanvasPath.string(), parseError);
+        m_LastContainerError = r.error().m_Details;
+        LOG_APP_ERROR("WorkflowRegistry: failed to parse root canvas '{}': {}",
+                      rootCanvasPath.string(), r.error().m_Details);
         return false;
     }
 
@@ -804,7 +805,7 @@ bool WorkflowRegistry::LoadContainer(std::filesystem::path const& jcwfContainerP
         {
             if (task.m_Type != TaskType::AiCall) continue;
             rootDef.m_HasAiCallTasks = true;
-            std::string const providerName = ExtractProviderFromParams(task.m_ParamsJson);
+            std::string const providerName = ExtractProviderFromParams(task.m_ParamsJson, rootDef.m_DefaultsJson);
             if (std::find(seen.begin(), seen.end(), providerName) == seen.end())
             {
                 seen.push_back(providerName);
@@ -902,7 +903,14 @@ bool WorkflowRegistry::LoadContainerSubWorkflows(std::filesystem::path const& fo
         bool parsedOk = false;
         try
         {
-            parsedOk = parser.ParseCanvasJson(canvasContent, subDef, parseError);
+            if (auto r = parser.ParseCanvasJson(canvasContent, subDef); r)
+            {
+                parsedOk = true;
+            }
+            else
+            {
+                parseError = std::move(r.error().m_Details);
+            }
         }
         catch (std::exception const& ex)
         {
@@ -944,7 +952,7 @@ bool WorkflowRegistry::LoadContainerSubWorkflows(std::filesystem::path const& fo
             {
                 if (task.m_Type != TaskType::AiCall) continue;
                 subDef.m_HasAiCallTasks = true;
-                std::string const providerName = ExtractProviderFromParams(task.m_ParamsJson);
+                std::string const providerName = ExtractProviderFromParams(task.m_ParamsJson, subDef.m_DefaultsJson);
                 if (std::find(seen.begin(), seen.end(), providerName) == seen.end())
                 {
                     seen.push_back(providerName);

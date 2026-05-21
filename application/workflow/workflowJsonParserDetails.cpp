@@ -33,48 +33,42 @@ namespace AIAssistant
 
     namespace
     {
-        bool RequireObject(simdjson::ondemand::value& value, std::string const& context, std::string& errorMessage)
+        std::expected<void, ParserError>
+            RequireObject(simdjson::ondemand::value& value, std::string const& context)
         {
             auto typeResult = value.type();
             if (typeResult.error() != simdjson::SUCCESS)
             {
-                errorMessage = "failed to get type for ";
-                errorMessage += context;
-                errorMessage += ": ";
-                errorMessage += simdjson::error_message(typeResult.error());
-                return false;
+                return std::unexpected(ParserError::Make(ParserErrorCode::SimdjsonError,
+                    "failed to get type for " + context + ": " + simdjson::error_message(typeResult.error())));
             }
 
             if (typeResult.value() != simdjson::ondemand::json_type::object)
             {
-                errorMessage = context;
-                errorMessage += " must be an object";
-                return false;
+                return std::unexpected(ParserError::Make(ParserErrorCode::TypeMismatch,
+                    context + " must be an object"));
             }
 
-            return true;
+            return {};
         }
 
-        bool RequireArray(simdjson::ondemand::value& value, std::string const& context, std::string& errorMessage)
+        std::expected<void, ParserError>
+            RequireArray(simdjson::ondemand::value& value, std::string const& context)
         {
             auto typeResult = value.type();
             if (typeResult.error() != simdjson::SUCCESS)
             {
-                errorMessage = "failed to get type for ";
-                errorMessage += context;
-                errorMessage += ": ";
-                errorMessage += simdjson::error_message(typeResult.error());
-                return false;
+                return std::unexpected(ParserError::Make(ParserErrorCode::SimdjsonError,
+                    "failed to get type for " + context + ": " + simdjson::error_message(typeResult.error())));
             }
 
             if (typeResult.value() != simdjson::ondemand::json_type::array)
             {
-                errorMessage = context;
-                errorMessage += " must be an array";
-                return false;
+                return std::unexpected(ParserError::Make(ParserErrorCode::TypeMismatch,
+                    context + " must be an array"));
             }
 
-            return true;
+            return {};
         }
     } // anonymous namespace
 
@@ -86,20 +80,20 @@ namespace AIAssistant
     // Triggers
     // ---------------------------------------------------------------------
 
-    bool WorkflowJsonParser::ParseTriggers(simdjson::ondemand::value& jsonValue, std::vector<WorkflowTrigger>& triggersOut,
-                                           std::string& errorMessage) const
+    std::expected<void, ParserError>
+        WorkflowJsonParser::ParseTriggers(simdjson::ondemand::value& jsonValue,
+                                          std::vector<WorkflowTrigger>& triggersOut) const
     {
-        if (!RequireArray(jsonValue, "triggers", errorMessage))
+        if (auto r = RequireArray(jsonValue, "triggers"); !r)
         {
-            return false;
+            return std::unexpected(std::move(r.error()));
         }
 
         auto arrayResult = jsonValue.get_array();
         if (arrayResult.error() != simdjson::SUCCESS)
         {
-            errorMessage = "failed to read 'triggers' array: ";
-            errorMessage += simdjson::error_message(arrayResult.error());
-            return false;
+            return std::unexpected(ParserError::Make(ParserErrorCode::SimdjsonError,
+                std::string("failed to read 'triggers' array: ") + simdjson::error_message(arrayResult.error())));
         }
 
         simdjson::ondemand::array triggerArray = arrayResult.value();
@@ -108,31 +102,31 @@ namespace AIAssistant
         {
             if (triggersOut.size() >= WorkflowParserLimits::kMaxTriggers)
             {
-                errorMessage = "'triggers' exceeds max count (" +
-                               std::to_string(WorkflowParserLimits::kMaxTriggers) + ")";
-                return false;
+                return std::unexpected(ParserError::Make(ParserErrorCode::ValueOutOfRange,
+                    "'triggers' exceeds max count (" +
+                        std::to_string(WorkflowParserLimits::kMaxTriggers) + ")"));
             }
             WorkflowTrigger trigger;
 
             auto objectResult = triggerValue.get_object();
             if (objectResult.error() != simdjson::SUCCESS)
             {
-                errorMessage = "trigger entry must be an object: ";
-                errorMessage += simdjson::error_message(objectResult.error());
-                return false;
+                return std::unexpected(ParserError::Make(ParserErrorCode::TypeMismatch,
+                    std::string("trigger entry must be an object: ") +
+                        simdjson::error_message(objectResult.error())));
             }
 
             simdjson::ondemand::object triggerObject = objectResult.value();
 
-            if (!ParseTrigger(triggerObject, trigger, errorMessage))
+            if (auto r = ParseTrigger(triggerObject, trigger); !r)
             {
-                return false;
+                return std::unexpected(std::move(r.error()));
             }
 
             triggersOut.push_back(trigger);
         }
 
-        return true;
+        return {};
     }
 
     // ---------------------------------------------------------------------
@@ -168,23 +162,22 @@ namespace AIAssistant
         }
     } // namespace
 
-    bool WorkflowJsonParser::ParseControlNodes(simdjson::ondemand::value& jsonValue,
-                                               std::vector<ControlNodeDef>& controlNodesOut,
-                                               std::string& errorMessage) const
+    std::expected<void, ParserError>
+        WorkflowJsonParser::ParseControlNodes(simdjson::ondemand::value& jsonValue,
+                                              std::vector<ControlNodeDef>& controlNodesOut) const
     {
         controlNodesOut.clear();
 
-        if (!RequireArray(jsonValue, "control_nodes", errorMessage))
+        if (auto r = RequireArray(jsonValue, "control_nodes"); !r)
         {
-            return false;
+            return std::unexpected(std::move(r.error()));
         }
 
         auto arrayResult = jsonValue.get_array();
         if (arrayResult.error() != simdjson::SUCCESS)
         {
-            errorMessage = "failed to read 'control_nodes' array: ";
-            errorMessage += simdjson::error_message(arrayResult.error());
-            return false;
+            return std::unexpected(ParserError::Make(ParserErrorCode::SimdjsonError,
+                std::string("failed to read 'control_nodes' array: ") + simdjson::error_message(arrayResult.error())));
         }
 
         simdjson::ondemand::array nodeArray = arrayResult.value();
@@ -192,16 +185,16 @@ namespace AIAssistant
         {
             if (controlNodesOut.size() >= WorkflowParserLimits::kMaxControlNodes)
             {
-                errorMessage = "'control_nodes' exceeds max count (" +
-                               std::to_string(WorkflowParserLimits::kMaxControlNodes) + ")";
-                return false;
+                return std::unexpected(ParserError::Make(ParserErrorCode::ValueOutOfRange,
+                    "'control_nodes' exceeds max count (" +
+                        std::to_string(WorkflowParserLimits::kMaxControlNodes) + ")"));
             }
             auto objectResult = entryValue.get_object();
             if (objectResult.error() != simdjson::SUCCESS)
             {
-                errorMessage = "control_nodes entry must be an object: ";
-                errorMessage += simdjson::error_message(objectResult.error());
-                return false;
+                return std::unexpected(ParserError::Make(ParserErrorCode::TypeMismatch,
+                    std::string("control_nodes entry must be an object: ") +
+                        simdjson::error_message(objectResult.error())));
             }
 
             simdjson::ondemand::object obj = objectResult.value();
@@ -215,9 +208,9 @@ namespace AIAssistant
                 auto keyResult = field.unescaped_key();
                 if (keyResult.error() != simdjson::SUCCESS)
                 {
-                    errorMessage = "failed to read control_nodes field key: ";
-                    errorMessage += simdjson::error_message(keyResult.error());
-                    return false;
+                    return std::unexpected(ParserError::Make(ParserErrorCode::SimdjsonError,
+                        std::string("failed to read control_nodes field key: ") +
+                            simdjson::error_message(keyResult.error())));
                 }
 
                 std::string_view keyView = keyResult.value();
@@ -228,8 +221,8 @@ namespace AIAssistant
                 {
                     if (!ElementToString(value, node.m_Id))
                     {
-                        errorMessage = "control_nodes field 'id' must be string";
-                        return false;
+                        return std::unexpected(ParserError::Make(
+                            ParserErrorCode::TypeMismatch, "control_nodes field 'id' must be string"));
                     }
                     hasId = true;
                 }
@@ -238,8 +231,8 @@ namespace AIAssistant
                     std::string typeString;
                     if (!ElementToString(value, typeString))
                     {
-                        errorMessage = "control_nodes field 'type' must be string";
-                        return false;
+                        return std::unexpected(ParserError::Make(
+                            ParserErrorCode::TypeMismatch, "control_nodes field 'type' must be string"));
                     }
                     node.m_Type = StringToControlNodeType(typeString);
                     hasType = true;
@@ -256,39 +249,38 @@ namespace AIAssistant
 
             if (!hasId)
             {
-                errorMessage = "control_nodes entry missing required field: id";
-                return false;
+                return std::unexpected(ParserError::Make(
+                    ParserErrorCode::MissingField, "control_nodes entry missing required field: id"));
             }
 
             if (!hasType)
             {
-                errorMessage = "control_nodes entry missing required field: type";
-                return false;
+                return std::unexpected(ParserError::Make(
+                    ParserErrorCode::MissingField, "control_nodes entry missing required field: type"));
             }
 
             controlNodesOut.push_back(std::move(node));
         }
 
-        return true;
+        return {};
     }
 
-    bool WorkflowJsonParser::ParseControlflow(simdjson::ondemand::value& jsonValue,
-                                              std::vector<ControlflowEdgeDef>& controlflowOut,
-                                              std::string& errorMessage) const
+    std::expected<void, ParserError>
+        WorkflowJsonParser::ParseControlflow(simdjson::ondemand::value& jsonValue,
+                                             std::vector<ControlflowEdgeDef>& controlflowOut) const
     {
         controlflowOut.clear();
 
-        if (!RequireArray(jsonValue, "controlflow", errorMessage))
+        if (auto r = RequireArray(jsonValue, "controlflow"); !r)
         {
-            return false;
+            return std::unexpected(std::move(r.error()));
         }
 
         auto arrayResult = jsonValue.get_array();
         if (arrayResult.error() != simdjson::SUCCESS)
         {
-            errorMessage = "failed to read 'controlflow' array: ";
-            errorMessage += simdjson::error_message(arrayResult.error());
-            return false;
+            return std::unexpected(ParserError::Make(ParserErrorCode::SimdjsonError,
+                std::string("failed to read 'controlflow' array: ") + simdjson::error_message(arrayResult.error())));
         }
 
         simdjson::ondemand::array edgeArray = arrayResult.value();
@@ -296,16 +288,16 @@ namespace AIAssistant
         {
             if (controlflowOut.size() >= WorkflowParserLimits::kMaxControlflowEdges)
             {
-                errorMessage = "'controlflow' exceeds max count (" +
-                               std::to_string(WorkflowParserLimits::kMaxControlflowEdges) + ")";
-                return false;
+                return std::unexpected(ParserError::Make(ParserErrorCode::ValueOutOfRange,
+                    "'controlflow' exceeds max count (" +
+                        std::to_string(WorkflowParserLimits::kMaxControlflowEdges) + ")"));
             }
             auto objectResult = entryValue.get_object();
             if (objectResult.error() != simdjson::SUCCESS)
             {
-                errorMessage = "controlflow entry must be an object: ";
-                errorMessage += simdjson::error_message(objectResult.error());
-                return false;
+                return std::unexpected(ParserError::Make(ParserErrorCode::TypeMismatch,
+                    std::string("controlflow entry must be an object: ") +
+                        simdjson::error_message(objectResult.error())));
             }
 
             simdjson::ondemand::object obj = objectResult.value();
@@ -320,9 +312,9 @@ namespace AIAssistant
                 auto keyResult = field.unescaped_key();
                 if (keyResult.error() != simdjson::SUCCESS)
                 {
-                    errorMessage = "failed to read controlflow field key: ";
-                    errorMessage += simdjson::error_message(keyResult.error());
-                    return false;
+                    return std::unexpected(ParserError::Make(ParserErrorCode::SimdjsonError,
+                        std::string("failed to read controlflow field key: ") +
+                            simdjson::error_message(keyResult.error())));
                 }
 
                 std::string_view keyView = keyResult.value();
@@ -333,8 +325,8 @@ namespace AIAssistant
                 {
                     if (!ElementToString(value, edge.m_From))
                     {
-                        errorMessage = "controlflow field 'from' must be string";
-                        return false;
+                        return std::unexpected(ParserError::Make(
+                            ParserErrorCode::TypeMismatch, "controlflow field 'from' must be string"));
                     }
                     hasFrom = true;
                 }
@@ -342,8 +334,8 @@ namespace AIAssistant
                 {
                     if (!ElementToString(value, edge.m_To))
                     {
-                        errorMessage = "controlflow field 'to' must be string";
-                        return false;
+                        return std::unexpected(ParserError::Make(
+                            ParserErrorCode::TypeMismatch, "controlflow field 'to' must be string"));
                     }
                     hasTo = true;
                 }
@@ -352,8 +344,8 @@ namespace AIAssistant
                     std::string kindString;
                     if (!ElementToString(value, kindString))
                     {
-                        errorMessage = "controlflow field 'kind' must be string";
-                        return false;
+                        return std::unexpected(ParserError::Make(
+                            ParserErrorCode::TypeMismatch, "controlflow field 'kind' must be string"));
                     }
                     edge.m_Kind = StringToControlflowKind(kindString);
                     hasKind = true;
@@ -374,34 +366,34 @@ namespace AIAssistant
 
             if (!hasFrom || !hasTo || !hasKind)
             {
-                errorMessage = "controlflow entry missing required fields (from, to, kind)";
-                return false;
+                return std::unexpected(ParserError::Make(ParserErrorCode::MissingField,
+                    "controlflow entry missing required fields (from, to, kind)"));
             }
 
             controlflowOut.push_back(std::move(edge));
         }
 
-        return true;
+        return {};
     }
 
     // ---------------------------------------------------------------------
     // Tasks
     // ---------------------------------------------------------------------
 
-    bool WorkflowJsonParser::ParseTasks(simdjson::ondemand::value& jsonValue,
-                                        std::unordered_map<std::string, TaskDef>& tasksOut, std::string& errorMessage) const
+    std::expected<void, ParserError>
+        WorkflowJsonParser::ParseTasks(simdjson::ondemand::value& jsonValue,
+                                       std::unordered_map<std::string, TaskDef>& tasksOut) const
     {
-        if (!RequireObject(jsonValue, "tasks", errorMessage))
+        if (auto r = RequireObject(jsonValue, "tasks"); !r)
         {
-            return false;
+            return std::unexpected(std::move(r.error()));
         }
 
         auto objectResult = jsonValue.get_object();
         if (objectResult.error() != simdjson::SUCCESS)
         {
-            errorMessage = "failed to read 'tasks' object: ";
-            errorMessage += simdjson::error_message(objectResult.error());
-            return false;
+            return std::unexpected(ParserError::Make(ParserErrorCode::SimdjsonError,
+                std::string("failed to read 'tasks' object: ") + simdjson::error_message(objectResult.error())));
         }
 
         simdjson::ondemand::object tasksObject = objectResult.value();
@@ -410,16 +402,14 @@ namespace AIAssistant
         {
             if (tasksOut.size() >= WorkflowParserLimits::kMaxTasks)
             {
-                errorMessage = "'tasks' exceeds max count (" +
-                               std::to_string(WorkflowParserLimits::kMaxTasks) + ")";
-                return false;
+                return std::unexpected(ParserError::Make(ParserErrorCode::ValueOutOfRange,
+                    "'tasks' exceeds max count (" + std::to_string(WorkflowParserLimits::kMaxTasks) + ")"));
             }
             auto keyResult = field.unescaped_key();
             if (keyResult.error() != simdjson::SUCCESS)
             {
-                errorMessage = "failed to read task key: ";
-                errorMessage += simdjson::error_message(keyResult.error());
-                return false;
+                return std::unexpected(ParserError::Make(ParserErrorCode::SimdjsonError,
+                    std::string("failed to read task key: ") + simdjson::error_message(keyResult.error())));
             }
 
             std::string_view keyView = keyResult.value();
@@ -430,17 +420,17 @@ namespace AIAssistant
             auto taskObjectResult = value.get_object();
             if (taskObjectResult.error() != simdjson::SUCCESS)
             {
-                errorMessage = "task entry must be an object: ";
-                errorMessage += simdjson::error_message(taskObjectResult.error());
-                return false;
+                return std::unexpected(ParserError::Make(ParserErrorCode::TypeMismatch,
+                    std::string("task entry must be an object: ") +
+                        simdjson::error_message(taskObjectResult.error())));
             }
 
             simdjson::ondemand::object taskObject = taskObjectResult.value();
 
             TaskDef task;
-            if (!ParseTask(taskObject, task, errorMessage))
+            if (auto r = ParseTask(taskObject, task); !r)
             {
-                return false;
+                return std::unexpected(std::move(r.error()));
             }
 
             if (task.m_Id.empty())
@@ -452,23 +442,22 @@ namespace AIAssistant
             tasksOut[taskKey] = task;
         }
 
-        return true;
+        return {};
     }
 
-    bool WorkflowJsonParser::ParseTaskInputs(simdjson::ondemand::value& jsonValue, TaskIOMap& inputsOut,
-                                             std::string& errorMessage) const
+    std::expected<void, ParserError>
+        WorkflowJsonParser::ParseTaskInputs(simdjson::ondemand::value& jsonValue, TaskIOMap& inputsOut) const
     {
-        if (!RequireObject(jsonValue, "task.inputs", errorMessage))
+        if (auto r = RequireObject(jsonValue, "task.inputs"); !r)
         {
-            return false;
+            return std::unexpected(std::move(r.error()));
         }
 
         auto objectResult = jsonValue.get_object();
         if (objectResult.error() != simdjson::SUCCESS)
         {
-            errorMessage = "failed to read 'inputs' object: ";
-            errorMessage += simdjson::error_message(objectResult.error());
-            return false;
+            return std::unexpected(ParserError::Make(ParserErrorCode::SimdjsonError,
+                std::string("failed to read 'inputs' object: ") + simdjson::error_message(objectResult.error())));
         }
 
         simdjson::ondemand::object inputsObject = objectResult.value();
@@ -478,9 +467,8 @@ namespace AIAssistant
             auto keyResult = field.unescaped_key();
             if (keyResult.error() != simdjson::SUCCESS)
             {
-                errorMessage = "failed to read input key: ";
-                errorMessage += simdjson::error_message(keyResult.error());
-                return false;
+                return std::unexpected(ParserError::Make(ParserErrorCode::SimdjsonError,
+                    std::string("failed to read input key: ") + simdjson::error_message(keyResult.error())));
             }
 
             std::string_view keyView = keyResult.value();
@@ -488,17 +476,17 @@ namespace AIAssistant
 
             simdjson::ondemand::value value = field.value();
 
-            if (!RequireObject(value, "task.inputs entry", errorMessage))
+            if (auto r = RequireObject(value, "task.inputs entry"); !r)
             {
-                return false;
+                return std::unexpected(std::move(r.error()));
             }
 
             auto subObjectResult = value.get_object();
             if (subObjectResult.error() != simdjson::SUCCESS)
             {
-                errorMessage = "failed to read task input definition object: ";
-                errorMessage += simdjson::error_message(subObjectResult.error());
-                return false;
+                return std::unexpected(ParserError::Make(ParserErrorCode::SimdjsonError,
+                    std::string("failed to read task input definition object: ") +
+                        simdjson::error_message(subObjectResult.error())));
             }
 
             simdjson::ondemand::object subObject = subObjectResult.value();
@@ -510,9 +498,9 @@ namespace AIAssistant
                 auto subKeyResult = subField.unescaped_key();
                 if (subKeyResult.error() != simdjson::SUCCESS)
                 {
-                    errorMessage = "failed to read task input field key: ";
-                    errorMessage += simdjson::error_message(subKeyResult.error());
-                    return false;
+                    return std::unexpected(ParserError::Make(ParserErrorCode::SimdjsonError,
+                        std::string("failed to read task input field key: ") +
+                            simdjson::error_message(subKeyResult.error())));
                 }
 
                 std::string_view subKeyView = subKeyResult.value();
@@ -524,8 +512,8 @@ namespace AIAssistant
                 {
                     if (!ElementToString(subValue, ioField.m_Type))
                     {
-                        errorMessage = "task input field 'type' must be string";
-                        return false;
+                        return std::unexpected(ParserError::Make(
+                            ParserErrorCode::TypeMismatch, "task input field 'type' must be string"));
                     }
                 }
                 else if (subKey == "required")
@@ -533,8 +521,8 @@ namespace AIAssistant
                     auto boolResult = subValue.get_bool();
                     if (boolResult.error() != simdjson::SUCCESS)
                     {
-                        errorMessage = "task input field 'required' must be bool";
-                        return false;
+                        return std::unexpected(ParserError::Make(
+                            ParserErrorCode::TypeMismatch, "task input field 'required' must be bool"));
                     }
 
                     ioField.m_IsRequired = boolResult.value();
@@ -543,8 +531,8 @@ namespace AIAssistant
                 {
                     if (!ElementToString(subValue, ioField.m_Default))
                     {
-                        errorMessage = "task input field 'default' must be string";
-                        return false;
+                        return std::unexpected(ParserError::Make(
+                            ParserErrorCode::TypeMismatch, "task input field 'default' must be string"));
                     }
                 }
                 else
@@ -556,23 +544,22 @@ namespace AIAssistant
             inputsOut[key] = ioField;
         }
 
-        return true;
+        return {};
     }
 
-    bool WorkflowJsonParser::ParseTaskOutputs(simdjson::ondemand::value& jsonValue, TaskIOMap& outputsOut,
-                                              std::string& errorMessage) const
+    std::expected<void, ParserError>
+        WorkflowJsonParser::ParseTaskOutputs(simdjson::ondemand::value& jsonValue, TaskIOMap& outputsOut) const
     {
-        if (!RequireObject(jsonValue, "task.outputs", errorMessage))
+        if (auto r = RequireObject(jsonValue, "task.outputs"); !r)
         {
-            return false;
+            return std::unexpected(std::move(r.error()));
         }
 
         auto objectResult = jsonValue.get_object();
         if (objectResult.error() != simdjson::SUCCESS)
         {
-            errorMessage = "failed to read 'outputs' object: ";
-            errorMessage += simdjson::error_message(objectResult.error());
-            return false;
+            return std::unexpected(ParserError::Make(ParserErrorCode::SimdjsonError,
+                std::string("failed to read 'outputs' object: ") + simdjson::error_message(objectResult.error())));
         }
 
         simdjson::ondemand::object outputsObject = objectResult.value();
@@ -582,9 +569,8 @@ namespace AIAssistant
             auto keyResult = field.unescaped_key();
             if (keyResult.error() != simdjson::SUCCESS)
             {
-                errorMessage = "failed to read output key: ";
-                errorMessage += simdjson::error_message(keyResult.error());
-                return false;
+                return std::unexpected(ParserError::Make(ParserErrorCode::SimdjsonError,
+                    std::string("failed to read output key: ") + simdjson::error_message(keyResult.error())));
             }
 
             std::string_view keyView = keyResult.value();
@@ -592,17 +578,17 @@ namespace AIAssistant
 
             simdjson::ondemand::value value = field.value();
 
-            if (!RequireObject(value, "task.outputs entry", errorMessage))
+            if (auto r = RequireObject(value, "task.outputs entry"); !r)
             {
-                return false;
+                return std::unexpected(std::move(r.error()));
             }
 
             auto subObjectResult = value.get_object();
             if (subObjectResult.error() != simdjson::SUCCESS)
             {
-                errorMessage = "failed to read task output definition object: ";
-                errorMessage += simdjson::error_message(subObjectResult.error());
-                return false;
+                return std::unexpected(ParserError::Make(ParserErrorCode::SimdjsonError,
+                    std::string("failed to read task output definition object: ") +
+                        simdjson::error_message(subObjectResult.error())));
             }
 
             simdjson::ondemand::object subObject = subObjectResult.value();
@@ -614,9 +600,9 @@ namespace AIAssistant
                 auto subKeyResult = subField.unescaped_key();
                 if (subKeyResult.error() != simdjson::SUCCESS)
                 {
-                    errorMessage = "failed to read task output field key: ";
-                    errorMessage += simdjson::error_message(subKeyResult.error());
-                    return false;
+                    return std::unexpected(ParserError::Make(ParserErrorCode::SimdjsonError,
+                        std::string("failed to read task output field key: ") +
+                            simdjson::error_message(subKeyResult.error())));
                 }
 
                 std::string_view subKeyView = subKeyResult.value();
@@ -628,8 +614,8 @@ namespace AIAssistant
                 {
                     if (!ElementToString(subValue, ioField.m_Type))
                     {
-                        errorMessage = "task output field 'type' must be string";
-                        return false;
+                        return std::unexpected(ParserError::Make(
+                            ParserErrorCode::TypeMismatch, "task output field 'type' must be string"));
                     }
                 }
                 else if (subKey == "required")
@@ -637,8 +623,8 @@ namespace AIAssistant
                     auto boolResult = subValue.get_bool();
                     if (boolResult.error() != simdjson::SUCCESS)
                     {
-                        errorMessage = "task output field 'required' must be bool";
-                        return false;
+                        return std::unexpected(ParserError::Make(
+                            ParserErrorCode::TypeMismatch, "task output field 'required' must be bool"));
                     }
 
                     ioField.m_IsRequired = boolResult.value();
@@ -652,23 +638,23 @@ namespace AIAssistant
             outputsOut[key] = ioField;
         }
 
-        return true;
+        return {};
     }
 
-    bool WorkflowJsonParser::ParseTaskEnvironment(simdjson::ondemand::value& jsonValue, TaskEnvironment& environmentOut,
-                                                  std::string& errorMessage) const
+    std::expected<void, ParserError>
+        WorkflowJsonParser::ParseTaskEnvironment(simdjson::ondemand::value& jsonValue,
+                                                 TaskEnvironment& environmentOut) const
     {
-        if (!RequireObject(jsonValue, "task.environment", errorMessage))
+        if (auto r = RequireObject(jsonValue, "task.environment"); !r)
         {
-            return false;
+            return std::unexpected(std::move(r.error()));
         }
 
         auto objectResult = jsonValue.get_object();
         if (objectResult.error() != simdjson::SUCCESS)
         {
-            errorMessage = "failed to read 'environment' object: ";
-            errorMessage += simdjson::error_message(objectResult.error());
-            return false;
+            return std::unexpected(ParserError::Make(ParserErrorCode::SimdjsonError,
+                std::string("failed to read 'environment' object: ") + simdjson::error_message(objectResult.error())));
         }
 
         simdjson::ondemand::object envObject = objectResult.value();
@@ -678,9 +664,9 @@ namespace AIAssistant
             auto keyResult = field.unescaped_key();
             if (keyResult.error() != simdjson::SUCCESS)
             {
-                errorMessage = "failed to read environment field key: ";
-                errorMessage += simdjson::error_message(keyResult.error());
-                return false;
+                return std::unexpected(ParserError::Make(ParserErrorCode::SimdjsonError,
+                    std::string("failed to read environment field key: ") +
+                        simdjson::error_message(keyResult.error())));
             }
 
             std::string_view keyView = keyResult.value();
@@ -698,17 +684,17 @@ namespace AIAssistant
             }
             else if (key == "variables")
             {
-                if (!RequireObject(value, "task.environment.variables", errorMessage))
+                if (auto r = RequireObject(value, "task.environment.variables"); !r)
                 {
-                    return false;
+                    return std::unexpected(std::move(r.error()));
                 }
 
                 auto varsObjectResult = value.get_object();
                 if (varsObjectResult.error() != simdjson::SUCCESS)
                 {
-                    errorMessage = "failed to read 'variables' object: ";
-                    errorMessage += simdjson::error_message(varsObjectResult.error());
-                    return false;
+                    return std::unexpected(ParserError::Make(ParserErrorCode::SimdjsonError,
+                        std::string("failed to read 'variables' object: ") +
+                            simdjson::error_message(varsObjectResult.error())));
                 }
 
                 simdjson::ondemand::object varsObject = varsObjectResult.value();
@@ -718,9 +704,9 @@ namespace AIAssistant
                     auto varKeyResult = variableField.unescaped_key();
                     if (varKeyResult.error() != simdjson::SUCCESS)
                     {
-                        errorMessage = "failed to read environment variable key: ";
-                        errorMessage += simdjson::error_message(varKeyResult.error());
-                        return false;
+                        return std::unexpected(ParserError::Make(ParserErrorCode::SimdjsonError,
+                            std::string("failed to read environment variable key: ") +
+                                simdjson::error_message(varKeyResult.error())));
                     }
 
                     std::string_view varKeyView = varKeyResult.value();
@@ -731,8 +717,8 @@ namespace AIAssistant
                     auto jsonResult = simdjson::to_json_string(variableValue);
                     if (jsonResult.error() != simdjson::SUCCESS)
                     {
-                        errorMessage = "failed to serialize environment variable value";
-                        return false;
+                        return std::unexpected(ParserError::Make(ParserErrorCode::SimdjsonError,
+                            "failed to serialize environment variable value"));
                     }
 
                     std::string_view jsonView = jsonResult.value();
@@ -747,33 +733,33 @@ namespace AIAssistant
             }
         }
 
-        return true;
+        return {};
     }
 
-    bool WorkflowJsonParser::ParseTaskQueueBinding(simdjson::ondemand::value& jsonValue, QueueBinding& bindingOut,
-                                                   std::string& errorMessage) const
+    std::expected<void, ParserError>
+        WorkflowJsonParser::ParseTaskQueueBinding(simdjson::ondemand::value& jsonValue, QueueBinding& bindingOut) const
     {
-        return ::AIAssistant::ParseTaskQueueBinding(jsonValue, bindingOut, errorMessage);
+        return ::AIAssistant::ParseTaskQueueBinding(jsonValue, bindingOut);
     }
 
     // ---------------------------------------------------------------------
     // Dataflow
     // ---------------------------------------------------------------------
 
-    bool WorkflowJsonParser::ParseDataflow(simdjson::ondemand::value& jsonValue, std::vector<DataflowDef>& dataflowsOut,
-                                           std::string& errorMessage) const
+    std::expected<void, ParserError>
+        WorkflowJsonParser::ParseDataflow(simdjson::ondemand::value& jsonValue,
+                                          std::vector<DataflowDef>& dataflowsOut) const
     {
-        if (!RequireArray(jsonValue, "dataflow", errorMessage))
+        if (auto r = RequireArray(jsonValue, "dataflow"); !r)
         {
-            return false;
+            return std::unexpected(std::move(r.error()));
         }
 
         auto arrayResult = jsonValue.get_array();
         if (arrayResult.error() != simdjson::SUCCESS)
         {
-            errorMessage = "failed to read 'dataflow' array: ";
-            errorMessage += simdjson::error_message(arrayResult.error());
-            return false;
+            return std::unexpected(ParserError::Make(ParserErrorCode::SimdjsonError,
+                std::string("failed to read 'dataflow' array: ") + simdjson::error_message(arrayResult.error())));
         }
 
         simdjson::ondemand::array dataflowArray = arrayResult.value();
@@ -782,44 +768,44 @@ namespace AIAssistant
         {
             if (dataflowsOut.size() >= WorkflowParserLimits::kMaxDataflows)
             {
-                errorMessage = "'dataflow' exceeds max count (" +
-                               std::to_string(WorkflowParserLimits::kMaxDataflows) + ")";
-                return false;
+                return std::unexpected(ParserError::Make(ParserErrorCode::ValueOutOfRange,
+                    "'dataflow' exceeds max count (" +
+                        std::to_string(WorkflowParserLimits::kMaxDataflows) + ")"));
             }
             DataflowDef dataflowDefinition;
 
             auto objectResult = entryValue.get_object();
             if (objectResult.error() != simdjson::SUCCESS)
             {
-                errorMessage = "dataflow entry must be an object: ";
-                errorMessage += simdjson::error_message(objectResult.error());
-                return false;
+                return std::unexpected(ParserError::Make(ParserErrorCode::TypeMismatch,
+                    std::string("dataflow entry must be an object: ") +
+                        simdjson::error_message(objectResult.error())));
             }
 
             simdjson::ondemand::object entryObject = objectResult.value();
 
-            if (!ParseSingleDataflow(entryObject, dataflowDefinition, errorMessage))
+            if (auto r = ParseSingleDataflow(entryObject, dataflowDefinition); !r)
             {
-                return false;
+                return std::unexpected(std::move(r.error()));
             }
 
             dataflowsOut.push_back(dataflowDefinition);
         }
 
-        return true;
+        return {};
     }
 
-    bool WorkflowJsonParser::ParseSingleDataflow(simdjson::ondemand::object& jsonObject, DataflowDef& dataflowOut,
-                                                 std::string& errorMessage) const
+    std::expected<void, ParserError>
+        WorkflowJsonParser::ParseSingleDataflow(simdjson::ondemand::object& jsonObject, DataflowDef& dataflowOut) const
     {
         for (auto field : jsonObject)
         {
             auto keyResult = field.unescaped_key();
             if (keyResult.error() != simdjson::SUCCESS)
             {
-                errorMessage = "failed to read dataflow field key: ";
-                errorMessage += simdjson::error_message(keyResult.error());
-                return false;
+                return std::unexpected(ParserError::Make(ParserErrorCode::SimdjsonError,
+                    std::string("failed to read dataflow field key: ") +
+                        simdjson::error_message(keyResult.error())));
             }
 
             std::string_view keyView = keyResult.value();
@@ -831,47 +817,47 @@ namespace AIAssistant
             {
                 if (!ElementToString(value, dataflowOut.m_FromTask))
                 {
-                    errorMessage = "dataflow field 'from_task' must be string";
-                    return false;
+                    return std::unexpected(ParserError::Make(
+                        ParserErrorCode::TypeMismatch, "dataflow field 'from_task' must be string"));
                 }
             }
             else if (key == "from_output")
             {
                 if (!ElementToString(value, dataflowOut.m_FromOutput))
                 {
-                    errorMessage = "dataflow field 'from_output' must be string";
-                    return false;
+                    return std::unexpected(ParserError::Make(
+                        ParserErrorCode::TypeMismatch, "dataflow field 'from_output' must be string"));
                 }
             }
             else if (key == "to_task")
             {
                 if (!ElementToString(value, dataflowOut.m_ToTask))
                 {
-                    errorMessage = "dataflow field 'to_task' must be string";
-                    return false;
+                    return std::unexpected(ParserError::Make(
+                        ParserErrorCode::TypeMismatch, "dataflow field 'to_task' must be string"));
                 }
             }
             else if (key == "to_input")
             {
                 if (!ElementToString(value, dataflowOut.m_ToInput))
                 {
-                    errorMessage = "dataflow field 'to_input' must be string";
-                    return false;
+                    return std::unexpected(ParserError::Make(
+                        ParserErrorCode::TypeMismatch, "dataflow field 'to_input' must be string"));
                 }
             }
             else if (key == "mapping")
             {
-                if (!RequireObject(value, "dataflow.mapping", errorMessage))
+                if (auto r = RequireObject(value, "dataflow.mapping"); !r)
                 {
-                    return false;
+                    return std::unexpected(std::move(r.error()));
                 }
 
                 auto mappingObjectResult = value.get_object();
                 if (mappingObjectResult.error() != simdjson::SUCCESS)
                 {
-                    errorMessage = "failed to read 'mapping' object: ";
-                    errorMessage += simdjson::error_message(mappingObjectResult.error());
-                    return false;
+                    return std::unexpected(ParserError::Make(ParserErrorCode::SimdjsonError,
+                        std::string("failed to read 'mapping' object: ") +
+                            simdjson::error_message(mappingObjectResult.error())));
                 }
 
                 simdjson::ondemand::object mappingObject = mappingObjectResult.value();
@@ -881,9 +867,9 @@ namespace AIAssistant
                     auto mappingKeyResult = mappingField.unescaped_key();
                     if (mappingKeyResult.error() != simdjson::SUCCESS)
                     {
-                        errorMessage = "failed to read dataflow mapping key: ";
-                        errorMessage += simdjson::error_message(mappingKeyResult.error());
-                        return false;
+                        return std::unexpected(ParserError::Make(ParserErrorCode::SimdjsonError,
+                            std::string("failed to read dataflow mapping key: ") +
+                                simdjson::error_message(mappingKeyResult.error())));
                     }
 
                     std::string_view mappingKeyView = mappingKeyResult.value();
@@ -894,8 +880,8 @@ namespace AIAssistant
                     auto jsonResult = simdjson::to_json_string(mappingValue);
                     if (jsonResult.error() != simdjson::SUCCESS)
                     {
-                        errorMessage = "failed to serialize dataflow mapping value";
-                        return false;
+                        return std::unexpected(ParserError::Make(
+                            ParserErrorCode::SimdjsonError, "failed to serialize dataflow mapping value"));
                     }
 
                     std::string_view jsonView = jsonResult.value();
@@ -920,11 +906,11 @@ namespace AIAssistant
         if (dataflowOut.m_FromTask.empty() || dataflowOut.m_FromOutput.empty() || dataflowOut.m_ToTask.empty() ||
             dataflowOut.m_ToInput.empty())
         {
-            errorMessage = "dataflow entry missing required fields (from_task, from_output, to_task, to_input)";
-            return false;
+            return std::unexpected(ParserError::Make(ParserErrorCode::MissingField,
+                "dataflow entry missing required fields (from_task, from_output, to_task, to_input)"));
         }
 
-        return true;
+        return {};
     }
 
     // ---------------------------------------------------------------------
@@ -935,20 +921,20 @@ namespace AIAssistant
     // Filters (v1.1)
     // ---------------------------------------------------------------------
 
-    bool WorkflowJsonParser::ParseFilters(simdjson::ondemand::value& jsonValue, std::vector<FilterDef>& filtersOut,
-                                          std::string& errorMessage) const
+    std::expected<void, ParserError>
+        WorkflowJsonParser::ParseFilters(simdjson::ondemand::value& jsonValue,
+                                         std::vector<FilterDef>& filtersOut) const
     {
-        if (!RequireArray(jsonValue, "filters", errorMessage))
+        if (auto r = RequireArray(jsonValue, "filters"); !r)
         {
-            return false;
+            return std::unexpected(std::move(r.error()));
         }
 
         auto arrayResult = jsonValue.get_array();
         if (arrayResult.error() != simdjson::SUCCESS)
         {
-            errorMessage = "failed to read 'filters' array: ";
-            errorMessage += simdjson::error_message(arrayResult.error());
-            return false;
+            return std::unexpected(ParserError::Make(ParserErrorCode::SimdjsonError,
+                std::string("failed to read 'filters' array: ") + simdjson::error_message(arrayResult.error())));
         }
 
         simdjson::ondemand::array filterArray = arrayResult.value();
@@ -957,35 +943,35 @@ namespace AIAssistant
         {
             if (filtersOut.size() >= WorkflowParserLimits::kMaxFilters)
             {
-                errorMessage = "'filters' exceeds max count (" +
-                               std::to_string(WorkflowParserLimits::kMaxFilters) + ")";
-                return false;
+                return std::unexpected(ParserError::Make(ParserErrorCode::ValueOutOfRange,
+                    "'filters' exceeds max count (" +
+                        std::to_string(WorkflowParserLimits::kMaxFilters) + ")"));
             }
             FilterDef filter;
 
             auto objectResult = filterValue.get_object();
             if (objectResult.error() != simdjson::SUCCESS)
             {
-                errorMessage = "filter entry must be an object: ";
-                errorMessage += simdjson::error_message(objectResult.error());
-                return false;
+                return std::unexpected(ParserError::Make(ParserErrorCode::TypeMismatch,
+                    std::string("filter entry must be an object: ") +
+                        simdjson::error_message(objectResult.error())));
             }
 
             simdjson::ondemand::object filterObject = objectResult.value();
 
-            if (!ParseFilter(filterObject, filter, errorMessage))
+            if (auto r = ParseFilter(filterObject, filter); !r)
             {
-                return false;
+                return std::unexpected(std::move(r.error()));
             }
 
             filtersOut.push_back(std::move(filter));
         }
 
-        return true;
+        return {};
     }
 
-    bool WorkflowJsonParser::ParseFilter(simdjson::ondemand::object& jsonObject, FilterDef& filterOut,
-                                         std::string& errorMessage) const
+    std::expected<void, ParserError>
+        WorkflowJsonParser::ParseFilter(simdjson::ondemand::object& jsonObject, FilterDef& filterOut) const
     {
         bool hasId = false;
         bool hasSource = false;
@@ -996,9 +982,9 @@ namespace AIAssistant
             auto keyResult = field.unescaped_key();
             if (keyResult.error() != simdjson::SUCCESS)
             {
-                errorMessage = "failed to read filter field key: ";
-                errorMessage += simdjson::error_message(keyResult.error());
-                return false;
+                return std::unexpected(ParserError::Make(ParserErrorCode::SimdjsonError,
+                    std::string("failed to read filter field key: ") +
+                        simdjson::error_message(keyResult.error())));
             }
 
             std::string_view keyView = keyResult.value();
@@ -1010,32 +996,32 @@ namespace AIAssistant
             {
                 if (!ElementToString(value, filterOut.m_Id))
                 {
-                    errorMessage = "filter field 'id' must be string";
-                    return false;
+                    return std::unexpected(ParserError::Make(
+                        ParserErrorCode::TypeMismatch, "filter field 'id' must be string"));
                 }
 
                 hasId = true;
             }
             else if (key == "source")
             {
-                if (!RequireObject(value, "filter.source", errorMessage))
+                if (auto r = RequireObject(value, "filter.source"); !r)
                 {
-                    return false;
+                    return std::unexpected(std::move(r.error()));
                 }
 
                 auto sourceObjectResult = value.get_object();
                 if (sourceObjectResult.error() != simdjson::SUCCESS)
                 {
-                    errorMessage = "failed to read filter 'source' object: ";
-                    errorMessage += simdjson::error_message(sourceObjectResult.error());
-                    return false;
+                    return std::unexpected(ParserError::Make(ParserErrorCode::SimdjsonError,
+                        std::string("failed to read filter 'source' object: ") +
+                            simdjson::error_message(sourceObjectResult.error())));
                 }
 
                 simdjson::ondemand::object sourceObject = sourceObjectResult.value();
 
-                if (!ParseFilterSource(sourceObject, filterOut.m_Source, errorMessage))
+                if (auto r = ParseFilterSource(sourceObject, filterOut.m_Source); !r)
                 {
-                    return false;
+                    return std::unexpected(std::move(r.error()));
                 }
 
                 hasSource = true;
@@ -1044,8 +1030,8 @@ namespace AIAssistant
             {
                 if (!ElementToString(value, filterOut.m_Binding))
                 {
-                    errorMessage = "filter field 'binding' must be string";
-                    return false;
+                    return std::unexpected(ParserError::Make(
+                        ParserErrorCode::TypeMismatch, "filter field 'binding' must be string"));
                 }
 
                 hasBinding = true;
@@ -1055,8 +1041,8 @@ namespace AIAssistant
                 auto maxItemsResult = value.get_int64();
                 if (maxItemsResult.error() != simdjson::SUCCESS)
                 {
-                    errorMessage = "filter field 'max_items' must be integer";
-                    return false;
+                    return std::unexpected(ParserError::Make(
+                        ParserErrorCode::TypeMismatch, "filter field 'max_items' must be integer"));
                 }
 
                 filterOut.m_MaxItems = static_cast<uint32_t>(maxItemsResult.value());
@@ -1069,45 +1055,45 @@ namespace AIAssistant
 
         if (!hasId)
         {
-            errorMessage = "filter missing required field: id";
-            return false;
+            return std::unexpected(ParserError::Make(
+                ParserErrorCode::MissingField, "filter missing required field: id"));
         }
 
         if (!hasSource)
         {
-            errorMessage = "filter '" + filterOut.m_Id + "' missing required field: source";
-            return false;
+            return std::unexpected(ParserError::Make(ParserErrorCode::MissingField,
+                "filter '" + filterOut.m_Id + "' missing required field: source"));
         }
 
         if (!hasBinding)
         {
-            errorMessage = "filter '" + filterOut.m_Id + "' missing required field: binding";
-            return false;
+            return std::unexpected(ParserError::Make(ParserErrorCode::MissingField,
+                "filter '" + filterOut.m_Id + "' missing required field: binding"));
         }
 
         if (filterOut.m_Source.m_Kind.empty())
         {
-            errorMessage = "filter '" + filterOut.m_Id + "' source missing required field: kind";
-            return false;
+            return std::unexpected(ParserError::Make(ParserErrorCode::MissingField,
+                "filter '" + filterOut.m_Id + "' source missing required field: kind"));
         }
 
         LOG_APP_INFO("[filter] parsed filter id={} kind={} binding={} maxItems={}", filterOut.m_Id,
                      filterOut.m_Source.m_Kind, filterOut.m_Binding, filterOut.m_MaxItems);
 
-        return true;
+        return {};
     }
 
-    bool WorkflowJsonParser::ParseFilterSource(simdjson::ondemand::object& jsonObject, FilterSource& sourceOut,
-                                               std::string& errorMessage) const
+    std::expected<void, ParserError>
+        WorkflowJsonParser::ParseFilterSource(simdjson::ondemand::object& jsonObject, FilterSource& sourceOut) const
     {
         for (auto field : jsonObject)
         {
             auto keyResult = field.unescaped_key();
             if (keyResult.error() != simdjson::SUCCESS)
             {
-                errorMessage = "failed to read filter source field key: ";
-                errorMessage += simdjson::error_message(keyResult.error());
-                return false;
+                return std::unexpected(ParserError::Make(ParserErrorCode::SimdjsonError,
+                    std::string("failed to read filter source field key: ") +
+                        simdjson::error_message(keyResult.error())));
             }
 
             std::string_view keyView = keyResult.value();
@@ -1119,24 +1105,24 @@ namespace AIAssistant
             {
                 if (!ElementToString(value, sourceOut.m_Kind))
                 {
-                    errorMessage = "filter source field 'kind' must be string";
-                    return false;
+                    return std::unexpected(ParserError::Make(
+                        ParserErrorCode::TypeMismatch, "filter source field 'kind' must be string"));
                 }
             }
             else if (key == "path")
             {
                 if (!ElementToString(value, sourceOut.m_Path))
                 {
-                    errorMessage = "filter source field 'path' must be string";
-                    return false;
+                    return std::unexpected(ParserError::Make(
+                        ParserErrorCode::TypeMismatch, "filter source field 'path' must be string"));
                 }
             }
             else if (key == "delimiter")
             {
                 if (!ElementToString(value, sourceOut.m_Delimiter))
                 {
-                    errorMessage = "filter source field 'delimiter' must be string";
-                    return false;
+                    return std::unexpected(ParserError::Make(
+                        ParserErrorCode::TypeMismatch, "filter source field 'delimiter' must be string"));
                 }
             }
             else if (key == "has_header")
@@ -1144,8 +1130,8 @@ namespace AIAssistant
                 auto boolResult = value.get_bool();
                 if (boolResult.error() != simdjson::SUCCESS)
                 {
-                    errorMessage = "filter source field 'has_header' must be bool";
-                    return false;
+                    return std::unexpected(ParserError::Make(
+                        ParserErrorCode::TypeMismatch, "filter source field 'has_header' must be bool"));
                 }
 
                 sourceOut.m_HasHeader = boolResult.value();
@@ -1154,8 +1140,8 @@ namespace AIAssistant
             {
                 if (!ElementToString(value, sourceOut.m_Range))
                 {
-                    errorMessage = "filter source field 'range' must be string";
-                    return false;
+                    return std::unexpected(ParserError::Make(
+                        ParserErrorCode::TypeMismatch, "filter source field 'range' must be string"));
                 }
             }
             else if (key == "skip_empty")
@@ -1163,8 +1149,8 @@ namespace AIAssistant
                 auto boolResult = value.get_bool();
                 if (boolResult.error() != simdjson::SUCCESS)
                 {
-                    errorMessage = "filter source field 'skip_empty' must be bool";
-                    return false;
+                    return std::unexpected(ParserError::Make(
+                        ParserErrorCode::TypeMismatch, "filter source field 'skip_empty' must be bool"));
                 }
 
                 sourceOut.m_SkipEmpty = boolResult.value();
@@ -1173,16 +1159,16 @@ namespace AIAssistant
             {
                 if (!ElementToString(value, sourceOut.m_IndexPath))
                 {
-                    errorMessage = "filter source field 'index_path' must be string";
-                    return false;
+                    return std::unexpected(ParserError::Make(
+                        ParserErrorCode::TypeMismatch, "filter source field 'index_path' must be string"));
                 }
             }
             else if (key == "query")
             {
                 if (!ElementToString(value, sourceOut.m_Query))
                 {
-                    errorMessage = "filter source field 'query' must be string";
-                    return false;
+                    return std::unexpected(ParserError::Make(
+                        ParserErrorCode::TypeMismatch, "filter source field 'query' must be string"));
                 }
             }
             else if (key == "fields")
@@ -1190,8 +1176,8 @@ namespace AIAssistant
                 auto arrayResult = value.get_array();
                 if (arrayResult.error() != simdjson::SUCCESS)
                 {
-                    errorMessage = "filter source field 'fields' must be array of strings";
-                    return false;
+                    return std::unexpected(ParserError::Make(
+                        ParserErrorCode::TypeMismatch, "filter source field 'fields' must be array of strings"));
                 }
 
                 simdjson::ondemand::array fieldsArray = arrayResult.value();
@@ -1200,8 +1186,8 @@ namespace AIAssistant
                     auto stringResult = fieldValue.get_string(false);
                     if (stringResult.error() != simdjson::SUCCESS)
                     {
-                        errorMessage = "filter source field 'fields' must be array of strings";
-                        return false;
+                        return std::unexpected(ParserError::Make(
+                            ParserErrorCode::TypeMismatch, "filter source field 'fields' must be array of strings"));
                     }
 
                     std::string_view fieldView = stringResult.value();
@@ -1212,32 +1198,32 @@ namespace AIAssistant
             {
                 if (!ElementToString(value, sourceOut.m_Connection))
                 {
-                    errorMessage = "filter source field 'connection' must be string";
-                    return false;
+                    return std::unexpected(ParserError::Make(
+                        ParserErrorCode::TypeMismatch, "filter source field 'connection' must be string"));
                 }
             }
             else if (key == "base_url")
             {
                 if (!ElementToString(value, sourceOut.m_BaseUrl))
                 {
-                    errorMessage = "filter source field 'base_url' must be string";
-                    return false;
+                    return std::unexpected(ParserError::Make(
+                        ParserErrorCode::TypeMismatch, "filter source field 'base_url' must be string"));
                 }
             }
             else if (key == "project_id")
             {
                 if (!ElementToString(value, sourceOut.m_ProjectId))
                 {
-                    errorMessage = "filter source field 'project_id' must be string";
-                    return false;
+                    return std::unexpected(ParserError::Make(
+                        ParserErrorCode::TypeMismatch, "filter source field 'project_id' must be string"));
                 }
             }
             else if (key == "key_name")
             {
                 if (!ElementToString(value, sourceOut.m_KeyName))
                 {
-                    errorMessage = "filter source field 'key_name' must be string";
-                    return false;
+                    return std::unexpected(ParserError::Make(
+                        ParserErrorCode::TypeMismatch, "filter source field 'key_name' must be string"));
                 }
             }
             else if (key == "page_size")
@@ -1245,8 +1231,8 @@ namespace AIAssistant
                 auto pageSizeResult = value.get_int64();
                 if (pageSizeResult.error() != simdjson::SUCCESS)
                 {
-                    errorMessage = "filter source field 'page_size' must be integer";
-                    return false;
+                    return std::unexpected(ParserError::Make(
+                        ParserErrorCode::TypeMismatch, "filter source field 'page_size' must be integer"));
                 }
 
                 sourceOut.m_PageSize = static_cast<uint32_t>(pageSizeResult.value());
@@ -1257,7 +1243,7 @@ namespace AIAssistant
             }
         }
 
-        return true;
+        return {};
     }
 
 } // namespace AIAssistant

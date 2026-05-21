@@ -64,12 +64,13 @@ ICloudTaskExecutor       — base class (resolves connection + credentials, dele
 | File | Purpose |
 |------|---------|
 | `connectorHttp.h/cpp` | Shared libcurl helpers used by every cloud connector + executor.  `ApplyHardenedDefaults` sets `SSL_VERIFYPEER` / `SSL_VERIFYHOST` / `FOLLOWLOCATION=0` / CAINFO and (for `https://`) installs an `OPENSOCKETFUNCTION` that rejects DNS-resolved local-net IPs.  `ValidatePublicHttpEndpoint` is the SSRF gate for user-supplied endpoint URLs.  `UrlEncodeComponent` + `UrlEncodePathSegments` are the shared percent-encode helpers — every cloud executor that splices user-controlled values into URLs runs them through these (`UrlEncodeComponent` for single segments, `UrlEncodePathSegments` for `/`-separated paths with per-segment `..`/`.`/empty rejection).  Defense-in-depth after each executor's per-provider allowlist regex on identifier shape. |
-| `cloudConnector.h` | `ICloudConnector` interface, `CloudConnection`, `CloudCredentials`, `CloudAuthType` |
+| `cloudConnector.h` | `ICloudConnector` interface, `CloudConnection`, `CloudCredentials`, `CloudAuthType`.  `TestConnection` returns `[[nodiscard]] std::expected<void, ConnectorError>` (Sitting 7b); see `connectorError.h` for the 9-variant `Code` enum (`InvalidConfig` / `InvalidEndpoint` / `CredentialMissing` / `CredentialInvalid` / `OAuthError` / `NetworkError` / `AuthFailure` / `HttpError` / `UnknownError`). |
+| `connectorError.h/cpp` | Typed error returned by `TestConnection`, `ValidatePublicHttpEndpoint`, `ValidatePostgresParams`.  `ConnectorError{Code, m_Details}` + `Make()` factory + `Describe()` switch helper.  Per-site `Code` selection: param missing/blank → `InvalidConfig`, SSRF/syntax rejection → `InvalidEndpoint`, `ResolveCredentials` failure (bridged) → `CredentialMissing`, CRLF / structurally-bad creds → `CredentialInvalid`, `curl_easy_init` / `CURLE != OK` → `NetworkError`, HTTP 401/403 → `AuthFailure`, HTTP ≥ 400 (other) → `HttpError`.  |
 | `cloudConnectorRegistry` | Registry mapping type names to connector instances |
 | `cloudConnectionManager` | In-memory CRUD store for `CloudConnection` configs |
 | `cloudTaskExecutor` | `ICloudTaskExecutor` base class with connection/credential/circuit-breaker wiring |
 | `cloudRetryPolicy` | Exponential backoff with jitter, Retry-After header support |
-| `cloudCircuitBreaker` | Per-connection circuit breaker (Closed/Open/HalfOpen) |
+| `cloudCircuitBreaker` | Per-connection circuit breaker (Closed/Open/HalfOpen).  `RecordFailure(name, ConnectorErrorCode)` stores the latest typed code per circuit; `ConnectionHealth::m_LastFailureCode` surfaces it via `GetHealthSummary` for `/api/status::connection_health[].last_failure_code`. |
 | `cloudConnectionPool` | Generic connection pool for persistent-connection providers (libpq) |
 | `providerRateLimitPolicy` | Per-provider rate-limit awareness (burst limits, min intervals) |
 | `taskCancellationToken` | Cooperative cancellation for long-running cloud operations |

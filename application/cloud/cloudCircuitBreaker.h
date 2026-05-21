@@ -25,9 +25,12 @@
 
 #include <chrono>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+#include "cloud/connectorError.h"
 
 namespace AIAssistant
 {
@@ -68,8 +71,12 @@ namespace AIAssistant
         // Record a successful operation for the named connection.
         void RecordSuccess(std::string const& connectionName);
 
-        // Record a failed operation for the named connection.
-        void RecordFailure(std::string const& connectionName);
+        // Record a failed operation for the named connection.  `errorCode` (when
+        // provided) is stored as the latest failure category for this circuit
+        // and surfaced via `GetHealthSummary().m_LastFailureCode`.  Callers
+        // without a typed code (legacy JCWF cloud tasks) leave it nullopt.
+        void RecordFailure(std::string const& connectionName,
+                           std::optional<ConnectorErrorCode> errorCode = std::nullopt);
 
         // Get the current state for a named connection.
         State GetState(std::string const& connectionName) const;
@@ -88,6 +95,13 @@ namespace AIAssistant
             // the dashboard Cloud LED so a merely-configured-but-never-proved
             // connection is reported as "unknown" instead of "healthy".
             bool m_EverSucceeded{false};
+            // Latest typed failure code (set by `RecordFailure(name, code)`).
+            // nullopt = no failure recorded with a typed code yet (either the
+            // connection has only seen successes, or only legacy-shape failures).
+            // Surfaced as `/api/status::connection_health[].last_failure_code`
+            // so the dashboard can show a category beyond just consecutive-fail
+            // counts.
+            std::optional<ConnectorErrorCode> m_LastFailureCode;
         };
         std::vector<ConnectionHealth> GetHealthSummary() const;
 
@@ -102,6 +116,7 @@ namespace AIAssistant
             int m_HalfOpenProbes{0};
             std::chrono::steady_clock::time_point m_OpenedAt{};
             bool m_EverSucceeded{false};
+            std::optional<ConnectorErrorCode> m_LastFailureCode;
         };
 
         Config m_Config;

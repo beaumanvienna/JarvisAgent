@@ -23,10 +23,12 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <filesystem>
 #include <string>
 
 #include "simdjson/simdjson.h"
+#include "workflow/parserError.h"
 #include "workflow/workflowTypes.h"
 
 namespace AIAssistant
@@ -82,5 +84,6 @@ namespace AIAssistant
         return true;
     }
 
-    bool ParseTaskQueueBinding(simdjson::ondemand::value& value, QueueBinding& binding, std::string& errorMessage);
+    [[nodiscard]] std::expected<void, ParserError>
+        ParseTaskQueueBinding(simdjson::ondemand::value& value, QueueBinding& binding);
 }

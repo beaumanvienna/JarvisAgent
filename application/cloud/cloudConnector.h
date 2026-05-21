@@ -23,9 +23,12 @@
 
 #pragma once
 
+#include <expected>
 #include <map>
 #include <string>
 #include <string_view>
+
+#include "cloud/connectorError.h"
 
 namespace AIAssistant
 {
@@ -113,8 +116,11 @@ namespace AIAssistant
         virtual std::string GetType() const = 0;
 
         // Test connectivity using the given connection config.
-        // Returns true on success, populates errorMessage on failure.
-        virtual bool TestConnection(CloudConnection const& connection, std::string& errorMessage) = 0;
+        // Returns void on success; on failure, `ConnectorError::m_Code` is the
+        // machine-actionable category (recorded on the circuit breaker by the
+        // single REST caller; consumed by retry policies) and `m_Details` is
+        // the human-readable detail for the REST response + ERROR log.
+        [[nodiscard]] virtual std::expected<void, ConnectorError> TestConnection(CloudConnection const& connection) = 0;
 
         // Resolve credentials from KeyManager for the given connection.
         // Handles OAuth refresh, JWT generation, SigV4 derivation, etc.

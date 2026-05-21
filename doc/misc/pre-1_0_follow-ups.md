@@ -7,7 +7,7 @@ Closeout plan for the three tail-end groups tracked in `todo.md` before the alph
 - **Loose follow-ups** — 14 items (todo.md said 11; recount confirmed 14)
 - **KeyManager hardening tail** (carry-over from prior hand-off, never propagated into `todo.md`) — 4 items
 
-Total entering this plan: **22 items**. Closed at intake: **1** (§5i.3 — already fixed in code, todo.md was stale). Net actionable: **21 items**, organised into **14 sittings** ordered safety-first → cleanup → verification → tooling → post-1.0 tail.  **Sittings 1+2 closed 2026-05-18**; **Sittings 3+4 closed 2026-05-18**; **Sitting 5 closed 2026-05-19**; **Sitting 6 closed 2026-05-19**; **Sitting 7a closed 2026-05-19** (with 7b + 7c carved out as follow-ups for the connector + parser sweeps) — see `doc/misc/hand-off.md` for the migration records.  **9 sittings remain** as of 2026-05-19 (Sittings 7b + 7c + 8 + 9 + 10 + 11 + 12 + 13 + 14).
+Total entering this plan: **22 items**. Closed at intake: **1** (§5i.3 — already fixed in code, todo.md was stale). Net actionable: **21 items**, organised into **14 sittings** ordered safety-first → cleanup → verification → tooling → post-1.0 tail.  **Sittings 1+2 closed 2026-05-18**; **Sittings 3+4 closed 2026-05-18**; **Sitting 5 closed 2026-05-19**; **Sitting 6 closed 2026-05-19**; **Sitting 7a closed 2026-05-19** (with 7b + 7c carved out as follow-ups for the connector + parser sweeps); **Sittings 7b + 7c closed 2026-05-20** — the std::expected API-shape sweep is now complete across all three subsystems (registry / connectors / parsers).  See `doc/misc/hand-off.md` for the migration records.  **7 sittings remain** as of 2026-05-20 (Sittings 8 + 9 + 10 + 11 + 12 + 13 + 14).
 
 Predecessor plans (context, not dependencies):
 - `cybersec-hardening-dev-plan.md` — §18 four-domain hardening (S1–S4, complete)
@@ -101,25 +101,13 @@ Pilot conversion: `WorkflowRegistry::RemoveWorkflow` (the smallest surface — 1
 
 All 4 binary configs build clean.  Regression tests green: `test_mock_dispatch_hermetic`, `test_bedrock_sigv4` (SigV4 KAT signature unchanged), `test_api5_mock_errors` 6/6.
 
-### Sitting 7b — Connector subsystem sweep (deferred from 7)
+### Sitting 7b — Connector subsystem sweep — **closed 2026-05-20**
 
-**Scope.** Convert `ICloudConnector::TestConnection` base virtual + 13 concrete overrides + `ConnectorHttp::ValidatePublicHttpEndpoint` + `PostgresConnector::ValidatePostgresParams` to `std::expected<void, ConnectorError>`.  ~190 return sites across the 13 connector `.cpp` files + the single caller in `webServer.cpp` + ~17 intra-connector callers of ValidatePublicHttpEndpoint.
+`ICloudConnector::TestConnection` base virtual + all 13 concrete overrides (azureBlob, email, gcs, gitHub, googleSheets, jira, oneDrive, polarion, postgres, redmine, s3, slack, snowflake) + `ConnectorHttp::ValidatePublicHttpEndpoint` + `PostgresConnector::ValidatePostgresParams` flipped to `[[nodiscard]] std::expected<void, ConnectorError>`.  Per-site `Code` selection: param missing/blank → `InvalidConfig`; endpoint SSRF rejection → `InvalidEndpoint`; ResolveCredentials failure (bridge) → `CredentialMissing`; CRLF / structurally-bad credential → `CredentialInvalid`; `curl_easy_init()` / `CURLE != OK` → `NetworkError`; HTTP 401/403 → `AuthFailure`; HTTP ≥ 400 (other) → `HttpError`.  `CloudCircuitBreaker::RecordFailure` extended to accept optional `ConnectorErrorCode`; `ConnectionHealth::m_LastFailureCode` propagates through `GetHealthSummary` and surfaces on `/api/status::connection_health[].last_failure_code`.  `HandleConnectionTestPost` echoes `code` (typed) + `message` (Details) on failure.  All 4 binary configs build clean; `test_mock_dispatch_hermetic`, `test_bedrock_sigv4` (SigV4 KAT unchanged), `test_api1_mock_errors` 6/6 green.  Live verification: misconfigured my-s3 connection test → HTTP 400 + `code: "network_error"` + breaker records `last_failure_code: "network_error"`.  See `doc/misc/hand-off.md` 2026-05-20 entry.
 
-**Per-site work.**  Each `errorMessage = "X"; return false;` becomes `return std::unexpected(ConnectorError::Make(Code::Y, "X"));`.  Code selection per site requires reading context (InvalidConfig / CredentialMissing / CredentialInvalid / InvalidEndpoint / NetworkError / AuthFailure / HttpError / OAuthError / UnknownError — see `application/cloud/connectorError.h`).
+### Sitting 7c — Workflow JSON parser sweep — **closed 2026-05-20**
 
-**Acceptance.** Build all 5 targets clean; the single REST caller in `webServer.cpp::HandleTestConnection` records typed `ConnectorErrorCode` on the circuit breaker (currently records only the boolean) and echoes `Describe(code)` + `m_Details` to the JSON response.
-
-**Effort.** Medium-large (~half-day to a day). Mechanical sweep; the typing-per-site is the careful part.
-
-### Sitting 7c — Workflow JSON parser sweep (deferred from 7)
-
-**Scope.** Convert the ~15 chained parser methods in `workflowJsonParser.{h,cpp}` + `workflowJsonParserDetails.{h,cpp}` (`ParseTask`, `ParseTaskInputs`, `ParseTaskOutputs`, `ParseTaskQueueBinding`, `ParseTaskEnvironment`, `ParseFilter`, `ParseFilterSource`, `ParseFilters`, `ParseTrigger`, `ParseTriggers`, `ParseDataflow`, `ParseSingleDataflow`, `ParseRetries`, `ParseDefaults`, `ParseControlNodes`, plus `RequireObject` / `RequireArray` shape helpers) to `std::expected<void, ParserError>`.
-
-**Why all-or-nothing.** Inter-method calling: `ParseTasks` calls `ParseTask` calls `ParseTaskInputs` etc.  Converting only some leaves awkward mixed-signature internal calls.  Single subsystem sweep.
-
-**Acceptance.** Build clean; JCWF parse rejections emit typed `ParserErrorCode` + the JSON-path-bearing `m_Details`; the existing 36-case fault batteries stay green (parsers don't surface in the parser-fault suite directly, but JCWF-shape regressions surface as the validator can't load a workflow).
-
-**Effort.** Medium (~half-day). Bulk is the 15-method sweep + ~20 intra-file caller updates.
+All 23 parser methods + 2 Require helpers + 1 free-standing `ParseTaskQueueBinding` flipped to `[[nodiscard]] std::expected<void, ParserError>`: 3 public entry points (`ParseWorkflowJson` / `ParseGlobalJson` / `ParseCanvasJson`), `ParseRootObject`, and the chain of 17 sub-parsers (`ParseTriggers`/`ParseTrigger`, `ParseTasks`/`ParseTask`, `ParseTaskInputs`/`ParseTaskOutputs`/`ParseTaskEnvironment`/`ParseTaskQueueBinding`, `ParseDataflow`/`ParseSingleDataflow`, `ParseRetries`/`ParseDefaults`, `ParseFilters`/`ParseFilter`/`ParseFilterSource`, `ParseControlNodes`/`ParseControlflow`).  Per-site `Code` selection: array/object shape rejection → `TypeMismatch`; required-field absent → `MissingField`; cap-exceeded / negative-value / out-of-allowlist → `ValueOutOfRange`; simdjson decode failure → `SimdjsonError`.  ~150 return sites total.  Utility helpers `ExtractRawJson` and `ElementToString` deliberately left on the legacy bool+errorMessage shape (out of plan scope; parser methods bridge their failures into typed `SimdjsonError` / `TypeMismatch` at the call site).  External callers updated: `workflowRegistry.cpp` (5 sites: registry CRUD + container load + sub-workflow load), `aiJcwfService.cpp` (1 site), `webServer_studio.cpp` (2 sites: POST + PUT), `webServer_helpers.h` (1 site: ValidateJcwfJsonText).  All 4 binary configs build clean.  Verified end-to-end: all 32 shipping JCWFs reload cleanly; malformed JCWFs return human-readable typed-error messages (e.g. `"workflow missing required field: tasks"`, `"tasks must be an object"`, `"task field 'timeout_ms' must be non-negative, got -5"`); regression suite green (`test_mock_dispatch_hermetic`, `test_bedrock_sigv4` KAT unchanged, `test_api1_mock_errors` 6/6).  See `doc/misc/hand-off.md` 2026-05-20 entry.
 
 ---
 

@@ -106,35 +106,38 @@ namespace AIAssistant
         return true;
     }
 
-    bool OneDriveConnector::TestConnection(CloudConnection const& connection, std::string& errorMessage)
+    std::expected<void, ConnectorError> OneDriveConnector::TestConnection(CloudConnection const& connection)
     {
         auto clientIdIt = connection.m_Params.find("client_id");
         if (clientIdIt == connection.m_Params.end() || clientIdIt->second.empty())
         {
-            errorMessage = "OneDrive connection requires 'client_id' parameter";
-            return false;
+            return std::unexpected(ConnectorError::Make(
+                ConnectorErrorCode::InvalidConfig, "OneDrive connection requires 'client_id' parameter"));
         }
 
-        if (!connection.m_Endpoint.empty() &&
-            !ConnectorHttp::ValidatePublicHttpEndpoint(connection.m_Endpoint, errorMessage))
+        if (!connection.m_Endpoint.empty())
         {
-            LOG_SECURITY_WARN("[security] onedrive_endpoint_rejected connection='{}' reason='{}'",
-                              connection.m_Name, errorMessage);
-            return false;
+            if (auto r = ConnectorHttp::ValidatePublicHttpEndpoint(connection.m_Endpoint); !r)
+            {
+                LOG_SECURITY_WARN("[security] onedrive_endpoint_rejected connection='{}' reason='{}'",
+                                  connection.m_Name, r.error().m_Details);
+                return std::unexpected(std::move(r.error()));
+            }
         }
 
         CloudCredentials credentials;
-        if (!ResolveCredentials(connection, credentials, errorMessage))
+        std::string credErr;
+        if (!ResolveCredentials(connection, credentials, credErr))
         {
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::CredentialMissing, std::move(credErr)));
         }
 
         if (ICloudTaskExecutor::ContainsCrlf(credentials.m_Token))
         {
-            errorMessage = "OneDrive bearer token contains CR/LF — refusing to send";
             ConnectorHttp::IncrementCredentialCrlfRejection();
             LOG_SECURITY_WARN("[security] onedrive_test_bearer_crlf_rejected connection='{}'", connection.m_Name);
-            return false;
+            return std::unexpected(ConnectorError::Make(
+                ConnectorErrorCode::CredentialInvalid, "OneDrive bearer token contains CR/LF — refusing to send"));
         }
 
         // GET /me/drive — verifies token and returns drive info
@@ -143,8 +146,7 @@ namespace AIAssistant
         CURL* curl = curl_easy_init();
         if (!curl)
         {
-            errorMessage = "curl_easy_init() failed";
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::NetworkError, "curl_easy_init() failed"));
         }
 
         std::string responseBody;
@@ -169,26 +171,26 @@ namespace AIAssistant
 
         if (res != CURLE_OK)
         {
-            errorMessage = std::string("OneDrive test failed: ") + curl_easy_strerror(res);
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::NetworkError,
+                std::string("OneDrive test failed: ") + curl_easy_strerror(res)));
         }
 
-        if (httpCode == 401)
+        if (httpCode == 401 || httpCode == 403)
         {
-            errorMessage = "OneDrive test failed: unauthorized (HTTP 401) — token may be expired or invalid";
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::AuthFailure,
+                "OneDrive test failed: HTTP " + std::to_string(httpCode) + " — token may be expired or invalid"));
         }
 
         if (httpCode >= 400)
         {
-            errorMessage = "OneDrive test failed: HTTP " + std::to_string(httpCode);
+            std::string details = "OneDrive test failed: HTTP " + std::to_string(httpCode);
             if (!responseBody.empty() && responseBody.size() < 500)
             {
-                errorMessage += ": " + responseBody;
+                details += ": " + responseBody;
             }
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::HttpError, std::move(details)));
         }
 
-        return true;
+        return {};
     }
 } // namespace AIAssistant

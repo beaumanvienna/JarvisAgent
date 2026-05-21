@@ -15,19 +15,152 @@ Keep entries self-contained — a fresh-context Claude should be able to read ju
 
 ---
 
-## 2026-05-20 (Sittings 3–7a regression triage + CI bringup + doc audit + JCWF template-prereq bug) → next session
+## 2026-05-20 evening (Sittings 7b + 7c + `m_RequiredAiProviders` template-aware fix + doc sweep) → next session
 
-Three-act session.  Act 1: ran the full test matrix on Studio Release + Studio Debug against the Sittings 3+4+5+5fu+6+7a working tree and closed out the 10 dispatch failures Sitting 7a flagged for triage — **zero real C++ regressions**, all explained as test-harness issues.  Act 2: JC committed Sittings 3-7a + this-session follow-ups (one big commit), CI lit up red across every target on the C++23 cppdialect bump; bumped premake5 in CI from `v5.0.0-beta2` to `v5.0.0-beta8` (the minimum tag that accepts `cppdialect "C++23"`), then resolved two follow-on CI breakages from beta8 quirks (exec-bit missing in tarball + Rocky 9's glibc 2.34 vs beta8's glibc-2.38 binary).  Act 3: doc audit fixed three drift items in user-facing docs; bug surfaced in `WorkflowDefinition::m_RequiredAiProviders` (template-unaware) and worked around at the JCWF layer.
+Continuation of the same calendar day as the morning entry below.  After morning CI bringup landed all 11 checks green (verified mid-session by JC's screenshot), turned to the deferred `WorkflowDefinition::m_RequiredAiProviders` template-unaware bug — fixed properly this time, restoring the `{{defaults.ai.provider}}` override in vehicleTroubleshootingGuide.  Then closed out **Sittings 7b** (connector `std::expected` sweep) and **Sitting 7c** (parser `std::expected` sweep) — the API-shape sweep is now structurally complete across all three subsystems (`RegistryError` / `ConnectorError` / `ParserError`) that 7a scaffolded.
 
-Three pushes landed today.  CI was re-running at end of session.
+### Part A — `m_RequiredAiProviders` template-aware fix (deferred from morning)
 
-### What landed (committed across 3 pushes)
+**Problem.** `workflowRegistry.cpp::ExtractProviderFromParams` read `task.m_ParamsJson["provider"]` as a raw string at workflow-load time.  JCWFs using `"provider": "{{defaults.ai.provider}}"` had that literal template string stored in `m_RequiredAiProviders`, breaking the prereq check (`workflowRuntimeManager.cpp::2883` looking for an interface named `{{defaults.ai.provider}}`) and the dashboard's `interface_names` field.
+
+**Fix.** Two changes:
+1. Lifted `BuildDefaultsMap(defaultsJson) -> map<string,string>` and `ExpandWithDefaults(raw, defaultsMap) -> string` from file-private statics in `aiCallTaskExecutor.cpp` into public API in `templateEngine.{h,cpp}`.  Dispatch-time call sites in `aiCallTaskExecutor.cpp` now use the public helpers (no code change; lexical lookup finds them via `namespace AIAssistant`).
+2. `ExtractProviderFromParams(paramsJson, defaultsJson)` now takes the workflow's `m_DefaultsJson` as a second parameter and, when the raw provider string contains `{{`, expands it against the defaults map before returning.  Both call sites in workflowRegistry.cpp (root + sub-workflow loaders) pass the matching `m_DefaultsJson`.
+
+**Restored override.** With the C++ fix in place, restored `"provider": "{{defaults.ai.provider}}"` + `"model": "{{defaults.ai.model}}"` in all 3 ai_call tasks of `workflows/vehicleTroubleshootingGuide.json`; repacked both the runtime + canonical JCWF zips (`workflows/vehicleTroubleshootingGuide.jcwf` + `example/workflows/vehicleTroubleshootingGuide.jcwf`).
+
+**Verified live.**  Studio Debug reload → `GET /api/workflows::vehicleTroubleshootingGuide.interface_names` returned `["api.openai.com/gpt-4.1-mini/API1"]` (resolved interface name, not raw template).  Manual run → HTTP 202 + `enqueued: true`; the 3 ai_calls reached dispatch before my immediate cancel, confirming the prereq check passed end-to-end.  Log clean — no `ai_prereq_missing`.
+
+### Part B — Sitting 7b (Connector subsystem sweep)
+
+| Theme | Files | Why |
+|---|---|---|
+| **`ICloudConnector::TestConnection` flipped** | `application/cloud/cloudConnector.h` (base virtual) + 13 connector .h files | `[[nodiscard]] std::expected<void, ConnectorError>` replaces `bool + std::string& errorMessage`.  All 13 concrete overrides flipped: azureBlob, email, gcs, gitHub, googleSheets, jira, oneDrive, polarion, postgres, redmine, s3, slack, snowflake. |
+| **`ValidatePublicHttpEndpoint` flipped** | `application/cloud/connectorHttp.h/cpp` | Free-standing function in the `ConnectorHttp` namespace; only callers were the 11 HTTP-bearing TestConnection overrides (postgres/snowflake/email don't validate HTTP endpoints).  Inner lambda still returns bool+errorMessage; outer wrapper translates to `std::unexpected(ConnectorError::Make(InvalidEndpoint, ...))` + bumps the SSRF-rejection counter on the failure path. |
+| **`ValidatePostgresParams` flipped** | `application/cloud/postgresConnector.h/cpp` | Static helper.  Two callers: `PostgresConnector::TestConnection` (intra-class) and `dbQueryCloudTaskExecutor.cpp::222` (cross-class).  Both updated. |
+| **Per-site `Code` selection** | All 13 connector .cpp files | Param missing/blank → `InvalidConfig`; SSRF/syntax rejection (already typed at the validator's exit) → `InvalidEndpoint`; `ResolveCredentials` bridge → `CredentialMissing`; CRLF / structurally-bad credential → `CredentialInvalid`; `curl_easy_init` / `CURLE != OK` → `NetworkError`; HTTP 401/403 → `AuthFailure`; HTTP ≥ 400 (other) → `HttpError`.  Newly distinguished: previously every HTTP ≥ 400 was one bucket; now 401/403 carry their own `AuthFailure` code so the dashboard can show "credential expired" remediation copy. |
+| **`CloudCircuitBreaker` extended** | `application/cloud/cloudCircuitBreaker.h/cpp` | `RecordFailure(name, std::optional<ConnectorErrorCode>)` stores the latest typed code per circuit (`CircuitState::m_LastFailureCode`).  `GetHealthSummary` surfaces it via `ConnectionHealth::m_LastFailureCode`.  Legacy `RecordFailure(name)` callers (JCWF cloud tasks) leave the code nullopt — backward-compatible. |
+| **REST + status JSON wiring** | `application/web/webServer.cpp` (2 sites) | `HandleConnectionTestPost` records the typed code on the breaker and echoes `code: "network_error"` (or whichever) + `message: "..."` on the failure response.  `/api/status::connection_health[].last_failure_code` populated when `m_LastFailureCode` is set. |
+
+`ResolveCredentials` deliberately stays on the legacy `bool + std::string& errorMessage` shape — out of plan scope.  TestConnection bridges its failures into `CredentialMissing` at the call site (the most common case; if a future refactor needs to distinguish "key not in store" from "wrong credential subtype" that becomes a parallel sweep on `ResolveCredentials`).
+
+### Part C — Sitting 7c (Workflow JSON parser sweep)
+
+Bigger than the plan estimated.  Plan listed "~15 chained parser methods + RequireObject/RequireArray helpers"; actual count was **23 methods** (the plan undercounted the 3 public entry points, `ParseRootObject`, the 2 Require* helpers wrapped together, and 1 free-standing `ParseTaskQueueBinding`).  ~150 return sites across the two .cpp files.  All-or-nothing per the plan's own warning — inter-method calling means partial conversion doesn't compile.
+
+| Theme | Files | Why |
+|---|---|---|
+| **3 public entry points flipped** | `application/workflow/workflowJsonParser.{h,cpp}` | `ParseWorkflowJson` / `ParseGlobalJson` / `ParseCanvasJson` — the topmost callers, used by `workflowRegistry.cpp` (5 sites) + `aiJcwfService.cpp` (1) + `webServer_studio.cpp` (2: POST + PUT) + `webServer_helpers.h::ValidateJcwfJsonText` (1). |
+| **17 chain sub-parsers flipped** | `application/workflow/workflowJsonParser{,Details}.cpp` | `ParseRootObject`, `ParseTriggers`/`ParseTrigger`, `ParseTasks`/`ParseTask`, `ParseTaskInputs`/`ParseTaskOutputs`/`ParseTaskEnvironment`/`ParseTaskQueueBinding`, `ParseDataflow`/`ParseSingleDataflow`, `ParseRetries`/`ParseDefaults`, `ParseFilters`/`ParseFilter`/`ParseFilterSource`, `ParseControlNodes`/`ParseControlflow`. |
+| **2 `Require*` shape helpers flipped** | `application/workflow/workflowJsonParserDetails.cpp` (file-private statics in anonymous namespace) | `RequireObject` / `RequireArray`.  All ~15 callers in the chain methods updated to consume the new shape. |
+| **1 free-standing `ParseTaskQueueBinding`** | `application/workflow/workflowJsonParser.cpp:235` + declaration in `workflowJsonParserDetails.h` | Wrapped by the `WorkflowJsonParser::ParseTaskQueueBinding` member which just forwards.  Both flipped. |
+| **Per-site `Code` selection** | All ~150 return sites | Array/object shape rejection → `TypeMismatch`; required-field absent (incl. `tasks` / `id` / `version` / `from_task` / etc.) → `MissingField`; cap exceeded (`kMaxTasks` / `kMaxFilters` / `kMaxTimeoutMs` / etc.) / negative numeric / out-of-allowlist concurrency value → `ValueOutOfRange`; simdjson decode failure (key-read, type-coerce, raw-extract) → `SimdjsonError`. |
+| **Utility helpers stay on legacy bool shape** | `WorkflowJsonParser::ExtractRawJson`, `WorkflowJsonParser::ElementToString` | Plan scoped only the named Parse* methods + Require* helpers.  ExtractRawJson + ElementToString sit one layer below — chain methods bridge their failures into typed `SimdjsonError` / `TypeMismatch` at the call site.  Keeps the scope manageable and preserves a clean "one bridge per failure" pattern. |
+| **External callers updated** | `application/workflow/workflowRegistry.cpp` (5 sites), `application/web/aiJcwfService.cpp` (1), `application/web/webServer_studio.cpp` (2), `application/web/webServer_helpers.h` (1) | Each call site converts `auto r = parser.ParseXxx(...); if (!r) { ... r.error().m_Details ... }`.  REST handlers (POST/PUT /api/workflows, /api/workflows/validate) propagate `m_Details` as the JSON `message` field on 400. |
+
+### What's verified
+
+| Check | Result |
+|---|---|
+| Studio Debug build | Clean (only pre-existing asio `-Wshadow`) |
+| Studio Release build | Clean |
+| Engine Debug build | Clean |
+| Engine Release build | Clean |
+| Active edition at session end | `studio` (per `.build-edition`) |
+| All 32 shipping JCWFs reload | Pass — `POST /api/workflows/reload` returns `{workflowCount: 32, reloaded: true}` |
+| Typed parser-error response shape | Manually probed `POST /api/workflows` with 3 malformed payloads: missing `tasks` → `"workflow missing required field: tasks"` (MissingField); `tasks: "string"` → `"tasks must be an object"` (TypeMismatch); `timeout_ms: -5` → `"task field 'timeout_ms' must be non-negative, got -5"` (ValueOutOfRange) |
+| Typed connector-error response shape | `POST /api/connections/my-s3/test` (unreachable endpoint) → HTTP 400 + `{"code":"network_error", "message":"S3 test failed: Could not connect to server"}` |
+| Typed connector-error on `/api/status` | After the failing test, `/api/status::connection_health[name=my-s3]` carries `last_failure_code: "network_error"` |
+| `vehicleTroubleshootingGuide` interface_names | `["api.openai.com/gpt-4.1-mini/API1"]` (resolved, not raw template); manual run cleared the prereq check |
+| Regression: `test_mock_dispatch_hermetic` | OK |
+| Regression: `test_bedrock_sigv4` | OK — KAT signature `1a6d6607ae8458641685888fa012825e591fb38ca4db178eab28d9a9b07ae021` unchanged |
+| Regression: `test_api1_mock_errors` | 6/6 pass |
+
+### Design decisions settled this session
+
+| Q | Answer |
+|---|---|
+| Bridge `ResolveCredentials` into typed `ConnectorError` or flip its signature too? | **Bridge at the call site.**  `ResolveCredentials` is a parallel base virtual in `ICloudConnector` with 13 concrete overrides — flipping it would double the diff size and the per-override cognitive load.  Bridge: capture into a local `std::string credErr`; on failure, `return std::unexpected(ConnectorError::Make(ConnectorErrorCode::CredentialMissing, std::move(credErr)));`.  `CredentialMissing` is the right umbrella code because that's the dominant failure mode (key not in store, key has wrong type).  If a future sweep needs `CredentialInvalid` distinguishability, that's a `ResolveCredentials` flip in its own right. |
+| Flip parser utility helpers (`ExtractRawJson` / `ElementToString`) too? | **No — bridge at call sites.**  Plan scoped only the named chain methods + Require* helpers.  ExtractRawJson + ElementToString are utility transformers that don't carry useful category information — every failure surfaces as either "simdjson decode failed" or "wasn't a string-coercible value", and the bridging call site already knows whether to emit `SimdjsonError` or `TypeMismatch`.  Keeping them on bool keeps the diff manageable and avoids 20+ inner sub-bridges. |
+| Distinguish HTTP 401/403 from generic HTTP ≥ 400? | **Yes — `AuthFailure` vs `HttpError`.**  Was a single bucket pre-7b ("HTTP " + status code).  Post-7b: 401/403 → `AuthFailure` carries copy like "check Personal Access Token" / "token may be expired or invalid"; 400/404/5xx → `HttpError`.  The dashboard can show different remediation copy per code. |
+| `RecordFailure(name)` legacy vs `RecordFailure(name, optional<ConnectorErrorCode>)`? | **Optional second param, defaulted to nullopt.**  JCWF cloud-task failures (the legacy caller in `cloudTaskExecutor.cpp`) don't have a typed code to record — they'd need a parallel sweep on the executor side.  Keeping it optional means the breaker can store the code when available (Test button click) and stay backward-compatible when not (JCWF task failure).  When the next sweep adds typed errors to cloud-task executors, those call sites pass the code. |
+| Plan said 7c was "~15 methods"; actual was 23.  Stop mid-sweep? | **No — finish.**  The all-or-nothing nature was already flagged by 7c's own plan text ("Inter-method calling: `ParseTasks` calls `ParseTask` calls `ParseTaskInputs` etc.  Converting only some leaves awkward mixed-signature internal calls.  Single subsystem sweep.").  Partial conversion doesn't compile.  The plan undercounted the public entry points + utility-style helpers; correct that in the plan doc closeout marker. |
+| Add `code` field to parser-error REST responses (matching connector)? | **Out of scope this session.**  The parser REST callers (`/api/workflows` POST/PUT, `/api/workflows/validate`) currently propagate the human-readable `message` only.  Adding a typed `code` field would need each caller to be aware of `ParserErrorCode`'s lowercase-snake form, OR a generic helper that `Describe()`s any error type.  Either is a follow-up; today's win is the typed internal threading and the cleaner failure-mode taxonomy. |
+
+### Architecture notes for next-session-Claude
+
+- **The std::expected sweep is structurally complete.**  Three subsystem error enums (`RegistryError` / `ConnectorError` / `ParserError`) each cover their domain end-to-end.  No more `bool + std::string& errorMessage` surfaces tracked in the plan.  When extending any of the three subsystems with a new method, default to `[[nodiscard]] std::expected<T, XxxError>` — the bool shape is the legacy now.
+- **For new subsystems with their own error space:** add a new `application/<subsystem>/xxxError.{h,cpp}` following the established 3-file pattern (`{Code enum, Error struct, Make() factory, Describe() helper}`).  See `connectorError.h` or `parserError.h` for the template.  Don't try to extend an existing subsystem's enum to cover a new subsystem — the `-Wswitch` guarantee shrinks proportionally.
+- **Utility-helper exception:** when a sweep encounters utility transformers (parsers' `ElementToString`, signers' `Sign()`, etc.) that fail in ways that don't carry useful category info, keep them on the legacy bool/output-param shape and bridge their failures into the typed return at the chain method's call site.  Two patterns documented today (parser ElementToString/ExtractRawJson, connector ResolveCredentials).
+- **The dashboard's `connection_health` API surface now distinguishes failures by category.**  `last_failure_code` on the per-connection entry of `/api/status::connection_health` is the typed code from the most recent failure recorded on the breaker.  If a connector's Test button is clicked again and succeeds, `m_ConsecutiveFailures` resets to 0 but `m_LastFailureCode` stays populated (it's a "most recent failure category" field, not a "current state" field) — for the dashboard's needs that's fine; if a future UI wants "failure history wiped on success", clear `m_LastFailureCode` from `RecordSuccess` too.
+- **`templateEngine.h::BuildDefaultsMap` + `ExpandWithDefaults` are the canonical defaults-expansion entry points.**  Both workflow-load (registry) and dispatch (AI call executor) use them.  If a third site needs to expand `{{defaults.X.Y}}` against a workflow's `m_DefaultsJson`, route through these helpers — don't roll a fourth copy of the defaults-map parsing logic.
+
+### Open items / next-session candidates
+
+Per `pre-1_0_follow-ups.md` ordering, **7 sittings remain** as of 2026-05-20:
+
+- **Sitting 8 — SecureString-only path through HTTP layer.** 9 cloud-connector sites still `.Get()` the api_key into a `std::string` to build `Authorization: Bearer ...`.  Defense in depth — defeats the SecureString mlock + zero-on-destruct invariant for the dispatch duration.  Medium (~1 day).
+- **Sitting 9 — `SanitizeUserSlug` collision fix.**  Adhoc layout enumeration vulnerability.  Append `_<8 hex chars of SHA-256(original_user)>` to the sanitised slug.  Half-day; migration logic is the careful part.
+- **Sitting 10 — `ConfigParser` 36-field boilerplate refactor.**  Behaviour-neutral collapse to per-type helpers.  Medium (~1 day).
+- **Sitting 11 — Verification: malformed config tests + D1 negative-path fixtures.**  Folded into one sitting.  Medium (~1 day).
+- **Sitting 12 — Cloud tail: persist `email_watch` watermark across restart.**  Small (~half-day).
+- **Sitting 13 — `tools/replayTranscript.py`.**  Trigger condition: first real "broke today" report — don't build speculatively per plan text.
+- **Sitting 14 — KeyManager hardening tail (4 small items).**  Medium (~half-1 day).
+
+**Recommend Sitting 8 next** — it's the biggest remaining structural cleanup, builds on the typed-credential threading from Sitting 6, and tightens the SecureString invariant that the cloud sweep didn't touch.
+
+**Out of scope but worth flagging:**
+
+- **Parser-error REST responses don't expose typed `code` field yet.**  Today's connector sweep extended `/api/connections/<name>/test` with `code: "network_error"` etc.; the parallel parser sweep didn't extend `/api/workflows` POST/PUT or `/api/workflows/validate` responses with a typed `code: "type_mismatch"` etc.  Plumbing exists — just need to add `Describe(r.error().m_Code)` to the JSON in each caller.  Follow-up; low priority.
+- **`AiRequestPool::Submit` still returns bool.**  Async queueing operation, doesn't fit the synchronous `std::expected` shape cleanly.  Submission failure surfaces via `return false` + structured ERROR log; the actual AI-call result flows through a different async-completion path.  Possible future migration to a typed `SubmitError` enum, but not on any current plan.
+- **3-4 intra-class private helpers in `aiCallTaskExecutor.cpp`** still take `std::string& errorMessage`.  Bounded by the file; could fold into a future cleanup or skip until next opportunity.
+
+### Doc sweep (same session)
+
+Touched 5 tracked docs reflecting the API-shape sweep completion:
+
+| Doc | Change |
+|---|---|
+| `CLAUDE.md` | std::expected discipline rule updated: "Sweep complete across all three subsystems" replaces the "tracked as Sittings 7b + 7c" pending-work note.  Adds the per-site `Code` selection list (TypeMismatch / MissingField / ValueOutOfRange / etc.) so the next contributor extending any of the three subsystems has the per-category template inline. |
+| `doc/architecture.md` | Key Design Decisions row for std::expected updated with the full per-subsystem variant list (RegistryError / ConnectorError / ParserError codes), and the new `/api/status::connection_health[].last_failure_code` + `/api/connections/<name>/test::code` JSON surfaces. |
+| `application/cloud/README.md` | Shared Infrastructure table: `cloudConnector.h` row now mentions TestConnection's `std::expected<void, ConnectorError>` shape + the 9-variant Code enum; new `connectorError.h/cpp` row documents the per-site Code selection.  `cloudCircuitBreaker` row mentions the typed-code storage + `/api/status` surface. |
+| `application/workflow/README.md` | `workflowJsonParser` row: typed `std::expected<void, ParserError>` shape + 4-variant Code enum + the documented utility-helper exception.  `workflowRegistry` row: `RemoveWorkflow` Sitting 7a annotation tightened (sweep no longer "tracked"); `ExtractProviderFromParams` now mentions the defaults-template expansion via templateEngine. |
+| `doc/api-endpoints.md` | `POST /api/connections/<name>/test` response example updated to include `code` field with the 9-variant lowercase-snake list. |
+
+**Skipped by design:**
+- `doc/combinedDocumentation.md` / `combinedCyberSecAudit.md` / `combinedSafetyAudit.md` — JCWF-generated per `feedback_combined_doc_generated`; resolved on next regen run.
+- Predecessor plan docs (`AI dispatch refactor.md`, `cybersec-hardening-dev-plan.md`, etc.) — historical work-product per `feedback_no_legacy`.
+- Per-domain session notes (`S1-D2-session-note.md`, etc.) — historical snapshots.
+- `doc/cyber security.md` — TestConnection mentions are about credential / SSRF posture (still accurate); the API-shape change doesn't move those bullets.
+- `doc/cloud-integration.md` — descriptive of cloud phases, not contract.
+
+### Gotchas next-session-Claude should know
+
+- **Working tree at session end:** large.  All of today's morning entry plus Sittings 7b + 7c + the doc sweep.  Per `feedback_git_commits` JC handles commits.  Natural splits if JC wants them: (a) `m_RequiredAiProviders` template-aware fix (workflowRegistry.cpp + templateEngine + vehicleTroubleshootingGuide JCWFs), (b) Sitting 7b (cloud/* + webServer.cpp + connector docs), (c) Sitting 7c (workflowJsonParser*.{h,cpp} + 4 caller-site updates + workflow README), (d) doc sweep on CLAUDE.md + architecture.md + api-endpoints.md.  Or all-in-one — JC's call.
+- **j9t status at session end:** shut down cleanly via `POST /api/shutdown`.  No background process at handoff.
+- **The std::expected sweep is structurally done.**  Three subsystem error enums cover the codebase end-to-end.  Don't re-open the bool+errorMessage discussion for new APIs — the discipline rule in CLAUDE.md is the authoritative shape.  Utility-helper exceptions (`ExtractRawJson` / `ElementToString` / `ResolveCredentials`) are deliberate and documented inline at the bridge sites.
+- **`ResolveCredentials` is the next typed-error candidate.**  Bridges through `CredentialMissing` in all 13 TestConnection overrides currently — if a future need to distinguish "key not in store" from "wrong credential subtype" arises, that's a parallel sweep on the `ICloudConnector::ResolveCredentials` base + 13 overrides (smaller than 7b — each impl is ~20 lines).
+- **Parser failure-mode message stability.**  The 4 `ParserErrorCode` variants don't yet have a fixed Description() string convention — the `ParserError::Describe()` helper exists but the lowercase-snake identifiers aren't exposed on REST responses (out of scope this session, see "Open items").  When the parallel parser-REST extension lands, lock the strings as wire format like the connector codes are.
+- **`templateEngine.h` is now a public-API module.**  `BuildDefaultsMap` + `ExpandWithDefaults` joined `ExpandTemplate` as public entry points.  If a third site needs defaults-expansion, route through these — don't roll a fourth parser.
+- **Vehicle troubleshooting guide override is back.**  `workflows/vehicleTroubleshootingGuide.json` + both JCWF zips carry the `{{defaults.ai.provider}}` + `{{defaults.ai.model}}` overrides again.  If JC wants to test how `interface_names` looks for a JCWF that pins a non-default provider, vehicleTroubleshootingGuide is the live example.
+- **Connector failure-mode response shape.**  `POST /api/connections/<name>/test` now returns `code: "<lowercase_snake>"` on failure alongside `error: "test_failed"` and `message: "<human>"`.  Stable identifiers per `Describe(ConnectorErrorCode)`.  If JC writes a UI that switches on this, the 9 codes are documented in `doc/api-endpoints.md` and `application/cloud/connectorError.h`.
+
+---
+
+## 2026-05-20 morning (Sittings 3–7a regression triage + CI bringup + doc audit + JCWF template-prereq bug) → next session
+
+Four-act session.  Act 1: ran the full test matrix on Studio Release + Studio Debug against the Sittings 3+4+5+5fu+6+7a working tree and closed out the 10 dispatch failures Sitting 7a flagged for triage — **zero real C++ regressions**, all explained as test-harness issues.  Act 2: JC committed Sittings 3-7a + this-session follow-ups (one big commit), CI lit up red across every target on the C++23 cppdialect bump; bumped premake5 in CI from `v5.0.0-beta2` to `v5.0.0-beta8` (the minimum tag that accepts `cppdialect "C++23"`).  Act 3: doc audit fixed three drift items in user-facing docs; bug surfaced in `WorkflowDefinition::m_RequiredAiProviders` (template-unaware) and worked around at the JCWF layer.  Act 4: chased three follow-on CI breakages from the beta8 bump — (a) tarball exec-bit missing on Linux/macOS, (b) Rocky 9 glibc 2.34 vs beta8's glibc-2.38 binary, (c) macOS Apple Clang + libc++ doesn't transitively include `<vector>` and Rocky 9 dnf install was missing stock `gcc` for the premake5 bootstrap.
+
+Four pushes landed today.  CI was re-running at end of session.
+
+### What landed (committed across 4 pushes)
 
 | Theme | Files | Why |
 |---|---|---|
 | **Sittings 3–7a bundle (push 1)** | Sittings 3+4+5+5fu+6+7a code + doc sweeps as a single commit | See `2026-05-19 (Sitting 7a)` entry below for the full breakdown.  Verified clean across the full local test matrix before push.  Test-config + run_tests.py follow-ups from this session were rolled into the same commit. |
 | **CI premake5 bump (push 2)** | `.github/workflows/{linux,macos,windows}-workflow.yml`, `Dockerfile` (5 sites total) | All 6 CI targets failed with `invalid value 'C++23' for cppdialect` because they pinned `premake5 v5.0.0-beta2` which maxes at C++20.  Bumped every site to `v5.0.0-beta8` (Jan 2026 — first stable tag accepting `"C++23"`).  Verified locally: beta8 emits `-std=c++23` for `cppdialect "C++23"`. |
 | **CI beta8-quirks fixes (push 3)** | `.github/workflows/linux-workflow.yml` (build-linux + package-rpm), `.github/workflows/macos-workflow.yml` (build-macos) | Beta8 introduced two regressions vs beta2: (a) tarballs ship without the exec bit (`-rw-rw-rw-`), so `abel0b/setup-premake@v2` action fails with `Permission denied`; (b) upstream Linux binary is built against glibc 2.38, Rocky 9 ships 2.34.  Fix (a): replaced the action with direct `wget + tar + sudo chmod +x` on build-linux + build-macos.  Fix (b): package-rpm now builds premake5 from source via `git clone --branch v5.0.0-beta8 + Bootstrap.mak linux`, same pattern Dockerfile already uses.  Every step ends with `premake5 --version` so future regressions surface earlier. |
+| **macOS `<vector>` include + Rocky 9 bootstrap deps (push 4)** | `application/cloud/sigV4Signer.cpp` (+ `#include <vector>` + `#include <utility>`), `.github/workflows/linux-workflow.yml::package-rpm` (added `gcc gcc-c++ libuuid-devel` to dnf install) | After push 3, macOS failed with `no member named 'vector' in namespace 'std'` at `sigV4Signer.cpp:183` — Apple Clang + libc++ doesn't transitively expose `<vector>`/`<utility>` through `<algorithm>`/`<sstream>` the way gcc + libstdc++ does.  Real portability bug in our code, papered over by the local build matrix.  Push 4 adds the explicit includes.  Same push fixes package-rpm's `cc: command not found` at premake5 bootstrap time: `gcc-toolset-13` provides `cc` only under `scl enable`, but `Bootstrap.mak` invokes plain `cc`.  Added stock `gcc gcc-c++` to the dnf install (gives the default `cc` symlink), plus `libuuid-devel` for the Bootstrap link step (matches the Fedora note already in DEVELOPMENT.md). |
 | **Test-config glob updates** | `test/test_config.json` (5 globs) | Structured-output default flip means `aiCarMaintenancePipeline/01_classifyQuestion` and `goKartComplianceCheck/01_assessRequirement` now write `*.output.json`, not `*.output.txt`; and `vehicleTroubleshootingGuide` writes `code{244,250,301}.output.json` not `.output.md`.  Re-run on the live server: all three workflows now PASS. |
 | **test/run_tests.py auth wiring** | `test/run_tests.py:89-99` (3 lines added) | The script's `requests.Session()` had no auth wiring; every mutating endpoint hit 401 (post-§5i auth tightening).  Added `os.environ.get("J9T_TOKEN")` pickup that sets `Authorization: Bearer ...` on the session. |
 | **JCWF vehicleTroubleshootingGuide fix** | `workflows/vehicleTroubleshootingGuide/vehicleTroubleshootingGuide.json`, `workflows/vehicleTroubleshootingGuide.jcwf`, `example/workflows/vehicleTroubleshootingGuide.jcwf` | Removed `"provider": "{{defaults.ai.provider}}"` + `"model": "{{defaults.ai.model}}"` overrides from each ai_call task's `params` block (kept `"mode": "one_shot"`).  Tasks now fall back to `global.json::defaults.ai` (`api.openai.com/gpt-4.1-mini/API1` / `gpt-4.1-mini`).  Repacked both the runtime + upstream JCWF zips. |
@@ -44,7 +177,7 @@ Three pushes landed today.  CI was re-running at end of session.
 | **Studio Release extras** | test_edition_contract 49/49 PASS, test_auth_mcp 100/100 PASS (no --with-ai); test_assistant_with_ai 60/70 (10 AI-wording flakes, not regressions); test_run_tests.py 10/10 PASS after the glob + provider-override fixes. |
 | **Studio Debug extras** | test_edition_contract 49/49 PASS, test_auth_mcp 104/104 PASS (--with-ai dispatch case added); test_assistant_with_ai 66/70 (4 AI-wording flakes); test_run_tests.py 10/10 PASS. |
 | **Bedrock SigV4 KAT signature** | `1a6d660…07ae021` — unchanged across both binaries.  Sittings 6+7a typed-credential threading is intact. |
-| **CI status at session end** | Pushes 1 + 2 + 3 in flight; results visible ~30 min after session close.  Push 3 changes should resolve build-linux + build-macos + package-rpm; Windows + Docker + package-arch should already be fine (each handles premake5 install in a way the beta8 quirks don't break). |
+| **CI status at session end** | Push 4 just landed; results land within ~30 min of session close.  Expectation: build-linux + build-macos + package-rpm clear (push 4 fixes the macOS `<vector>` include + Rocky 9 bootstrap `cc`); Windows + Docker + package-arch were never broken by the beta8 quirks (each handles premake5 install in a way the regressions don't touch).  If anything still fails, the most likely culprits are the **doc/misc/pre-1_0_follow-ups.md** Sittings 7b/7c-adjacent header-portability traps (more transitive-include surprises somewhere else in the tree) — search for `std::` uses without a matching `#include` next time. |
 
 ### Triage of the 10 Sitting 7a Debug failures
 
@@ -76,7 +209,7 @@ The interface name `{{defaults.ai.provider}}` is the **raw template string** —
 
 ### Open items / next-session candidates
 
-1. **Watch the CI run from push 3.**  3 failing jobs (build-linux + build-macos + package-rpm) should go green.  If anything fails, look at the trailing `premake5 --version` line in each Install Premake5 step.
+1. **Watch the CI run from push 4.**  3 previously-failing jobs (build-linux + build-macos + package-rpm) should go green.  If `build-macos` still fails on a `std::` include, repeat the same fix pattern (Apple Clang + libc++ is the canary — what works on gcc/MSVC may need explicit headers).  If `package-rpm` still fails at `cc`, double-check that `gcc` made it into the dnf install (push 4 added it).  Inspect the trailing `premake5 --version` line in each Install Premake5 step to confirm the binary is runnable before the real build starts.
 2. **Fix the `m_RequiredAiProviders` template-unaware bug** (see above).  Single-file C++ change; ~30 minutes; adds a guard for `params.provider` containing `{{` before adding it to the required-providers set.
 3. **Sitting 7b — connector subsystem `std::expected` sweep.**  ~190 return sites across 13 cloud-connector `TestConnection` overrides + `ValidatePublicHttpEndpoint` + `ValidatePostgresParams`.  Mechanical sweep, scaffold ready in `application/cloud/connectorError.h`.  See `pre-1_0_follow-ups.md`.
 4. **Sitting 7c — workflow JSON parser sweep** (after 7b).  ~15 chained methods.
@@ -88,12 +221,14 @@ The interface name `{{defaults.ai.provider}}` is the **raw template string** —
 - **CI is now pinned to premake5 v5.0.0-beta8 everywhere.**  beta8 is the minimum that accepts `cppdialect "C++23"`; beta2 (which most distro packages ship) errors with `invalid value 'C++23' for cppdialect`.  Distro premake5 binaries are also likely too old — if you're debugging a fresh-clone build, check `premake5 --version` first.
 - **The upstream beta8 Linux + macOS tarballs ship without the executable bit** (`-rw-rw-rw-`).  Every CI Install-Premake5 step on these platforms does explicit `chmod +x` after extraction.  The `abel0b/setup-premake@v2` action does NOT chmod and silently produces `Permission denied` at the first invocation — we replaced the action with direct `wget/curl + tar + chmod` everywhere.
 - **The upstream beta8 Linux binary requires glibc 2.38.**  Rocky 9 ships glibc 2.34, so package-rpm builds premake5 from source via `git clone --branch v5.0.0-beta8 + Bootstrap.mak linux`.  Same pattern Dockerfile already used (covers arm64 too).  If a future CI target adds a Linux distro older than Ubuntu 24.04 / Fedora 39, expect the same glibc trap.
+- **Rocky 9's `gcc-toolset-13` does NOT provide a `cc` symlink on the default PATH** — it only activates under `scl enable gcc-toolset-13`.  Anything that invokes plain `cc` outside the toolset wrap (premake5's `Bootstrap.mak`, generic configure scripts, etc.) needs stock `gcc` separately.  The package-rpm dnf install now pulls in both `gcc` (for the `cc` symlink) AND `gcc-toolset-13-gcc gcc-toolset-13-gcc-c++` (for the C++23 j9t build, activated via `scl enable` at the build step).
+- **Apple Clang + libc++ doesn't transitively pull in `<vector>` or `<utility>` through `<algorithm>`/`<sstream>`** — gcc + libstdc++ and MSVC do.  If a file uses `std::vector` or `std::pair` it must `#include <vector>` / `#include <utility>` explicitly, even if "it builds locally on Linux".  Push 4 hit this in `application/cloud/sigV4Signer.cpp`.  For Sitting 7b's connector sweep (lots of new `std::expected<T, ConnectorError>` returns + likely vectors/maps in the same TUs), explicitly include every STL header you name — don't rely on transitive pickup.  Local clang+libc++ via `premake5 gmake --clang` catches these before they reach CI.
 - **JCWFs that use `{{defaults.ai.provider}}` in `params.provider` will fail with `ai_prereq_missing` until the C++ bug is fixed.**  Workaround at the JCWF layer: remove the override and let `global.json::defaults.ai` apply.  Already done for `vehicleTroubleshootingGuide`; check any new JCWFs for the same pattern before they hit the prereq gate.
 - **`test/run_tests.py` now reads `$J9T_TOKEN`.**  Every mutating endpoint requires auth post-§5i; the script was 401'ing on every call before the patch.  If you write a new CLI test against the j9t REST API, follow the same pattern (`session.headers["Authorization"] = f"Bearer {os.environ.get('J9T_TOKEN','')}"`).
 - **`test/test_config.json` expected_artifacts globs need to track structured-output flips.**  Five workflows now write `*.output.json` not `*.output.txt`; same trap applies to any workflow that flips from free-text to structured output post-1.0.  Watch for `artifacts_failed` after a `params.mode` change.
 - **Two scratch roots only: `log/` (gitignored, in-repo) and `/tmp/claude/`.**  No ad-hoc `/tmp/<name>/` paths.  Per `feedback_temp_folders` (tightened this session).
 - **`example/workflows/vehicleTroubleshootingGuide.jcwf` was repacked**.  If JC wants to revert the provider-override removal (e.g. to test the in-progress C++ fix), the previous JCWF is recoverable from git history (`git show HEAD~N -- example/workflows/vehicleTroubleshootingGuide.jcwf > old.jcwf`).
-- **Working tree at session end:** one uncommitted change — `README.md` line 18 ("native C++" → "native C++23").  Single-word doc tweak; not yet committed.
+- **Working tree at session end:** clean (all 4 pushes committed).  The `README.md` "native C++23" one-word tweak landed with push 4's bundle.
 - **j9t status at session end:** Studio Debug was running (JC started it manually for the post-fix stress-test rerun); should be shut down via `POST /api/shutdown` before any next-session build that touches a shared header.
 
 ---

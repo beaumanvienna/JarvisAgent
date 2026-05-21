@@ -64,4 +64,21 @@ namespace AIAssistant
     bool ExpandTemplate(std::string const& templateText, TemplateContext const& context, TemplateMode mode,
                         std::string& expandedOut, std::string& errorMessage);
 
+    // Build a flat key-value map from a workflow "defaults" JSON object, prefixed with "defaults.".
+    // E.g. {"ai":{"provider":"openai","model":"gpt-4.1-mini"},"timeout_ms":30000} becomes:
+    //   "defaults.ai.provider" -> "openai"
+    //   "defaults.ai.model"    -> "gpt-4.1-mini"
+    //   "defaults.timeout_ms"  -> "30000"
+    // Parse failures (malformed JSON, non-object root, exceptions) yield an empty/partial map
+    // and emit a LOG_APP_WARN — callers proceed with whatever was parsed.  Used by both
+    // workflow-load time (workflowRegistry) and dispatch time (aiCallTaskExecutor).
+    std::unordered_map<std::string, std::string> BuildDefaultsMap(std::string const& defaultsJson);
+
+    // Expand `{{defaults.X.Y}}` placeholders in `raw` using a defaults map built via
+    // `BuildDefaultsMap`.  Unknown keys are expanded to "" (Lenient mode).  Pure pass-through
+    // when `raw` contains no `{{` or `defaultsMap` is empty.  Returns `raw` unchanged if
+    // `ExpandTemplate` reports an error.
+    std::string ExpandWithDefaults(std::string const& raw,
+                                   std::unordered_map<std::string, std::string> const& defaultsMap);
+
 } // namespace AIAssistant

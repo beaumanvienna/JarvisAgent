@@ -38,7 +38,7 @@ namespace AIAssistant
     {
     public:
         std::string GetType() const override;
-        bool TestConnection(CloudConnection const& connection, std::string& errorMessage) override;
+        [[nodiscard]] std::expected<void, ConnectorError> TestConnection(CloudConnection const& connection) override;
         bool ResolveCredentials(CloudConnection const& connection, CloudCredentials& credentials,
                                 std::string& errorMessage) override;
     };

@@ -207,10 +207,9 @@ namespace AIAssistant
 
         WorkflowJsonParser workflowJsonParser;
         WorkflowDefinition parsedWorkflow;
-        std::string parseErrorMessage;
-        if (!workflowJsonParser.ParseWorkflowJson(req.body, parsedWorkflow, parseErrorMessage))
+        if (auto r = workflowJsonParser.ParseWorkflowJson(req.body, parsedWorkflow); !r)
         {
-            return MakeWorkflowJsonError(400, "invalid_jcwf", parseErrorMessage, "POST /api/workflows");
+            return MakeWorkflowJsonError(400, "invalid_jcwf", r.error().m_Details, "POST /api/workflows");
         }
 
         if (!IsValidWorkflowId(parsedWorkflow.m_Id))
@@ -265,10 +264,9 @@ namespace AIAssistant
 
         WorkflowJsonParser workflowJsonParser;
         WorkflowDefinition parsedWorkflow;
-        std::string parseErrorMessage;
-        if (!workflowJsonParser.ParseWorkflowJson(req.body, parsedWorkflow, parseErrorMessage))
+        if (auto r = workflowJsonParser.ParseWorkflowJson(req.body, parsedWorkflow); !r)
         {
-            return MakeWorkflowJsonError(400, "invalid_jcwf", parseErrorMessage, "PUT /api/workflows/{id}", workflowId);
+            return MakeWorkflowJsonError(400, "invalid_jcwf", r.error().m_Details, "PUT /api/workflows/{id}", workflowId);
         }
 
         if (parsedWorkflow.m_Id != workflowId)

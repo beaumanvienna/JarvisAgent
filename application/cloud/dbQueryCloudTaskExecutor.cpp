@@ -217,18 +217,15 @@ namespace AIAssistant
         // Tripwire: reject forbidden libpq cert/key/file-path params before
         // building the connection string.  See PostgresConnector::ValidatePostgresParams
         // docstring.  Mirrors the same gate in PostgresConnector::TestConnection.
+        if (auto r = PostgresConnector::ValidatePostgresParams(connection); !r)
         {
-            std::string forbiddenErr;
-            if (!PostgresConnector::ValidatePostgresParams(connection, forbiddenErr))
-            {
-                taskState.m_LastErrorMessage = "db_query: " + forbiddenErr;
-                taskState.m_State = TaskInstanceStateKind::Failed;
-                LOG_APP_ERROR("[db_query] task='{}' workflow='{}' run='{}': {}",
-                              taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId, forbiddenErr);
-                LOG_SECURITY_WARN("[security] postgres_forbidden_param connection='{}' message='{}'",
-                                  connection.m_Name, forbiddenErr);
-                return false;
-            }
+            taskState.m_LastErrorMessage = "db_query: " + r.error().m_Details;
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            LOG_APP_ERROR("[db_query] task='{}' workflow='{}' run='{}': {}",
+                          taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId, r.error().m_Details);
+            LOG_SECURITY_WARN("[security] postgres_forbidden_param connection='{}' message='{}'",
+                              connection.m_Name, r.error().m_Details);
+            return false;
         }
 
         // Gate on sslmode allowlist + non-localhost production posture before

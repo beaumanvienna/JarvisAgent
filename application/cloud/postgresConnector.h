@@ -50,7 +50,7 @@ namespace AIAssistant
     {
     public:
         std::string GetType() const override;
-        bool TestConnection(CloudConnection const& connection, std::string& errorMessage) override;
+        [[nodiscard]] std::expected<void, ConnectorError> TestConnection(CloudConnection const& connection) override;
         bool ResolveCredentials(CloudConnection const& connection, CloudCredentials& credentials,
                                 std::string& errorMessage) override;
 
@@ -85,10 +85,11 @@ namespace AIAssistant
         // adding `ValidateLocalPath` confinement on the cert/key paths is a
         // code-review reject.
         //
-        // Returns true if no forbidden keys are present.  Populates
-        // errorMessage on rejection.  Public so dbQueryCloudTaskExecutor can
-        // gate before BuildConnectionString.
-        static bool ValidatePostgresParams(CloudConnection const& connection, std::string& errorMessage);
+        // Returns `ConnectorError` with `m_Code == InvalidConfig` on
+        // rejection.  Public so dbQueryCloudTaskExecutor can gate before
+        // BuildConnectionString.
+        [[nodiscard]] static std::expected<void, ConnectorError>
+            ValidatePostgresParams(CloudConnection const& connection);
 
         // Build a libpq connection string from connection config + credentials.
         static std::string BuildConnectionString(CloudConnection const& connection,

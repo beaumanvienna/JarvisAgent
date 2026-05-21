@@ -154,7 +154,7 @@ namespace AIAssistant
         }
     }
 
-    bool PostgresConnector::ValidatePostgresParams(CloudConnection const& connection, std::string& errorMessage)
+    std::expected<void, ConnectorError> PostgresConnector::ValidatePostgresParams(CloudConnection const& connection)
     {
         // Forbid any libpq param that would resolve to a local file path or
         // external file lookup.  See header docstring for the threat model.
@@ -178,15 +178,16 @@ namespace AIAssistant
             {
                 if (key == forbidden)
                 {
-                    errorMessage = "Forbidden PostgreSQL connection param '" + key +
-                                   "': libpq file-path / cert params have no legitimate use in j9t — "
-                                   "credentials live in KeyManager, not on disk";
                     ConnectorHttp::IncrementPostgresForbiddenParamRejection();
-                    return false;
+                    return std::unexpected(ConnectorError::Make(
+                        ConnectorErrorCode::InvalidConfig,
+                        "Forbidden PostgreSQL connection param '" + key +
+                            "': libpq file-path / cert params have no legitimate use in j9t — "
+                            "credentials live in KeyManager, not on disk"));
                 }
             }
         }
-        return true;
+        return {};
     }
 
     bool PostgresConnector::IsValidSslMode(std::string const& host, std::string const& sslmode,
@@ -281,22 +282,22 @@ namespace AIAssistant
         return connStr;
     }
 
-    bool PostgresConnector::TestConnection(CloudConnection const& connection, std::string& errorMessage)
+    std::expected<void, ConnectorError> PostgresConnector::TestConnection(CloudConnection const& connection)
     {
         auto databaseIt = connection.m_Params.find("database");
         if (databaseIt == connection.m_Params.end() || databaseIt->second.empty())
         {
-            errorMessage = "PostgreSQL connection requires 'database' parameter";
-            return false;
+            return std::unexpected(ConnectorError::Make(
+                ConnectorErrorCode::InvalidConfig, "PostgreSQL connection requires 'database' parameter"));
         }
 
         // Tripwire: reject forbidden libpq cert/key/file-path params before
         // BuildConnectionString.  See ValidatePostgresParams docstring.
-        if (!ValidatePostgresParams(connection, errorMessage))
+        if (auto r = ValidatePostgresParams(connection); !r)
         {
             LOG_SECURITY_WARN("[security] postgres_forbidden_param connection='{}' message='{}'",
-                              connection.m_Name, errorMessage);
-            return false;
+                              connection.m_Name, r.error().m_Details);
+            return std::unexpected(std::move(r.error()));
         }
 
         // Gate on sslmode allowlist + non-localhost production posture before
@@ -309,17 +310,19 @@ namespace AIAssistant
         std::string const sslmode = (sslmodeIt != connection.m_Params.end() && !sslmodeIt->second.empty())
                                          ? sslmodeIt->second
                                          : "require";
-        if (!IsValidSslMode(host, sslmode, errorMessage))
+        std::string sslErr;
+        if (!IsValidSslMode(host, sslmode, sslErr))
         {
             LOG_SECURITY_WARN("[security] postgres_invalid_sslmode connection='{}' host='{}' sslmode='{}'",
                               connection.m_Name, host, sslmode);
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::InvalidConfig, std::move(sslErr)));
         }
 
         CloudCredentials credentials;
-        if (!ResolveCredentials(connection, credentials, errorMessage))
+        std::string credErr;
+        if (!ResolveCredentials(connection, credentials, credErr))
         {
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::CredentialMissing, std::move(credErr)));
         }
 
         std::string connStr = BuildConnectionString(connection, credentials);
@@ -327,23 +330,23 @@ namespace AIAssistant
 
         if (PQstatus(conn) != CONNECTION_OK)
         {
-            errorMessage = "PostgreSQL connection failed: " + std::string(PQerrorMessage(conn));
+            std::string details = "PostgreSQL connection failed: " + std::string(PQerrorMessage(conn));
             PQfinish(conn);
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::NetworkError, std::move(details)));
         }
 
         // Run a trivial query to verify
         PGresult* res = PQexec(conn, "SELECT 1");
         if (PQresultStatus(res) != PGRES_TUPLES_OK)
         {
-            errorMessage = "PostgreSQL test query failed: " + std::string(PQresultErrorMessage(res));
+            std::string details = "PostgreSQL test query failed: " + std::string(PQresultErrorMessage(res));
             PQclear(res);
             PQfinish(conn);
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::HttpError, std::move(details)));
         }
 
         PQclear(res);
         PQfinish(conn);
-        return true;
+        return {};
     }
 } // namespace AIAssistant

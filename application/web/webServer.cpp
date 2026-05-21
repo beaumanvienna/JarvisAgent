@@ -1875,6 +1875,10 @@ namespace AIAssistant
                     {
                         if (configuredNames[i] != ch.m_Name) continue;
                         connections[i]["consecutive_failures"] = ch.m_ConsecutiveFailures;
+                        if (ch.m_LastFailureCode.has_value())
+                        {
+                            connections[i]["last_failure_code"] = std::string(Describe(*ch.m_LastFailureCode));
+                        }
                         break;
                     }
                 }
@@ -6488,30 +6492,30 @@ namespace AIAssistant
             return MakeJsonResponse(400, err);
         }
 
-        std::string errorMessage;
-        bool success = connector->TestConnection(*connection, errorMessage);
+        auto result = connector->TestConnection(*connection);
 
         // Record the outcome on the circuit breaker so the dashboard Cloud LED
         // lights up as soon as a Test button (not just a JCWF cloud task) has
-        // proved a connection works end-to-end.
+        // proved a connection works end-to-end.  The typed `ConnectorErrorCode`
+        // on failure is stored on the breaker and surfaced via
+        // `GetHealthSummary().m_LastFailureCode` for the dashboard.
         auto& circuitBreaker = Core::g_Core->GetCloudCircuitBreaker();
-        if (success)
+        if (result)
         {
             circuitBreaker.RecordSuccess(connectionName);
-        }
-        else
-        {
-            circuitBreaker.RecordFailure(connectionName);
+            crow::json::wvalue responseJson;
+            responseJson["ok"] = true;
+            return MakeJsonResponse(200, responseJson);
         }
 
+        circuitBreaker.RecordFailure(connectionName, result.error().m_Code);
+
         crow::json::wvalue responseJson;
-        responseJson["ok"] = success;
-        if (!success)
-        {
-            responseJson["error"] = "test_failed";
-            responseJson["message"] = errorMessage;
-        }
-        return MakeJsonResponse(success ? 200 : 400, responseJson);
+        responseJson["ok"] = false;
+        responseJson["error"] = "test_failed";
+        responseJson["code"] = std::string(Describe(result.error().m_Code));
+        responseJson["message"] = result.error().m_Details;
+        return MakeJsonResponse(400, responseJson);
     }
 
     crow::response WebServer::HandleConnectionsSavePost()

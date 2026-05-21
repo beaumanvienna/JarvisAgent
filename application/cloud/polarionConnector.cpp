@@ -38,41 +38,42 @@ namespace AIAssistant
         return "polarion";
     }
 
-    bool PolarionConnector::TestConnection(CloudConnection const& connection, std::string& errorMessage)
+    std::expected<void, ConnectorError> PolarionConnector::TestConnection(CloudConnection const& connection)
     {
         if (connection.m_Endpoint.empty())
         {
-            errorMessage = "Polarion endpoint URL is required";
-            return false;
+            return std::unexpected(ConnectorError::Make(
+                ConnectorErrorCode::InvalidConfig, "Polarion endpoint URL is required"));
         }
 
-        if (!ConnectorHttp::ValidatePublicHttpEndpoint(connection.m_Endpoint, errorMessage))
+        if (auto r = ConnectorHttp::ValidatePublicHttpEndpoint(connection.m_Endpoint); !r)
         {
             LOG_SECURITY_WARN("[security] polarion_endpoint_rejected connection='{}' reason='{}'",
-                              connection.m_Name, errorMessage);
-            return false;
+                              connection.m_Name, r.error().m_Details);
+            return std::unexpected(std::move(r.error()));
         }
 
         auto it = connection.m_Params.find("project_id");
         if (it == connection.m_Params.end() || it->second.empty())
         {
-            errorMessage = "Polarion project_id is required";
-            return false;
+            return std::unexpected(ConnectorError::Make(
+                ConnectorErrorCode::InvalidConfig, "Polarion project_id is required"));
         }
 
         // Resolve credentials to verify the key is valid
         CloudCredentials credentials;
-        if (!ResolveCredentials(connection, credentials, errorMessage))
+        std::string credErr;
+        if (!ResolveCredentials(connection, credentials, credErr))
         {
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::CredentialMissing, std::move(credErr)));
         }
 
         if (ICloudTaskExecutor::ContainsCrlf(credentials.m_Token))
         {
-            errorMessage = "Polarion PAT contains CR/LF — refusing to send";
             ConnectorHttp::IncrementCredentialCrlfRejection();
             LOG_SECURITY_WARN("[security] polarion_test_pat_crlf_rejected connection='{}'", connection.m_Name);
-            return false;
+            return std::unexpected(ConnectorError::Make(
+                ConnectorErrorCode::CredentialInvalid, "Polarion PAT contains CR/LF — refusing to send"));
         }
 
         // Perform a minimal query (page 1, size 1) to validate connectivity
@@ -87,13 +88,14 @@ namespace AIAssistant
                "/workitems?query=" + PolarionClient::UrlEncode("type:requirement") +
                "&page%5Bsize%5D=1&page%5Bnumber%5D=1";
 
-        if (!client.HttpGet(url, credentials.m_Token, responseBody, errorMessage))
+        std::string httpErr;
+        if (!client.HttpGet(url, credentials.m_Token, responseBody, httpErr))
         {
-            errorMessage = "Polarion connectivity test failed: " + errorMessage;
-            return false;
+            return std::unexpected(ConnectorError::Make(
+                ConnectorErrorCode::NetworkError, "Polarion connectivity test failed: " + httpErr));
         }
 
-        return true;
+        return {};
     }
 
     bool PolarionConnector::ResolveCredentials(CloudConnection const& connection, CloudCredentials& credentials,

@@ -447,7 +447,7 @@ namespace AIAssistant::ConnectorHttp
         return false;
     }
 
-    bool ValidatePublicHttpEndpoint(std::string const& url, std::string& errorMessage)
+    std::expected<void, ConnectorError> ValidatePublicHttpEndpoint(std::string const& url)
     {
         // Wrap the inner check so every false-return path bumps the counter
         // exactly once.  Avoids 5 increment-then-return sites in the body.
@@ -541,11 +541,12 @@ namespace AIAssistant::ConnectorHttp
             return true;
         };
 
-        bool const ok = inner(url, errorMessage);
-        if (!ok)
+        std::string innerErr;
+        if (!inner(url, innerErr))
         {
             g_EndpointSsrfRejectionCount.fetch_add(1, std::memory_order_relaxed);
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::InvalidEndpoint, std::move(innerErr)));
         }
-        return ok;
+        return {};
     }
 } // namespace AIAssistant::ConnectorHttp

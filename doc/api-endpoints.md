@@ -1374,8 +1374,10 @@ Overlays provided fields on the existing connection. Only specified fields are u
 ### POST /api/connections/\<name\>/test
 Tests the connection using the `ICloudConnector::TestConnection()` method for the connection's type.
 **Response (200):** `{ "ok": true }`
-**Response (400):** `{ "ok": false, "error": "test_failed", "message": "Connection refused" }`
+**Response (400):** `{ "ok": false, "error": "test_failed", "code": "network_error", "message": "S3 test failed: Could not connect to server" }`
 **Response (400):** `{ "ok": false, "error": "no_connector", "message": "No connector registered for type 'xyz'" }`
+
+The `code` field on `test_failed` responses (Sitting 7b) is the lowercase-snake form of `ConnectorErrorCode` — one of `invalid_config` / `invalid_endpoint` / `credential_missing` / `credential_invalid` / `oauth_error` / `network_error` / `auth_failure` / `http_error` / `unknown_error`.  Stable identifiers the dashboard switches on for remediation copy.  The breaker records the same code via `CloudCircuitBreaker::RecordFailure`; it surfaces as `last_failure_code` on the per-connection entry of `/api/status::connection_health`.
 
 ### POST /api/connections/save
 Serializes all connections to `connections.json` in the launch directory.  The write is atomic (tmp-file + rename) — on a 5xx response the existing `connections.json` is left unchanged.

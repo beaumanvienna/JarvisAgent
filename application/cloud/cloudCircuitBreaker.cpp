@@ -93,12 +93,17 @@ namespace AIAssistant
         return it != m_Circuits.end() && it->second.m_EverSucceeded;
     }
 
-    void CloudCircuitBreaker::RecordFailure(std::string const& connectionName)
+    void CloudCircuitBreaker::RecordFailure(std::string const& connectionName,
+                                            std::optional<ConnectorErrorCode> errorCode)
     {
         std::lock_guard lock(m_Mutex);
         auto& circuit = m_Circuits[connectionName];
 
         ++circuit.m_ConsecutiveFailures;
+        if (errorCode.has_value())
+        {
+            circuit.m_LastFailureCode = errorCode;
+        }
 
         switch (circuit.m_State)
         {
@@ -159,6 +164,7 @@ namespace AIAssistant
             health.m_State = circuit.m_State;
             health.m_ConsecutiveFailures = circuit.m_ConsecutiveFailures;
             health.m_EverSucceeded = circuit.m_EverSucceeded;
+            health.m_LastFailureCode = circuit.m_LastFailureCode;
             result.push_back(std::move(health));
         }
         return result;

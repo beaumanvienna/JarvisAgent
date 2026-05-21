@@ -25,8 +25,11 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <string>
 #include <string_view>
+
+#include "cloud/connectorError.h"
 
 typedef void CURL;
 
@@ -146,12 +149,13 @@ namespace AIAssistant::ConnectorHttp
     //   - Host charset is conservative: alphanumeric + `.` + `-` only.
     //   - Host capped at 253 chars (DNS limit); URL capped at 2048.
     //
-    // Populates errorMessage on rejection.  Purely syntactic — does NOT do
+    // Returns `ConnectorError` with `m_Code == InvalidEndpoint` on rejection
+    // (the SSRF-gate counter is also bumped).  Purely syntactic — does NOT do
     // DNS resolution, so an attacker who controls a public DNS name that
     // resolves to an internal IP is NOT blocked here.  Catching that requires
     // a resolver-time post-resolve check (CURLOPT_OPENSOCKETFUNCTION); out
     // of scope for this helper.
-    bool ValidatePublicHttpEndpoint(std::string const& url, std::string& errorMessage);
+    [[nodiscard]] std::expected<void, ConnectorError> ValidatePublicHttpEndpoint(std::string const& url);
 
     // Lifetime counters for the cloud-surface security gates.  All atomic,
     // lock-free, monotonically increasing.  Surfaced via `/api/debug/signals`

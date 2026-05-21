@@ -91,34 +91,35 @@ namespace AIAssistant
         return errorMessage.empty();
     }
 
-    bool JiraConnector::TestConnection(CloudConnection const& connection, std::string& errorMessage)
+    std::expected<void, ConnectorError> JiraConnector::TestConnection(CloudConnection const& connection)
     {
         if (connection.m_Endpoint.empty())
         {
-            errorMessage = "Jira connection requires an endpoint (e.g. 'https://mycompany.atlassian.net')";
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::InvalidConfig,
+                "Jira connection requires an endpoint (e.g. 'https://mycompany.atlassian.net')"));
         }
 
-        if (!ConnectorHttp::ValidatePublicHttpEndpoint(connection.m_Endpoint, errorMessage))
+        if (auto r = ConnectorHttp::ValidatePublicHttpEndpoint(connection.m_Endpoint); !r)
         {
             LOG_SECURITY_WARN("[security] jira_endpoint_rejected connection='{}' reason='{}'",
-                              connection.m_Name, errorMessage);
-            return false;
+                              connection.m_Name, r.error().m_Details);
+            return std::unexpected(std::move(r.error()));
         }
 
         CloudCredentials credentials;
-        if (!ResolveCredentials(connection, credentials, errorMessage))
+        std::string credErr;
+        if (!ResolveCredentials(connection, credentials, credErr))
         {
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::CredentialMissing, std::move(credErr)));
         }
 
         if (credentials.m_AuthType != CloudAuthType::BasicAuth &&
             ICloudTaskExecutor::ContainsCrlf(credentials.m_Token))
         {
-            errorMessage = "Jira bearer token contains CR/LF — refusing to send";
             ConnectorHttp::IncrementCredentialCrlfRejection();
             LOG_SECURITY_WARN("[security] jira_test_bearer_crlf_rejected connection='{}'", connection.m_Name);
-            return false;
+            return std::unexpected(ConnectorError::Make(
+                ConnectorErrorCode::CredentialInvalid, "Jira bearer token contains CR/LF — refusing to send"));
         }
 
         // GET /rest/api/3/myself — verifies credentials
@@ -127,8 +128,7 @@ namespace AIAssistant
         CURL* curl = curl_easy_init();
         if (!curl)
         {
-            errorMessage = "curl_easy_init() failed";
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::NetworkError, "curl_easy_init() failed"));
         }
 
         std::string responseBody;
@@ -162,26 +162,26 @@ namespace AIAssistant
 
         if (res != CURLE_OK)
         {
-            errorMessage = std::string("Jira test failed: ") + curl_easy_strerror(res);
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::NetworkError,
+                std::string("Jira test failed: ") + curl_easy_strerror(res)));
         }
 
-        if (httpCode == 401)
+        if (httpCode == 401 || httpCode == 403)
         {
-            errorMessage = "Jira test failed: unauthorized (HTTP 401) — check credentials";
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::AuthFailure,
+                "Jira test failed: HTTP " + std::to_string(httpCode) + " — check credentials"));
         }
 
         if (httpCode >= 400)
         {
-            errorMessage = "Jira test failed: HTTP " + std::to_string(httpCode);
+            std::string details = "Jira test failed: HTTP " + std::to_string(httpCode);
             if (!responseBody.empty() && responseBody.size() < 500)
             {
-                errorMessage += ": " + responseBody;
+                details += ": " + responseBody;
             }
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::HttpError, std::move(details)));
         }
 
-        return true;
+        return {};
     }
 } // namespace AIAssistant

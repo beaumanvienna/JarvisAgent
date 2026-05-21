@@ -129,34 +129,37 @@ namespace AIAssistant
         return "https://" + bucket + ".s3." + region + ".amazonaws.com";
     }
 
-    bool S3Connector::TestConnection(CloudConnection const& connection, std::string& errorMessage)
+    std::expected<void, ConnectorError> S3Connector::TestConnection(CloudConnection const& connection)
     {
         auto regionIt = connection.m_Params.find("region");
         if (regionIt == connection.m_Params.end() || regionIt->second.empty())
         {
-            errorMessage = "S3 connection requires 'region' parameter";
-            return false;
+            return std::unexpected(ConnectorError::Make(
+                ConnectorErrorCode::InvalidConfig, "S3 connection requires 'region' parameter"));
         }
 
         auto bucketIt = connection.m_Params.find("bucket");
         if (bucketIt == connection.m_Params.end() || bucketIt->second.empty())
         {
-            errorMessage = "S3 connection requires 'bucket' parameter";
-            return false;
+            return std::unexpected(ConnectorError::Make(
+                ConnectorErrorCode::InvalidConfig, "S3 connection requires 'bucket' parameter"));
         }
 
-        if (!connection.m_Endpoint.empty() &&
-            !ConnectorHttp::ValidatePublicHttpEndpoint(connection.m_Endpoint, errorMessage))
+        if (!connection.m_Endpoint.empty())
         {
-            LOG_SECURITY_WARN("[security] s3_endpoint_rejected connection='{}' reason='{}'",
-                              connection.m_Name, errorMessage);
-            return false;
+            if (auto r = ConnectorHttp::ValidatePublicHttpEndpoint(connection.m_Endpoint); !r)
+            {
+                LOG_SECURITY_WARN("[security] s3_endpoint_rejected connection='{}' reason='{}'",
+                                  connection.m_Name, r.error().m_Details);
+                return std::unexpected(std::move(r.error()));
+            }
         }
 
         CloudCredentials credentials;
-        if (!ResolveCredentials(connection, credentials, errorMessage))
+        std::string credErr;
+        if (!ResolveCredentials(connection, credentials, credErr))
         {
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::CredentialMissing, std::move(credErr)));
         }
 
         // List objects (max 1) to verify connectivity
@@ -169,8 +172,7 @@ namespace AIAssistant
         CURL* curl = curl_easy_init();
         if (!curl)
         {
-            errorMessage = "curl_easy_init() failed";
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::NetworkError, "curl_easy_init() failed"));
         }
 
         std::string responseBody;
@@ -197,20 +199,30 @@ namespace AIAssistant
 
         if (res != CURLE_OK)
         {
-            errorMessage = std::string("S3 test failed: ") + curl_easy_strerror(res);
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::NetworkError,
+                std::string("S3 test failed: ") + curl_easy_strerror(res)));
+        }
+
+        if (httpCode == 401 || httpCode == 403)
+        {
+            std::string details = "S3 test failed: HTTP " + std::to_string(httpCode);
+            if (!responseBody.empty() && responseBody.size() < 500)
+            {
+                details += ": " + responseBody;
+            }
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::AuthFailure, std::move(details)));
         }
 
         if (httpCode >= 400)
         {
-            errorMessage = "S3 test failed: HTTP " + std::to_string(httpCode);
+            std::string details = "S3 test failed: HTTP " + std::to_string(httpCode);
             if (!responseBody.empty() && responseBody.size() < 500)
             {
-                errorMessage += ": " + responseBody;
+                details += ": " + responseBody;
             }
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::HttpError, std::move(details)));
         }
 
-        return true;
+        return {};
     }
 } // namespace AIAssistant

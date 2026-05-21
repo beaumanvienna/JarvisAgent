@@ -92,31 +92,34 @@ namespace AIAssistant
         return errorMessage.empty();
     }
 
-    bool SlackConnector::TestConnection(CloudConnection const& connection, std::string& errorMessage)
+    std::expected<void, ConnectorError> SlackConnector::TestConnection(CloudConnection const& connection)
     {
         // Validate user-supplied endpoint override (if any) before any credential
         // resolution / network I/O.  Default endpoint is the trusted vendor URL.
-        if (!connection.m_Endpoint.empty() &&
-            !ConnectorHttp::ValidatePublicHttpEndpoint(connection.m_Endpoint, errorMessage))
+        if (!connection.m_Endpoint.empty())
         {
-            LOG_SECURITY_WARN("[security] slack_endpoint_rejected connection='{}' reason='{}'",
-                              connection.m_Name, errorMessage);
-            return false;
+            if (auto r = ConnectorHttp::ValidatePublicHttpEndpoint(connection.m_Endpoint); !r)
+            {
+                LOG_SECURITY_WARN("[security] slack_endpoint_rejected connection='{}' reason='{}'",
+                                  connection.m_Name, r.error().m_Details);
+                return std::unexpected(std::move(r.error()));
+            }
         }
 
         CloudCredentials credentials;
-        if (!ResolveCredentials(connection, credentials, errorMessage))
+        std::string credErr;
+        if (!ResolveCredentials(connection, credentials, credErr))
         {
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::CredentialMissing, std::move(credErr)));
         }
 
         // Reject CR/LF in bearer token before splicing into the Authorization header.
         if (ICloudTaskExecutor::ContainsCrlf(credentials.m_Token))
         {
-            errorMessage = "Slack bearer token contains CR/LF — refusing to send";
             ConnectorHttp::IncrementCredentialCrlfRejection();
             LOG_SECURITY_WARN("[security] slack_test_bearer_crlf_rejected connection='{}'", connection.m_Name);
-            return false;
+            return std::unexpected(ConnectorError::Make(
+                ConnectorErrorCode::CredentialInvalid, "Slack bearer token contains CR/LF — refusing to send"));
         }
 
         // POST /api/auth.test — verifies token and returns workspace info
@@ -125,8 +128,7 @@ namespace AIAssistant
         CURL* curl = curl_easy_init();
         if (!curl)
         {
-            errorMessage = "curl_easy_init() failed";
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::NetworkError, "curl_easy_init() failed"));
         }
 
         std::string responseBody;
@@ -153,14 +155,20 @@ namespace AIAssistant
 
         if (res != CURLE_OK)
         {
-            errorMessage = std::string("Slack test failed: ") + curl_easy_strerror(res);
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::NetworkError,
+                std::string("Slack test failed: ") + curl_easy_strerror(res)));
+        }
+
+        if (httpCode == 401 || httpCode == 403)
+        {
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::AuthFailure,
+                "Slack test failed: HTTP " + std::to_string(httpCode)));
         }
 
         if (httpCode >= 400)
         {
-            errorMessage = "Slack test failed: HTTP " + std::to_string(httpCode);
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::HttpError,
+                "Slack test failed: HTTP " + std::to_string(httpCode)));
         }
 
         // Slack returns {"ok": true/false} even on HTTP 200
@@ -170,25 +178,26 @@ namespace AIAssistant
 
         if (parser.iterate(paddedJson).get(doc))
         {
-            errorMessage = "Slack test: failed to parse response";
-            return false;
+            return std::unexpected(ConnectorError::Make(
+                ConnectorErrorCode::HttpError, "Slack test: failed to parse response"));
         }
 
         bool ok = false;
         if (doc["ok"].get_bool().get(ok) || !ok)
         {
             std::string_view slackError;
+            std::string details = "Slack auth.test failed: ";
             if (!doc["error"].get_string().get(slackError))
             {
-                errorMessage = "Slack auth.test failed: " + std::string(slackError);
+                details += std::string(slackError);
             }
             else
             {
-                errorMessage = "Slack auth.test failed: invalid token";
+                details += "invalid token";
             }
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::AuthFailure, std::move(details)));
         }
 
-        return true;
+        return {};
     }
 } // namespace AIAssistant

@@ -164,18 +164,19 @@ namespace AIAssistant
         return true;
     }
 
-    bool SnowflakeConnector::TestConnection(CloudConnection const& connection, std::string& errorMessage)
+    std::expected<void, ConnectorError> SnowflakeConnector::TestConnection(CloudConnection const& connection)
     {
         if (connection.m_Endpoint.empty())
         {
-            errorMessage = "Snowflake connection requires an endpoint (account locator, e.g. 'xy12345.us-east-1')";
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::InvalidConfig,
+                "Snowflake connection requires an endpoint (account locator, e.g. 'xy12345.us-east-1')"));
         }
 
         CloudCredentials credentials;
-        if (!ResolveCredentials(connection, credentials, errorMessage))
+        std::string credErr;
+        if (!ResolveCredentials(connection, credentials, credErr))
         {
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::CredentialMissing, std::move(credErr)));
         }
 
         // POST /api/v2/statements with SELECT 1.  BuildApiBaseUrl validates the
@@ -184,18 +185,18 @@ namespace AIAssistant
         std::string apiBase = BuildApiBaseUrl(connection.m_Endpoint);
         if (apiBase.empty())
         {
-            errorMessage = "Snowflake endpoint rejected: invalid account locator (see security log)";
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::InvalidEndpoint,
+                "Snowflake endpoint rejected: invalid account locator (see security log)"));
         }
         // Reject CR/LF in the JWT before splicing into the Authorization header
         // (parallel to the executor's check).
         if (credentials.m_Token.find('\r') != std::string::npos ||
             credentials.m_Token.find('\n') != std::string::npos)
         {
-            errorMessage = "Snowflake JWT contains CR/LF — refusing to send";
             ConnectorHttp::IncrementCredentialCrlfRejection();
             LOG_SECURITY_WARN("[security] snowflake_test_jwt_crlf_rejected connection='{}'", connection.m_Name);
-            return false;
+            return std::unexpected(ConnectorError::Make(
+                ConnectorErrorCode::CredentialInvalid, "Snowflake JWT contains CR/LF — refusing to send"));
         }
         std::string url = apiBase + "/api/v2/statements";
 
@@ -231,8 +232,7 @@ namespace AIAssistant
         CURL* curl = curl_easy_init();
         if (!curl)
         {
-            errorMessage = "curl_easy_init() failed";
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::NetworkError, "curl_easy_init() failed"));
         }
 
         std::string responseBody;
@@ -281,15 +281,15 @@ namespace AIAssistant
 
         if (res != CURLE_OK)
         {
-            errorMessage = std::string("Snowflake test failed: ") + curl_easy_strerror(res);
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::NetworkError,
+                std::string("Snowflake test failed: ") + curl_easy_strerror(res)));
         }
 
         if (httpCode == 401 || httpCode == 403)
         {
-            errorMessage = "Snowflake test failed: authentication error (HTTP " + std::to_string(httpCode) +
-                           ") — check RSA key pair and user assignment";
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::AuthFailure,
+                "Snowflake test failed: authentication error (HTTP " + std::to_string(httpCode) +
+                    ") — check RSA key pair and user assignment"));
         }
 
         if (httpCode >= 400)
@@ -298,10 +298,10 @@ namespace AIAssistant
             // as the executor's submit/poll error paths: Snowflake error responses
             // can include schema names + partial query data that shouldn't leak
             // into persisted error state.
-            errorMessage = "Snowflake test failed: HTTP " + std::to_string(httpCode);
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::HttpError,
+                "Snowflake test failed: HTTP " + std::to_string(httpCode)));
         }
 
-        return true;
+        return {};
     }
 } // namespace AIAssistant

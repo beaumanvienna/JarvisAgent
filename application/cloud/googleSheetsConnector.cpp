@@ -123,35 +123,38 @@ namespace AIAssistant
         return false;
     }
 
-    bool GoogleSheetsConnector::TestConnection(CloudConnection const& connection, std::string& errorMessage)
+    std::expected<void, ConnectorError> GoogleSheetsConnector::TestConnection(CloudConnection const& connection)
     {
         auto spreadsheetIdIt = connection.m_Params.find("spreadsheet_id");
         if (spreadsheetIdIt == connection.m_Params.end() || spreadsheetIdIt->second.empty())
         {
-            errorMessage = "Google Sheets connection requires 'spreadsheet_id' parameter";
-            return false;
+            return std::unexpected(ConnectorError::Make(
+                ConnectorErrorCode::InvalidConfig, "Google Sheets connection requires 'spreadsheet_id' parameter"));
         }
 
-        if (!connection.m_Endpoint.empty() &&
-            !ConnectorHttp::ValidatePublicHttpEndpoint(connection.m_Endpoint, errorMessage))
+        if (!connection.m_Endpoint.empty())
         {
-            LOG_SECURITY_WARN("[security] google_sheets_endpoint_rejected connection='{}' reason='{}'",
-                              connection.m_Name, errorMessage);
-            return false;
+            if (auto r = ConnectorHttp::ValidatePublicHttpEndpoint(connection.m_Endpoint); !r)
+            {
+                LOG_SECURITY_WARN("[security] google_sheets_endpoint_rejected connection='{}' reason='{}'",
+                                  connection.m_Name, r.error().m_Details);
+                return std::unexpected(std::move(r.error()));
+            }
         }
 
         CloudCredentials credentials;
-        if (!ResolveCredentials(connection, credentials, errorMessage))
+        std::string credErr;
+        if (!ResolveCredentials(connection, credentials, credErr))
         {
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::CredentialMissing, std::move(credErr)));
         }
 
         if (ICloudTaskExecutor::ContainsCrlf(credentials.m_Token))
         {
-            errorMessage = "Google Sheets credential contains CR/LF — refusing to send";
             ConnectorHttp::IncrementCredentialCrlfRejection();
             LOG_SECURITY_WARN("[security] google_sheets_test_token_crlf_rejected connection='{}'", connection.m_Name);
-            return false;
+            return std::unexpected(ConnectorError::Make(
+                ConnectorErrorCode::CredentialInvalid, "Google Sheets credential contains CR/LF — refusing to send"));
         }
 
         // GET /{spreadsheet_id}?fields=properties.title
@@ -169,8 +172,7 @@ namespace AIAssistant
         CURL* curl = curl_easy_init();
         if (!curl)
         {
-            errorMessage = "curl_easy_init() failed";
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::NetworkError, "curl_easy_init() failed"));
         }
 
         std::string responseBody;
@@ -199,20 +201,30 @@ namespace AIAssistant
 
         if (res != CURLE_OK)
         {
-            errorMessage = std::string("Google Sheets test failed: ") + curl_easy_strerror(res);
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::NetworkError,
+                std::string("Google Sheets test failed: ") + curl_easy_strerror(res)));
+        }
+
+        if (httpCode == 401 || httpCode == 403)
+        {
+            std::string details = "Google Sheets test failed: HTTP " + std::to_string(httpCode);
+            if (!responseBody.empty() && responseBody.size() < 500)
+            {
+                details += ": " + responseBody;
+            }
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::AuthFailure, std::move(details)));
         }
 
         if (httpCode >= 400)
         {
-            errorMessage = "Google Sheets test failed: HTTP " + std::to_string(httpCode);
+            std::string details = "Google Sheets test failed: HTTP " + std::to_string(httpCode);
             if (!responseBody.empty() && responseBody.size() < 500)
             {
-                errorMessage += ": " + responseBody;
+                details += ": " + responseBody;
             }
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::HttpError, std::move(details)));
         }
 
-        return true;
+        return {};
     }
 } // namespace AIAssistant

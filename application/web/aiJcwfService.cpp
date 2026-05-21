@@ -1075,10 +1075,9 @@ namespace AIAssistant
 
         WorkflowJsonParser parser;
         WorkflowDefinition parsedWorkflow;
-        std::string parseError;
-        if (!parser.ParseWorkflowJson(jcwfJsonText, parsedWorkflow, parseError))
+        if (auto r = parser.ParseWorkflowJson(jcwfJsonText, parsedWorkflow); !r)
         {
-            outValidationSummary = "Parse error: " + parseError;
+            outValidationSummary = "Parse error: " + r.error().m_Details;
             return false;
         }
 

@@ -405,8 +405,9 @@ namespace AIAssistant
 
             WorkflowJsonParser workflowJsonParser;
             WorkflowDefinition parsedWorkflow;
-            if (!workflowJsonParser.ParseWorkflowJson(workflowJsonText, parsedWorkflow, parseErrorMessageOut))
+            if (auto r = workflowJsonParser.ParseWorkflowJson(workflowJsonText, parsedWorkflow); !r)
             {
+                parseErrorMessageOut = std::move(r.error().m_Details);
                 return;
             }
 

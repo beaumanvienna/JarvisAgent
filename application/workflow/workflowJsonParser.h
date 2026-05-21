@@ -20,11 +20,13 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 #pragma once
 
+#include <expected>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 #include "simdjson/simdjson.h"
+#include "workflow/parserError.h"
 #include "workflow/workflowRegistry.h"
 #include "workflow/workflowTypes.h"
 
@@ -34,19 +36,20 @@ namespace AIAssistant
     {
     public:
         // Parse a JCWF workflow JSON document into a WorkflowDefinition.
-        // Returns true on success; on failure, errorMessage is populated.
-        bool ParseWorkflowJson(std::string const& jsonContent, WorkflowDefinition& workflowOut,
-                               std::string& errorMessage) const;
+        // Returns void on success; on failure, a typed `ParserError` carries
+        // the machine-actionable code + human-readable detail.
+        [[nodiscard]] std::expected<void, ParserError>
+            ParseWorkflowJson(std::string const& jsonContent, WorkflowDefinition& workflowOut) const;
 
         // Parse a global.json file (container metadata only: version, id, label, doc,
         // triggers, manual_start, defaults). Does NOT parse tasks/dataflow/etc.
-        bool ParseGlobalJson(std::string const& jsonContent, WorkflowDefinition& workflowOut,
-                             std::string& errorMessage) const;
+        [[nodiscard]] std::expected<void, ParserError>
+            ParseGlobalJson(std::string const& jsonContent, WorkflowDefinition& workflowOut) const;
 
         // Parse a canvas JSON file (tasks, dataflow, filters, control_nodes, controlflow).
         // Metadata fields (version, id, label, etc.) are optional and ignored if present.
-        bool ParseCanvasJson(std::string const& jsonContent, WorkflowDefinition& workflowOut,
-                             std::string& errorMessage) const;
+        [[nodiscard]] std::expected<void, ParserError>
+            ParseCanvasJson(std::string const& jsonContent, WorkflowDefinition& workflowOut) const;
 
     private:
         // Root object parser (top-level workflow object).  The simdjson
@@ -54,60 +57,70 @@ namespace AIAssistant
         // copy of pointers into the document arena and would dangle if the
         // arena moves.  Every Parse* helper in this file follows the same
         // by-reference convention.
-        bool ParseRootObject(simdjson::ondemand::object& rootObject, WorkflowDefinition& workflowOut,
-                             std::string& errorMessage) const;
+        [[nodiscard]] std::expected<void, ParserError>
+            ParseRootObject(simdjson::ondemand::object& rootObject, WorkflowDefinition& workflowOut) const;
 
         // Sub-parsers (implemented in workflowJsonParserDetails.cpp)
-        bool ParseTriggers(simdjson::ondemand::value& jsonValue, std::vector<WorkflowTrigger>& triggersOut,
-                           std::string& errorMessage) const;
+        [[nodiscard]] std::expected<void, ParserError>
+            ParseTriggers(simdjson::ondemand::value& jsonValue, std::vector<WorkflowTrigger>& triggersOut) const;
 
-        bool ParseTrigger(simdjson::ondemand::object& jsonObject, WorkflowTrigger& triggerOut,
-                          std::string& errorMessage) const;
+        [[nodiscard]] std::expected<void, ParserError>
+            ParseTrigger(simdjson::ondemand::object& jsonObject, WorkflowTrigger& triggerOut) const;
 
-        bool ParseTasks(simdjson::ondemand::value& jsonValue, std::unordered_map<std::string, TaskDef>& tasksOut,
-                        std::string& errorMessage) const;
+        [[nodiscard]] std::expected<void, ParserError>
+            ParseTasks(simdjson::ondemand::value& jsonValue, std::unordered_map<std::string, TaskDef>& tasksOut) const;
 
-        bool ParseTask(simdjson::ondemand::object& jsonObject, TaskDef& taskOut, std::string& errorMessage) const;
+        [[nodiscard]] std::expected<void, ParserError>
+            ParseTask(simdjson::ondemand::object& jsonObject, TaskDef& taskOut) const;
 
-        bool ParseTaskInputs(simdjson::ondemand::value& jsonValue, TaskIOMap& inputsOut, std::string& errorMessage) const;
+        [[nodiscard]] std::expected<void, ParserError>
+            ParseTaskInputs(simdjson::ondemand::value& jsonValue, TaskIOMap& inputsOut) const;
 
-        bool ParseTaskOutputs(simdjson::ondemand::value& jsonValue, TaskIOMap& outputsOut, std::string& errorMessage) const;
+        [[nodiscard]] std::expected<void, ParserError>
+            ParseTaskOutputs(simdjson::ondemand::value& jsonValue, TaskIOMap& outputsOut) const;
 
-        bool ParseTaskEnvironment(simdjson::ondemand::value& jsonValue, TaskEnvironment& environmentOut,
-                                  std::string& errorMessage) const;
+        [[nodiscard]] std::expected<void, ParserError>
+            ParseTaskEnvironment(simdjson::ondemand::value& jsonValue, TaskEnvironment& environmentOut) const;
 
-        bool ParseTaskQueueBinding(simdjson::ondemand::value& jsonValue, QueueBinding& bindingOut,
-                                   std::string& errorMessage) const;
+        [[nodiscard]] std::expected<void, ParserError>
+            ParseTaskQueueBinding(simdjson::ondemand::value& jsonValue, QueueBinding& bindingOut) const;
 
-        bool ParseDataflow(simdjson::ondemand::value& jsonValue, std::vector<DataflowDef>& dataflowsOut,
-                           std::string& errorMessage) const;
+        [[nodiscard]] std::expected<void, ParserError>
+            ParseDataflow(simdjson::ondemand::value& jsonValue, std::vector<DataflowDef>& dataflowsOut) const;
 
-        bool ParseSingleDataflow(simdjson::ondemand::object& jsonObject, DataflowDef& dataflowOut,
-                                 std::string& errorMessage) const;
+        [[nodiscard]] std::expected<void, ParserError>
+            ParseSingleDataflow(simdjson::ondemand::object& jsonObject, DataflowDef& dataflowOut) const;
 
-        bool ParseRetries(simdjson::ondemand::object& jsonObject, RetryPolicy& retryPolicyOut,
-                          std::string& errorMessage) const;
+        [[nodiscard]] std::expected<void, ParserError>
+            ParseRetries(simdjson::ondemand::object& jsonObject, RetryPolicy& retryPolicyOut) const;
 
-        bool ParseDefaults(simdjson::ondemand::object& jsonObject, WorkflowDefaults& defaultsOut,
-                           std::string& errorMessage) const;
+        [[nodiscard]] std::expected<void, ParserError>
+            ParseDefaults(simdjson::ondemand::object& jsonObject, WorkflowDefaults& defaultsOut) const;
 
         // Filter parsers (v1.1)
-        bool ParseFilters(simdjson::ondemand::value& jsonValue, std::vector<FilterDef>& filtersOut,
-                          std::string& errorMessage) const;
+        [[nodiscard]] std::expected<void, ParserError>
+            ParseFilters(simdjson::ondemand::value& jsonValue, std::vector<FilterDef>& filtersOut) const;
 
-        bool ParseFilter(simdjson::ondemand::object& jsonObject, FilterDef& filterOut, std::string& errorMessage) const;
+        [[nodiscard]] std::expected<void, ParserError>
+            ParseFilter(simdjson::ondemand::object& jsonObject, FilterDef& filterOut) const;
 
-        bool ParseFilterSource(simdjson::ondemand::object& jsonObject, FilterSource& sourceOut,
-                               std::string& errorMessage) const;
+        [[nodiscard]] std::expected<void, ParserError>
+            ParseFilterSource(simdjson::ondemand::object& jsonObject, FilterSource& sourceOut) const;
 
         // Control-flow graph extensions (branching)
-        bool ParseControlNodes(simdjson::ondemand::value& jsonValue, std::vector<ControlNodeDef>& controlNodesOut,
-                               std::string& errorMessage) const;
+        [[nodiscard]] std::expected<void, ParserError>
+            ParseControlNodes(simdjson::ondemand::value& jsonValue,
+                              std::vector<ControlNodeDef>& controlNodesOut) const;
 
-        bool ParseControlflow(simdjson::ondemand::value& jsonValue, std::vector<ControlflowEdgeDef>& controlflowOut,
-                              std::string& errorMessage) const;
+        [[nodiscard]] std::expected<void, ParserError>
+            ParseControlflow(simdjson::ondemand::value& jsonValue,
+                             std::vector<ControlflowEdgeDef>& controlflowOut) const;
 
-        // Utility helpers
+        // Utility helpers — kept on the legacy `bool + std::string&` shape per
+        // the Sitting 7c scope decision (plan named only the Parse* methods
+        // and the Require* shape helpers; these utilities sit one layer below
+        // and don't carry useful category information).  Parser methods
+        // bridge their failures into typed `SimdjsonError` at the call site.
         bool ExtractRawJson(simdjson::ondemand::value& element, std::string& rawJsonOut) const;
 
         bool ElementToString(simdjson::ondemand::value& element, std::string& output) const;

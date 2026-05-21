@@ -252,19 +252,20 @@ namespace AIAssistant
         return scheme + "://" + host + ":" + port;
     }
 
-    bool EmailConnector::TestConnection(CloudConnection const& connection, std::string& errorMessage)
+    std::expected<void, ConnectorError> EmailConnector::TestConnection(CloudConnection const& connection)
     {
         auto smtpHostIt = connection.m_Params.find("smtp_host");
         if (smtpHostIt == connection.m_Params.end() || smtpHostIt->second.empty())
         {
-            errorMessage = "Email connection requires 'smtp_host' parameter";
-            return false;
+            return std::unexpected(ConnectorError::Make(
+                ConnectorErrorCode::InvalidConfig, "Email connection requires 'smtp_host' parameter"));
         }
 
         CloudCredentials credentials;
-        if (!ResolveCredentials(connection, credentials, errorMessage))
+        std::string credErr;
+        if (!ResolveCredentials(connection, credentials, credErr))
         {
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::CredentialMissing, std::move(credErr)));
         }
 
         // Test SMTP connectivity with EHLO handshake via libcurl
@@ -272,15 +273,14 @@ namespace AIAssistant
         if (smtpUrl.empty())
         {
             // BuildSmtpUrl already emitted a SECURITY_WARN with the rejection reason.
-            errorMessage = "Email SMTP target rejected: invalid host or port (see security log)";
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::InvalidEndpoint,
+                "Email SMTP target rejected: invalid host or port (see security log)"));
         }
 
         CURL* curl = curl_easy_init();
         if (!curl)
         {
-            errorMessage = "curl_easy_init() failed";
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::NetworkError, "curl_easy_init() failed"));
         }
 
         curl_easy_setopt(curl, CURLOPT_URL, smtpUrl.c_str());
@@ -320,11 +320,11 @@ namespace AIAssistant
 
         if (res != CURLE_OK)
         {
-            errorMessage = std::string("Email SMTP test failed: ") + curl_easy_strerror(res);
-            return false;
+            return std::unexpected(ConnectorError::Make(ConnectorErrorCode::NetworkError,
+                std::string("Email SMTP test failed: ") + curl_easy_strerror(res)));
         }
 
-        return true;
+        return {};
     }
 
     // ========================================================================
