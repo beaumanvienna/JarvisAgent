@@ -22,6 +22,7 @@
 #pragma once
 
 #include <atomic>
+#include <memory>
 #include <string>
 #include <unordered_map>
 
@@ -30,6 +31,12 @@ struct curl_slist;
 
 namespace AIAssistant
 {
+    // Forward declaration to keep curlWrapper.h free of credential.h.  Threaded
+    // through QueryData so the SigV4 signer reads typed credential material
+    // instead of stringy m_Params fan-out.  Lifetime: shared_ptr snapshot taken
+    // under KeyManager's lock at request submit time (see AiRequestPool).
+    class AwsCredential;
+
     // Unified error code scheme for AI query results:
     //   0        = success
     //   1-99     = CURLcode (libcurl transport errors, used as-is)
@@ -132,6 +139,22 @@ namespace AIAssistant
             // the config-parse-time check.
             bool m_IsMock{false};
             std::string m_FixturePath;
+
+            // Typed credential snapshot for signers that need multi-secret
+            // material.  Populated at submit time when AuthStyle is AwsSigV4;
+            // null for the other styles which read m_ApiKey directly.  The
+            // shared_ptr is a deep copy of the resolved KeyManager entry taken
+            // under the KeyManager lock, so the request's view of the
+            // credential is stable across concurrent RemoveProvider /
+            // SetDefaultProvider mutations.
+            std::shared_ptr<AwsCredential const> m_AwsCredential{};
+
+            // Optional AWS SigV4 timestamp override (format: "YYYYMMDDTHHMMSSZ").
+            // Set only on mock paths from `<fixture>.meta.json::x_amz_date_override`
+            // so MockTransport produces a deterministic Authorization header for
+            // signature KAT tests.  Empty on live paths — Sign() falls back to
+            // FormatAmzDateNow().
+            std::string m_AmzDateOverride;
 
             bool IsValid() const;
         };

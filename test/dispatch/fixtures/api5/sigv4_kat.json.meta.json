@@ -1,0 +1,7 @@
+{
+  "http_status": 200,
+  "headers": {
+    "Content-Type": "application/json"
+  },
+  "x_amz_date_override": "20240101T120000Z"
+}

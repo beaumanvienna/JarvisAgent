@@ -1,3 +1,5 @@
+import { authFetch } from "@shared/api/auth";
+
 export type WorkflowListItem = {
   id: string;
   label?: string;
@@ -76,13 +78,13 @@ function withWorkflowId(workflowId: string, workflowJson: unknown): unknown
 
 export async function reloadWorkflowRegistry(): Promise<void>
 {
-  const response = await fetch("/api/workflows/reload", { method: "POST" });
+  const response = await authFetch("/api/workflows/reload", { method: "POST" });
   ensureOk(response);
 }
 
 export async function listWorkflows(): Promise<WorkflowListResponse>
 {
-  const response = await fetch("/api/workflows");
+  const response = await authFetch("/api/workflows");
   ensureOk(response);
   return (await response.json()) as WorkflowListResponse;
 }
@@ -93,7 +95,7 @@ export async function listWorkflows(): Promise<WorkflowListResponse>
  */
 export async function loadWorkflow(workflowId: string): Promise<unknown | null>
 {
-  const response = await fetch(`/api/workflows/${encodeURIComponent(workflowId)}`);
+  const response = await authFetch(`/api/workflows/${encodeURIComponent(workflowId)}`);
   if (response.status === 404)
   {
     return null;
@@ -104,7 +106,7 @@ export async function loadWorkflow(workflowId: string): Promise<unknown | null>
 
 export async function createWorkflow(workflowJson: unknown): Promise<WorkflowPersistResponse>
 {
-  const response = await fetch("/api/workflows", {
+  const response = await authFetch("/api/workflows", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(workflowJson),
@@ -124,7 +126,7 @@ export async function createWorkflowWithId(workflowId: string, workflowJson: unk
 
 export async function saveWorkflow(workflowId: string, workflowJson: unknown): Promise<WorkflowPersistResponse>
 {
-  const response = await fetch(`/api/workflows/${encodeURIComponent(workflowId)}`, {
+  const response = await authFetch(`/api/workflows/${encodeURIComponent(workflowId)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(withWorkflowId(workflowId, workflowJson)),
@@ -135,7 +137,7 @@ export async function saveWorkflow(workflowId: string, workflowJson: unknown): P
 
 export async function validateDraft(workflowJson: unknown): Promise<WorkflowValidationResponse>
 {
-  const response = await fetch("/api/workflows/validate", {
+  const response = await authFetch("/api/workflows/validate", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(workflowJson),
@@ -146,14 +148,14 @@ export async function validateDraft(workflowJson: unknown): Promise<WorkflowVali
 
 export async function validateWorkflow(workflowId: string): Promise<WorkflowValidationResponse>
 {
-  const response = await fetch(`/api/workflows/${encodeURIComponent(workflowId)}/validate`);
+  const response = await authFetch(`/api/workflows/${encodeURIComponent(workflowId)}/validate`);
   ensureOk(response);
   return (await response.json()) as WorkflowValidationResponse;
 }
 
 export async function runWorkflow(workflowId: string): Promise<WorkflowRunResponse>
 {
-  const response = await fetch(`/api/workflows/${encodeURIComponent(workflowId)}/run`, {
+  const response = await authFetch(`/api/workflows/${encodeURIComponent(workflowId)}/run`, {
     method: "POST",
   });
   ensureOk(response);
@@ -162,7 +164,7 @@ export async function runWorkflow(workflowId: string): Promise<WorkflowRunRespon
 
 export async function deleteWorkflow(workflowId: string): Promise<WorkflowDeleteResponse>
 {
-  const response = await fetch(`/api/workflows/${encodeURIComponent(workflowId)}`, {
+  const response = await authFetch(`/api/workflows/${encodeURIComponent(workflowId)}`, {
     method: "DELETE",
   });
   ensureOk(response);
@@ -179,7 +181,7 @@ export type CleanWorkflowResponse = {
 
 export async function cleanWorkflow(workflowId: string): Promise<CleanWorkflowResponse>
 {
-  const response = await fetch(`/api/workflows/${encodeURIComponent(workflowId)}/clean`, {
+  const response = await authFetch(`/api/workflows/${encodeURIComponent(workflowId)}/clean`, {
     method: "DELETE",
   });
   ensureOk(response);
@@ -194,7 +196,7 @@ export type CancelRunResponse = {
 
 export async function cancelRun(runId: string): Promise<CancelRunResponse>
 {
-  const response = await fetch(`/api/workflow-runs/${encodeURIComponent(runId)}/cancel`, {
+  const response = await authFetch(`/api/workflow-runs/${encodeURIComponent(runId)}/cancel`, {
     method: "POST",
   });
   ensureOk(response);
@@ -205,7 +207,7 @@ export type PauseRunResponse = { ok: boolean; runId: string; paused: boolean };
 
 export async function pauseRun(runId: string): Promise<PauseRunResponse>
 {
-  const response = await fetch(`/api/workflow-runs/${encodeURIComponent(runId)}/pause`, {
+  const response = await authFetch(`/api/workflow-runs/${encodeURIComponent(runId)}/pause`, {
     method: "POST",
   });
   ensureOk(response);
@@ -216,7 +218,7 @@ export type ResumeRunResponse = { ok: boolean; runId: string; resumed: boolean }
 
 export async function resumeRun(runId: string): Promise<ResumeRunResponse>
 {
-  const response = await fetch(`/api/workflow-runs/${encodeURIComponent(runId)}/resume`, {
+  const response = await authFetch(`/api/workflow-runs/${encodeURIComponent(runId)}/resume`, {
     method: "POST",
   });
   ensureOk(response);
@@ -227,7 +229,7 @@ export type StopRunResponse = { ok: boolean; runId: string; stopRequested: boole
 
 export async function stopRun(runId: string): Promise<StopRunResponse>
 {
-  const response = await fetch(`/api/workflow-runs/${encodeURIComponent(runId)}/stop`, {
+  const response = await authFetch(`/api/workflow-runs/${encodeURIComponent(runId)}/stop`, {
     method: "POST",
   });
   ensureOk(response);
@@ -268,7 +270,7 @@ export type ScriptCheckResponse = {
 
 export async function checkScript(scriptPath: string): Promise<ScriptCheckResponse>
 {
-  const response = await fetch(`/api/scripts/check?path=${encodeURIComponent(scriptPath)}`);
+  const response = await authFetch(`/api/scripts/check?path=${encodeURIComponent(scriptPath)}`);
   return (await response.json()) as ScriptCheckResponse;
 }
 
@@ -285,13 +287,13 @@ export async function checkFileExists(filePath: string, workflowId?: string, wd?
   let url = `/api/files/check?path=${encodeURIComponent(filePath)}`;
   if (workflowId) url += `&workflowId=${encodeURIComponent(workflowId)}`;
   if (wd) url += `&wd=${encodeURIComponent(wd)}`;
-  const response = await fetch(url);
+  const response = await authFetch(url);
   return (await response.json()) as FileCheckResponse;
 }
 
 export async function fetchRunDetails(runId: string): Promise<RunDetailResponse>
 {
-  const response = await fetch(`/api/workflow-runs/${encodeURIComponent(runId)}`);
+  const response = await authFetch(`/api/workflow-runs/${encodeURIComponent(runId)}`);
   ensureOk(response);
   return (await response.json()) as RunDetailResponse;
 }

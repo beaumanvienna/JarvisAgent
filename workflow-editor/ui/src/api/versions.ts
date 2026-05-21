@@ -1,3 +1,5 @@
+import { authFetch } from "@shared/api/auth";
+
 export type VersionEntry = {
   timestamp: string;
   sizeBytes?: number;
@@ -18,13 +20,13 @@ export type VersionRestoreResponse = {
 
 export async function listVersions(workflowId: string): Promise<VersionsListResponse>
 {
-  const response = await fetch(`/api/workflows/${encodeURIComponent(workflowId)}/versions`);
+  const response = await authFetch(`/api/workflows/${encodeURIComponent(workflowId)}/versions`);
   return (await response.json()) as VersionsListResponse;
 }
 
 export async function getVersionContent(workflowId: string, timestamp: string): Promise<string>
 {
-  const response = await fetch(
+  const response = await authFetch(
     `/api/workflows/${encodeURIComponent(workflowId)}/versions/${encodeURIComponent(timestamp)}`
   );
   return await response.text();
@@ -35,7 +37,7 @@ export async function restoreVersion(
   timestamp: string
 ): Promise<VersionRestoreResponse>
 {
-  const response = await fetch(
+  const response = await authFetch(
     `/api/workflows/${encodeURIComponent(workflowId)}/versions/${encodeURIComponent(timestamp)}/restore`,
     { method: "POST" }
   );

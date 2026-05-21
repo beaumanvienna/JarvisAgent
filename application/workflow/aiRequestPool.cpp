@@ -34,6 +34,7 @@
 
 #include "auxiliary/file.h"
 #include "core.h"
+#include "curlWrapper/curlManager.h"
 #include "curlWrapper/curlMultiDispatcher.h"
 #include "curlWrapper/curlWrapper.h"
 #include "curlWrapper/rateLimitStrategy.h"
@@ -1002,11 +1003,11 @@ namespace AIAssistant
             return result;
         }
 
-        // SigV4 (AWS) needs region + secret_access_key beyond the api_key.  Today's signer
-        // reads them from QueryData::m_Params so this helper rebuilds the legacy m_Params
-        // shape: starts with the credential's non-secret m_Params and reinjects the AWS
-        // SecureString fields.  When the SigV4 signer is migrated to read from AwsCredential
-        // directly (post-sitting-20), this reinjection becomes dead code.
+        // Returns the credential's non-secret m_Params unchanged.  Historical name
+        // ("ResolveProviderParams") predates the typed credential threading — secret
+        // AWS material now flows through QueryData::m_AwsCredential, see
+        // ResolveAwsCredentialSnapshot below.  Kept as a thin wrapper so call sites
+        // don't grow an inline lambda.
         std::unordered_map<std::string, std::string> ResolveProviderParams(
             ConfigParser::EngineConfig::ApiInterface const& api)
         {
@@ -1015,21 +1016,6 @@ namespace AIAssistant
             auto extract = [&](ICredential const& cred)
             {
                 params = cred.m_Params;
-                if (auto const* aws = dynamic_cast<AwsCredential const*>(&cred))
-                {
-                    if (!aws->m_SecretAccessKey.IsEmpty())
-                    {
-                        params["secret_access_key"] = std::string(aws->m_SecretAccessKey.Get());
-                    }
-                    if (!aws->m_SessionToken.IsEmpty())
-                    {
-                        params["session_token"] = std::string(aws->m_SessionToken.Get());
-                    }
-                    if (!aws->m_Region.empty())
-                    {
-                        params["region"] = aws->m_Region;
-                    }
-                }
             };
             auto& keyManager = Core::g_Core->GetKeyManager();
             if (api.m_KeyName.empty())
@@ -1041,6 +1027,45 @@ namespace AIAssistant
                 keyManager.WithCredential(api.m_KeyName, extract);
             }
             return params;
+        }
+
+        // Typed AwsCredential snapshot for SigV4 paths.  Deep-copies the credential
+        // under KeyManager's lock so the request's view stays stable across concurrent
+        // RemoveProvider / SetDefaultProvider mutations.  Returns nullptr when the
+        // resolved credential isn't an AwsCredential (caller checks AuthStyle ==
+        // AwsSigV4 before calling — non-SigV4 paths get nullptr without a wasted
+        // lookup).
+        std::shared_ptr<AwsCredential const> ResolveAwsCredentialSnapshot(
+            ConfigParser::EngineConfig::ApiInterface const& api)
+        {
+            if (Core::g_Core == nullptr) { return {}; }
+            std::shared_ptr<AwsCredential> snap;
+            auto extract = [&](ICredential const& cred)
+            {
+                auto const* aws = dynamic_cast<AwsCredential const*>(&cred);
+                if (aws == nullptr) { return; }
+                snap = std::make_shared<AwsCredential>();
+                snap->m_Name         = aws->m_Name;
+                snap->m_DisplayName  = aws->m_DisplayName;
+                snap->m_Endpoint     = aws->m_Endpoint;
+                snap->m_DefaultModel = aws->m_DefaultModel;
+                snap->m_ApiType      = aws->m_ApiType;
+                snap->m_Params       = aws->m_Params;
+                snap->m_AccessKeyId  = aws->m_AccessKeyId;
+                snap->m_SecretAccessKey.Set(aws->m_SecretAccessKey.Get());
+                snap->m_SessionToken.Set(aws->m_SessionToken.Get());
+                snap->m_Region       = aws->m_Region;
+            };
+            auto& keyManager = Core::g_Core->GetKeyManager();
+            if (api.m_KeyName.empty())
+            {
+                keyManager.WithDefaultCredential(extract);
+            }
+            else
+            {
+                keyManager.WithCredential(api.m_KeyName, extract);
+            }
+            return snap;
         }
 
         std::string ConcatMessagesForCheck(std::vector<Message> const& messages)
@@ -1380,7 +1405,11 @@ namespace AIAssistant
                                           .m_MaxRetriesTransient = api->m_RateLimit.m_MaxRetriesTransient,
                                           .m_BaseRetryMs = api->m_RateLimit.m_BaseRetryMs,
                                           .m_IsMock = api->m_IsMock,
-                                          .m_FixturePath = api->m_FixturePath};
+                                          .m_FixturePath = api->m_FixturePath,
+                                          .m_AwsCredential = (authStyle == CurlWrapper::AuthStyle::AwsSigV4)
+                                              ? ResolveAwsCredentialSnapshot(*api)
+                                              : std::shared_ptr<AwsCredential const>{},
+                                          .m_AmzDateOverride = {}};
 
         JarvisAgent* jarvisAgent = dynamic_cast<JarvisAgent*>(App::g_App.load(std::memory_order_acquire));
         CurlMultiDispatcher* dispatcher = (jarvisAgent != nullptr) ? jarvisAgent->GetCurlMultiDispatcher() : nullptr;
@@ -1944,5 +1973,151 @@ namespace AIAssistant
             result.push_back(std::move(snap));
         }
         return result;
+    }
+
+    bool AiRequestPool::TestInterface(size_t interfaceIndex, std::string& outResponsePreview, std::string& outError,
+                                       int64_t& outLatencyMs)
+    {
+        outResponsePreview.clear();
+        outError.clear();
+        outLatencyMs = 0;
+
+        static constexpr long kTestTimeoutMs = 30000; // 30 seconds — generous enough to catch
+                                                     // real-cloud variance and LocalStack Bedrock's
+                                                     // first-call cold path while still snappy.
+
+        auto const& config = Core::g_Core->GetConfig();
+        if (interfaceIndex >= config.m_ApiInterfaces.size())
+        {
+            outError = "Interface index " + std::to_string(interfaceIndex) + " out of range (have " +
+                       std::to_string(config.m_ApiInterfaces.size()) + ")";
+            return false;
+        }
+
+        auto const& iface = config.m_ApiInterfaces[interfaceIndex];
+
+        // Resolve API key + provider params from KeyManager. Params carry SigV4
+        // material (region + secret_access_key + session_token) for AWS providers
+        // and any future per-provider extras.
+        std::string apiKey;
+        std::unordered_map<std::string, std::string> providerParams;
+        {
+            auto extract = [&](ICredential const& cred)
+            {
+                // ApiKeyCredential is the bearer-secret case (OpenAI, Anthropic, Gemini, Azure).
+                // OAuthCredential carries the cached access token in m_AccessToken (rotated by
+                // OAuthTokenManager's hydrate / refresh paths; the cache is what gets persisted
+                // into KeyManager and read here).  Other subtypes don't fit AI dispatch and
+                // leave apiKey empty — the empty-check below produces a clear error.
+                if (auto const* api = dynamic_cast<ApiKeyCredential const*>(&cred))
+                {
+                    apiKey = std::string(api->m_ApiKey.Get());
+                }
+                else if (auto const* oauth = dynamic_cast<OAuthCredential const*>(&cred))
+                {
+                    apiKey = std::string(oauth->m_AccessToken.Get());
+                }
+                providerParams = cred.m_Params;
+            };
+            auto& keyManager = Core::g_Core->GetKeyManager();
+            if (iface.m_KeyName.empty())
+            {
+                keyManager.WithDefaultCredential(extract);
+            }
+            else
+            {
+                keyManager.WithCredential(iface.m_KeyName, extract);
+            }
+        }
+
+        if (apiKey.empty())
+        {
+            outError = "No API key configured for key_name '" + iface.m_KeyName + "'";
+            return false;
+        }
+
+        // Delegate request-body assembly to IRequestBuilder so every interface type
+        // (including API4 Anthropic and the Test fixture) is handled uniformly.
+        std::string const prompt = "Say hello";
+        AiInvocation probeEnvelope;
+        probeEnvelope.m_InterfaceName = iface.m_Name;
+        Message probeMessage;
+        probeMessage.m_Role = MessageRole::User;
+        probeMessage.m_Content = prompt;
+        probeEnvelope.m_Messages.push_back(std::move(probeMessage));
+
+        auto const probeBuilder = IRequestBuilder::Create(iface.m_InterfaceType);
+        if (!probeBuilder)
+        {
+            outError = "No request builder available for interface type (index " + std::to_string(interfaceIndex) + ")";
+            return false;
+        }
+
+        std::string const requestData = probeBuilder->BuildBody(probeEnvelope, iface.m_Model);
+        std::string const queryUrl = probeBuilder->ResolveUrl(iface.m_Url, iface.m_Model);
+        CurlWrapper::AuthStyle const authStyle = probeBuilder->GetAuthStyle();
+
+        // Direct curl POST with a short timeout for the connectivity probe.
+        // Test-connection path: synchronous CurlManager::Query, not the
+        // dispatcher's adaptive controller — controller / retry-budget fields
+        // are unused here, set to defaults so the dispatcher's per-field
+        // fallbacks apply if this QueryData ever did flow through.
+        CurlWrapper::QueryData queryData = {
+            .m_Url = queryUrl,
+            .m_Data = requestData,
+            .m_ApiKey = apiKey,
+            .m_AuthStyle = authStyle,
+            .m_TimeoutMs = kTestTimeoutMs,
+            .m_Params = std::move(providerParams),
+            .m_InterfaceType = -1,
+            .m_QuotaKey = {},
+            .m_EstimatedInputTokens = -1,
+            .m_CancelKey = {},
+            .m_MaxConcurrency = -1,
+            .m_MaxRetries429 = -1,
+            .m_MaxRetriesTransient = -1,
+            .m_BaseRetryMs = -1,
+            .m_IsMock = false,
+            .m_FixturePath = {},
+            .m_AwsCredential = (authStyle == CurlWrapper::AuthStyle::AwsSigV4)
+                ? ResolveAwsCredentialSnapshot(iface)
+                : std::shared_ptr<AwsCredential const>{},
+            .m_AmzDateOverride = {},
+        };
+
+        auto const startTime = std::chrono::steady_clock::now();
+
+        auto& curl = CurlManager::GetThreadCurl();
+        curl.Clear();
+        QueryResult result = curl.Query(queryData);
+
+        auto const endTime = std::chrono::steady_clock::now();
+        outLatencyMs = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime).count();
+
+        if (!result.m_Ok)
+        {
+            outError = result.m_ErrorMessage.empty() ? QueryErrorCode::Describe(result.m_ErrorCode) : result.m_ErrorMessage;
+            LOG_APP_INFO("[AiRequestPool] TestInterface: index={} name='{}' FAILED latency={}ms error='{}'",
+                         interfaceIndex, iface.m_Name, outLatencyMs, outError);
+            return false;
+        }
+
+        // Parse response to extract a preview.
+        auto parser = ReplyParser::Create(iface.m_InterfaceType, curl.GetBuffer());
+        if (parser && parser->HasContent() > 0)
+        {
+            std::string content = parser->GetContent(0);
+            constexpr size_t kPreviewLen = 200;
+            outResponsePreview = content.size() > kPreviewLen ? content.substr(0, kPreviewLen) + "..." : content;
+        }
+        else
+        {
+            outResponsePreview = "(response received, " + std::to_string(curl.GetBuffer().size()) + " bytes)";
+        }
+
+        LOG_APP_INFO("[AiRequestPool] TestInterface: index={} name='{}' OK latency={}ms responseLen={}", interfaceIndex,
+                     iface.m_Name, outLatencyMs, curl.GetBuffer().size());
+
+        return true;
     }
 } // namespace AIAssistant

@@ -1,18 +1,10 @@
 import { useCallback, useState } from "react";
-import { unlockKeys } from "../api";
+import { unlockKeys, type IssuedAdminKey } from "@shared/api/keys";
 
 type MasterPasswordDialogProps = {
   reason: "no_password" | "wrong_password" | "no_keys_file";
   onUnlocked: () => void;
 };
-
-interface IssuedAdminKey {
-  key_id: string;
-  api_key: string;
-  user: string;
-  role: string;
-  expires_at: string;
-}
 
 export default function MasterPasswordDialog({
   reason,

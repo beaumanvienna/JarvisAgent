@@ -91,6 +91,9 @@ class JarvisAPI:
             import urllib3
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
             self._session.verify = False
+        token = os.environ.get("J9T_TOKEN", "")
+        if token:
+            self._session.headers["Authorization"] = f"Bearer {token}"
 
     def _url(self, path):
         return f"{self.base_url}{path}"

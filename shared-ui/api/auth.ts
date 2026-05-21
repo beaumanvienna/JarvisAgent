@@ -1,9 +1,9 @@
-// j9t dashboard auth — cookie-based only.
+// j9t auth helpers — cookie-based only.
 // The only supported auth paths are:
-//   1. Session cookie set by POST /api/auth/login (Engine browser flow).
+//   1. Session cookie set by POST /api/auth/login (browser flow).
 //   2. Gateway headers (X-Forwarded-User/Role) forwarded by a reverse proxy.
-// There is no bearer token in localStorage — that legacy path was removed so the
-// cyber-security story stays one-paragraph: "session cookie, or gateway header".
+// No bearer token in localStorage — the cyber-security story stays one paragraph:
+// "session cookie, or gateway header".
 
 export async function authFetch(
   url: string,
@@ -33,7 +33,7 @@ export async function serverLogout(): Promise<void> {
 export interface WhoamiResponse {
   ok: boolean;
   user?: string;
-  role?: string;
+  role?: "admin" | "operator" | "viewer";
   error?: string;
 }
 

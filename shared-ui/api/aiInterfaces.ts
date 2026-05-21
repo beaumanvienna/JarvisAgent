@@ -1,3 +1,5 @@
+import { authFetch } from "@shared/api/auth";
+
 export type RequestBudgetConfig = {
   per_1k_input_token_seconds?: number;
   per_1k_output_token_seconds?: number;
@@ -66,7 +68,7 @@ function ensureOk(response: Response): void
 
 export async function listAiInterfaces(): Promise<AiInterfacesListResponse>
 {
-  const response = await fetch("/api/settings/ai-interfaces");
+  const response = await authFetch("/api/settings/ai-interfaces");
   ensureOk(response);
   return (await response.json()) as AiInterfacesListResponse;
 }
@@ -85,7 +87,7 @@ export type AiInterfaceCreateInput = {
 
 export async function createAiInterface(input: AiInterfaceCreateInput): Promise<AiInterfaceMutationResponse>
 {
-  const response = await fetch("/api/settings/ai-interfaces", {
+  const response = await authFetch("/api/settings/ai-interfaces", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),
@@ -107,7 +109,7 @@ export type AiInterfaceUpdateInput = {
 
 export async function updateAiInterface(name: string, input: AiInterfaceUpdateInput): Promise<AiInterfaceMutationResponse>
 {
-  const response = await fetch(`/api/settings/ai-interfaces/${encodeURIComponent(name)}`, {
+  const response = await authFetch(`/api/settings/ai-interfaces/${encodeURIComponent(name)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),
@@ -117,7 +119,7 @@ export async function updateAiInterface(name: string, input: AiInterfaceUpdateIn
 
 export async function deleteAiInterface(name: string): Promise<AiInterfaceMutationResponse>
 {
-  const response = await fetch(`/api/settings/ai-interfaces/${encodeURIComponent(name)}`, {
+  const response = await authFetch(`/api/settings/ai-interfaces/${encodeURIComponent(name)}`, {
     method: "DELETE",
   });
   return (await response.json()) as AiInterfaceMutationResponse;
@@ -125,7 +127,7 @@ export async function deleteAiInterface(name: string): Promise<AiInterfaceMutati
 
 export async function saveAiInterfaces(): Promise<AiInterfacesSaveResponse>
 {
-  const response = await fetch("/api/settings/ai-interfaces/save", {
+  const response = await authFetch("/api/settings/ai-interfaces/save", {
     method: "POST",
   });
   return (await response.json()) as AiInterfacesSaveResponse;
@@ -143,7 +145,7 @@ export type AiInterfaceTestResponse = {
 
 export async function testAiInterface(index: number): Promise<AiInterfaceTestResponse>
 {
-  const response = await fetch("/api/settings/ai-interfaces/test", {
+  const response = await authFetch("/api/settings/ai-interfaces/test", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ index }),
@@ -153,7 +155,7 @@ export async function testAiInterface(index: number): Promise<AiInterfaceTestRes
 
 export async function reloadConfig(): Promise<ConfigReloadResponse>
 {
-  const response = await fetch("/api/settings/config/reload", {
+  const response = await authFetch("/api/settings/config/reload", {
     method: "POST",
   });
   return (await response.json()) as ConfigReloadResponse;

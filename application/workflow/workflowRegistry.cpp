@@ -503,16 +503,108 @@ bool WorkflowRegistry::SaveOrUpdateWorkflowFromJson(std::string const& workflowJ
     return true;
 }
 
-bool WorkflowRegistry::RemoveWorkflow(std::string const& workflowId, bool deleteFile, std::string& errorMessage)
+bool WorkflowRegistry::UpsertJcwfFromZipBytes(std::string const& zipBytes,
+                                              std::filesystem::path const& workflowFilePathAbsolute,
+                                              std::string& errorMessage)
 {
     std::scoped_lock<std::mutex> const lock(m_Mutex);
     errorMessage.clear();
 
+    if (workflowFilePathAbsolute.empty())
+    {
+        errorMessage = "workflowFilePathAbsolute is empty";
+        return false;
+    }
+
+    // Zip magic check before any disk I/O.  Catches the historical bug where a
+    // plain-JSON body was fed here and silently written to the .jcwf path;
+    // simdjson would then refuse to parse the resulting "zip" on next load.
+    // PKZip local-file header is 'P' 'K' 0x03 0x04 (RFC1951 / APPNOTE).
+    if (zipBytes.size() < 4 || zipBytes[0] != 'P' || zipBytes[1] != 'K' ||
+        static_cast<unsigned char>(zipBytes[2]) != 0x03 ||
+        static_cast<unsigned char>(zipBytes[3]) != 0x04)
+    {
+        errorMessage = "Provided bytes are not a valid .jcwf zip (missing PK\\x03\\x04 magic)";
+        LOG_APP_ERROR("WorkflowRegistry::UpsertJcwfFromZipBytes: zip-magic check failed path='{}' size={}",
+                      workflowFilePathAbsolute.string(), zipBytes.size());
+        return false;
+    }
+
+    std::filesystem::path const jcwfPath = ConfineUnderProjectRoot(workflowFilePathAbsolute);
+    if (jcwfPath.empty())
+    {
+        errorMessage = "workflowFilePathAbsolute does not resolve under project root: " +
+                       workflowFilePathAbsolute.string();
+        LOG_APP_ERROR("WorkflowRegistry::UpsertJcwfFromZipBytes: rejected path '{}' — does not resolve "
+                      "under project root",
+                      workflowFilePathAbsolute.string());
+        return false;
+    }
+
+    std::filesystem::path const extractedDir = jcwfPath.parent_path() / jcwfPath.stem();
+    std::string const canonicalContainerPath = std::filesystem::weakly_canonical(jcwfPath).string();
+
+    // Evict stale registry entries for this container — root + any sub-workflows
+    // from the previous version.  Without this, a restore that drops a sub-
+    // workflow would leave the dropped sub lingering in `m_Workflows`.
+    for (auto iterator = m_Workflows.begin(); iterator != m_Workflows.end();)
+    {
+        if (iterator->second.m_ContainerPath == canonicalContainerPath)
+        {
+            iterator = m_Workflows.erase(iterator);
+        }
+        else
+        {
+            ++iterator;
+        }
+    }
+
+    std::string writeError;
+    if (!EngineCore::AtomicWriteFile(jcwfPath, zipBytes, writeError))
+    {
+        errorMessage = "Failed to write .jcwf bytes: " + writeError;
+        LOG_APP_ERROR("WorkflowRegistry::UpsertJcwfFromZipBytes: {} path='{}'", writeError, jcwfPath.string());
+        return false;
+    }
+
+    // Wipe the stale extracted dir.  `JcwfContainer::Extract` overwrites
+    // existing files but doesn't remove leftover entries — restoring an older
+    // version with fewer files would leave stale ones, and stale sub-folders
+    // would get loaded as if they belonged to the restored snapshot by
+    // `LoadContainerSubWorkflows`.  remove_all is best-effort: a permission
+    // failure is logged, and LoadContainer will still attempt extraction.
+    std::error_code removeEc;
+    std::filesystem::remove_all(extractedDir, removeEc);
+    if (removeEc)
+    {
+        LOG_APP_WARN("WorkflowRegistry::UpsertJcwfFromZipBytes: failed to clean extracted dir '{}': {}",
+                     extractedDir.string(), removeEc.message());
+    }
+
+    if (!LoadContainer(jcwfPath))
+    {
+        errorMessage = m_LastContainerError.empty()
+                           ? std::string("Failed to load restored container '") + jcwfPath.filename().string() + "'"
+                           : m_LastContainerError;
+        LOG_APP_ERROR("WorkflowRegistry::UpsertJcwfFromZipBytes: LoadContainer failed path='{}': {}",
+                      jcwfPath.string(), errorMessage);
+        return false;
+    }
+
+    LOG_APP_INFO("WorkflowRegistry: installed restored container '{}'", jcwfPath.string());
+    return true;
+}
+
+std::expected<void, RegistryError>
+WorkflowRegistry::RemoveWorkflow(std::string const& workflowId, bool deleteFile)
+{
+    std::scoped_lock<std::mutex> const lock(m_Mutex);
+
     auto const iterator = m_Workflows.find(workflowId);
     if (iterator == m_Workflows.end())
     {
-        errorMessage = "Workflow '" + workflowId + "' not found";
-        return false;
+        return std::unexpected(RegistryError::Make(RegistryErrorCode::NotFound,
+                                                    "Workflow '" + workflowId + "' not found"));
     }
 
     std::string const workflowFilePathAbsolute = iterator->second.m_WorkflowFilePathAbsolute;
@@ -528,22 +620,24 @@ bool WorkflowRegistry::RemoveWorkflow(std::string const& workflowId, bool delete
         std::filesystem::path const confinedPath = ConfineUnderProjectRoot(workflowFilePathAbsolute);
         if (confinedPath.empty())
         {
-            errorMessage = "workflow file path does not resolve under project root: " + workflowFilePathAbsolute;
             LOG_APP_ERROR("WorkflowRegistry::RemoveWorkflow: refused delete workflow='{}' path='{}' — does not "
                           "resolve under project root",
                           workflowId, workflowFilePathAbsolute);
-            return false;
+            return std::unexpected(RegistryError::Make(RegistryErrorCode::PathRefused,
+                                                        "workflow file path does not resolve under project root: " +
+                                                        workflowFilePathAbsolute));
         }
         std::error_code errorCode;
         std::filesystem::remove(confinedPath, errorCode);
         if (errorCode)
         {
-            errorMessage = "Failed to delete workflow file '" + workflowFilePathAbsolute + "': " + errorCode.message();
-            return false;
+            return std::unexpected(RegistryError::Make(RegistryErrorCode::IoError,
+                                                        "Failed to delete workflow file '" + workflowFilePathAbsolute +
+                                                        "': " + errorCode.message()));
         }
     }
 
-    return true;
+    return {};
 }
 
 std::unordered_map<std::string, std::vector<std::string>> WorkflowRegistry::GetSubWorkflowDependencyGraph() const

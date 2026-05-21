@@ -23,6 +23,7 @@
 
 #include "curlWrapper/credValidation.h"
 #include "engine.h"
+#include "keys/credential.h"
 
 #include <openssl/crypto.h>
 #include <openssl/hmac.h>
@@ -429,24 +430,37 @@ namespace AIAssistant
     bool SigV4Signer::Apply(CurlWrapper::QueryData const& q, std::vector<std::string>& outHeaders,
                             std::string& errorMessage) const
     {
+        // Typed credential is mandatory on the SigV4 path — AiRequestPool populates
+        // it from the resolved AwsCredential under KeyManager's lock; a null pointer
+        // here means either the caller forgot to populate it or the AuthStyle was
+        // routed to SigV4 without an AwsCredential underneath.  Either way, fail
+        // closed before we even try to read the secret material.
+        if (q.m_AwsCredential == nullptr)
+        {
+            errorMessage = "SigV4: QueryData::m_AwsCredential is null (caller must populate before dispatch)";
+            return false;
+        }
+
         Inputs in;
         in.m_Method = "POST";
         in.m_Url = q.m_Url;
         in.m_Body = q.m_Data;
-        in.m_AccessKey = q.m_ApiKey; // m_ApiKey is reused as access_key_id for SigV4
+        in.m_AccessKey = q.m_AwsCredential->m_AccessKeyId;
+        in.m_SecretKey = std::string(q.m_AwsCredential->m_SecretAccessKey.Get());
+        in.m_SessionToken = std::string(q.m_AwsCredential->m_SessionToken.Get());
+        in.m_Region = q.m_AwsCredential->m_Region;
+        // Mock paths (test_bedrock_sigv4) override the AmzDate from the fixture's
+        // .meta.json so the captured Authorization matches a locked KAT value.
+        // Empty on live paths — Sign() falls back to FormatAmzDateNow().
+        in.m_AmzDate = q.m_AmzDateOverride;
 
-        auto getParam = [&](char const* key) -> std::string
-        {
-            auto it = q.m_Params.find(key);
-            return (it != q.m_Params.end()) ? it->second : std::string{};
-        };
-
-        in.m_SecretKey = getParam("secret_access_key");
-        in.m_SessionToken = getParam("session_token");
-        in.m_Region = getParam("region");
-        // Service defaults to bedrock; can be overridden via params for future AWS services.
-        in.m_Service = getParam("service");
-        if (in.m_Service.empty()) in.m_Service = "bedrock";
+        // Service defaults to bedrock; can be overridden via the non-secret
+        // m_Params map for future AWS services.  Not on the typed credential
+        // because service is a request-target attribute, not a secret.
+        auto serviceIt = q.m_Params.find("service");
+        in.m_Service = (serviceIt != q.m_Params.end() && !serviceIt->second.empty())
+                           ? serviceIt->second
+                           : "bedrock";
 
         // Reject empty OR whitespace-only on each required field.  Pre-fix the only
         // gate was `.empty()` and the failure was masked by an inline LOG_CORE_ERROR
@@ -455,7 +469,7 @@ namespace AIAssistant
         // opaque 401 from AWS.
         if (IsBlank(in.m_AccessKey))
         {
-            errorMessage = "SigV4: access_key_id (m_ApiKey) is empty or whitespace";
+            errorMessage = "SigV4: AwsCredential::m_AccessKeyId is empty or whitespace";
             return false;
         }
         if (IsBlank(in.m_SecretKey))

@@ -1,0 +1,18 @@
+{
+  "id": "msg_mocktransport-sigv4-kat",
+  "type": "message",
+  "role": "assistant",
+  "content": [
+    {
+      "type": "text",
+      "text": "Hermetic SigV4 KAT response.  Body content is irrelevant — only the captured Authorization header matters for this test."
+    }
+  ],
+  "model": "anthropic.claude-3-haiku-20240307-v1:0",
+  "stop_reason": "end_turn",
+  "stop_sequence": null,
+  "usage": {
+    "input_tokens": 5,
+    "output_tokens": 12
+  }
+}

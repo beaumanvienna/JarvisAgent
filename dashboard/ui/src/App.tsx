@@ -5,13 +5,13 @@ import LastRunsBar from "./components/LastRunsBar";
 import WorkflowsPanel from "./components/WorkflowsPanel";
 import LogViewerPanel from "./components/LogViewerPanel";
 import SettingsModal from "./components/SettingsModal";
-import MasterPasswordDialog from "./components/MasterPasswordDialog";
-import AdminLoginDialog from "./components/AdminLoginDialog";
+import MasterPasswordDialog from "@shared/components/MasterPasswordDialog";
+import AdminLoginDialog from "@shared/components/AdminLoginDialog";
 import ActivationDialog from "./components/ActivationDialog";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { usePolling } from "./hooks/usePolling";
 import { shutdown, fetchKeysStatus } from "./api";
-import { whoami, serverLogout } from "./auth";
+import { whoami, serverLogout } from "@shared/api/auth";
 
 type Tab = "dashboard" | "log";
 
@@ -100,13 +100,17 @@ export default function App() {
 
   const handleAuthenticated = useCallback(async () => {
     setNeedsAuth(false);
+    // Pre-auth WS upgrade attempts bumped the reconnect backoff (up to 30s);
+    // without this nudge the "Connected" LED would stay grey until the next
+    // scheduled attempt fires.
+    ws.forceReconnect();
     const w = await whoami();
     if (w?.ok && w.user) {
       setAuthUser(w.user);
       setAuthRole(w.role ?? null);
     }
     refresh();
-  }, [refresh]);
+  }, [refresh, ws]);
 
   const handleLogout = useCallback(async () => {
     await serverLogout();

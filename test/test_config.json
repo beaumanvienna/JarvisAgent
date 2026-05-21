@@ -36,7 +36,7 @@
       ],
       "expected_artifacts": [
         {
-          "glob": "queue/aiCarMaintenancePipeline/01_classifyQuestion/classification.output.txt",
+          "glob": "queue/aiCarMaintenancePipeline/01_classifyQuestion/classification.output.json",
           "min_bytes": 3
         },
         {
@@ -80,7 +80,7 @@
       ],
       "expected_artifacts": [
         {
-          "glob": "queue/goKartComplianceCheck/01_assessRequirement/PROB_*.output.txt",
+          "glob": "queue/goKartComplianceCheck/01_assessRequirement/PROB_*.output.json",
           "min_bytes": 100,
           "min_count": 15
         }
@@ -158,15 +158,15 @@
       "prerequisites": [],
       "expected_artifacts": [
         {
-          "glob": "queue/vehicleTroubleshootingGuide/01_aiCode244/code244.output.md",
+          "glob": "queue/vehicleTroubleshootingGuide/01_aiCode244/code244.output.json",
           "min_bytes": 100
         },
         {
-          "glob": "queue/vehicleTroubleshootingGuide/02_aiCode250/code250.output.md",
+          "glob": "queue/vehicleTroubleshootingGuide/02_aiCode250/code250.output.json",
           "min_bytes": 100
         },
         {
-          "glob": "queue/vehicleTroubleshootingGuide/03_aiCode301/code301.output.md",
+          "glob": "queue/vehicleTroubleshootingGuide/03_aiCode301/code301.output.json",
           "min_bytes": 100
         },
         {

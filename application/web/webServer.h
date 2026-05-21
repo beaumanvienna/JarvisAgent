@@ -22,6 +22,7 @@
 #pragma once
 #include "crow.h"
 #include "auxiliary/threadPool.h"
+#include "simdjson/simdjson.h"
 #include "web/mcpKeyManager.h"
 #include "web/webSessionManager.h"
 #include "workflow/adhocWorkflowManager.h"
@@ -122,6 +123,24 @@ namespace AIAssistant
         void RegisterStudioRoutes();
         void RegisterAssistantWebSocket();
 #endif
+
+        // Edition-specific WebServer init.  Studio impl
+        // (`webServer_studio.cpp`) wires up the assistant WS route and the
+        // AiJcwfService broadcast callback; Engine impl (`webServer_engine.cpp`)
+        // is a no-op.  Resolves at link time — no `#ifdef J9T_STUDIO` needed at
+        // the call site in the shared constructor.
+        void InitEditionSpecific();
+
+        // Edition-specific WS message dispatch.  Returns true if `type`
+        // matched an assistant message (ai-explain-jcwf / ai-generate-jcwf /
+        // ai-write-scripts / ai-fix-failed-script) and was dispatched; false
+        // otherwise so the caller falls through to "unknown type".  Studio
+        // impl lives in `webServer_studio.cpp`; Engine impl in
+        // `webServer_engine.cpp` always returns false (Engine has no assistant
+        // surface).
+        [[nodiscard]] bool HandleAssistantWebSocketMessage(crow::websocket::connection& conn,
+                                                           simdjson::ondemand::document& doc,
+                                                           std::string_view type);
 
         // ---- Admin auth (Engine edition only) ----
         // Authentication result — returned by Authenticate().

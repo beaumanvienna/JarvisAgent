@@ -1,5 +1,6 @@
-import type { StatusResponse, WorkflowsListResponse, LastRunsResponse, LogResponse, AnalyzeLastRunResponse, KeysStatusResponse, KeysUnlockResponse, ProvidersHealthResponse } from "./types";
-import { authFetch } from "./auth";
+import type { StatusResponse, WorkflowsListResponse, LastRunsResponse, LogResponse, AnalyzeLastRunResponse, ProvidersHealthResponse } from "./types";
+import type { KeysStatusResponse, KeysUnlockResponse } from "@shared/api/keys";
+import { authFetch } from "@shared/api/auth";
 
 // Sitting-8 Workstream D: per-interface health snapshot driving the AI Health
 // LED.  Polled from usePolling; gracefully returns empty interfaces on 401

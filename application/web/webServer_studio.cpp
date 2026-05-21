@@ -33,6 +33,7 @@
 #include <string>
 #include <vector>
 
+#include "auxiliary/file.h"
 #include "core.h"
 #include "engine.h"
 #include "web/webServer.h"
@@ -405,11 +406,10 @@ namespace AIAssistant
             std::scoped_lock<std::mutex> const lock(m_Mutex);
             if (m_WorkflowRegistry != nullptr)
             {
-                std::string removeError;
-                if (!m_WorkflowRegistry->RemoveWorkflow(workflowId, false, removeError))
+                if (auto removeResult = m_WorkflowRegistry->RemoveWorkflow(workflowId, false); !removeResult)
                 {
-                    LOG_APP_WARN("HandleWorkflowDelete: registry RemoveWorkflow failed workflow='{}': {}",
-                                 workflowId, removeError);
+                    LOG_APP_WARN("HandleWorkflowDelete: registry RemoveWorkflow failed workflow='{}' code={}: {}",
+                                 workflowId, Describe(removeResult.error().m_Code), removeResult.error().m_Details);
                 }
             }
         }
@@ -792,6 +792,194 @@ namespace AIAssistant
                      { m_AssistantController.OnClose(conn); })
             .onmessage([this](crow::websocket::connection& conn, const std::string& data, bool /*is_binary*/)
                        { m_AssistantController.OnMessage(conn, data); });
+    }
+
+    void WebServer::InitEditionSpecific()
+    {
+        RegisterAssistantWebSocket();
+
+        m_AiJcwfService.SetBroadcastFn(
+            [this](std::string const& jsonString)
+            {
+                std::lock_guard<std::mutex> lock(m_Mutex);
+                m_PendingBroadcasts.push_back(jsonString);
+            });
+    }
+
+    bool WebServer::HandleAssistantWebSocketMessage(crow::websocket::connection& conn,
+                                                    simdjson::ondemand::document& doc,
+                                                    std::string_view type)
+    {
+        if (type == "ai-explain-jcwf")
+        {
+            std::string jcwfJson = std::string(doc["jcwf"].get_string().value());
+            m_AiJcwfService.ExplainAsync(jcwfJson);
+            return true;
+        }
+
+        if (type == "ai-generate-jcwf")
+        {
+            std::string prompt = std::string(doc["prompt"].get_string().value());
+            std::string currentJcwf;
+            auto currentResult = doc["currentJcwf"].get_string();
+            if (currentResult.error() == simdjson::SUCCESS)
+            {
+                currentJcwf = std::string(currentResult.value());
+            }
+            m_AiJcwfService.GenerateAsync(prompt, currentJcwf);
+            return true;
+        }
+
+        if (type == "ai-write-scripts")
+        {
+            // ai-write-scripts mutates disk state (writes files under scripts/,
+            // sets +x on .sh) so it requires admin role.  Without this gate, any
+            // operator/viewer who held a valid /ws upgrade could plant scripts
+            // that would then run on the next workflow trigger.
+            std::string role;
+            {
+                std::lock_guard<std::mutex> lock(m_Mutex);
+                auto it = m_WsClientRoles.find(&conn);
+                if (it != m_WsClientRoles.end())
+                {
+                    role = it->second;
+                }
+            }
+            if (role != "admin")
+            {
+                LOG_SECURITY_WARN("[security] ai_write_scripts_role_denied role='{}' ip={}", role,
+                                  conn.get_remote_ip());
+                crow::json::wvalue err;
+                err["type"] = "ai-write-scripts-result";
+                err["ok"] = false;
+                err["error"] = "forbidden";
+                err["message"] = "ai-write-scripts requires admin role";
+                conn.send_text(err.dump());
+                return true;
+            }
+
+            crow::json::wvalue result;
+            result["type"] = "ai-write-scripts-result";
+            crow::json::wvalue::list writtenList;
+            crow::json::wvalue::list errorsList;
+
+            auto scriptsArr = doc["scripts"].get_array();
+            if (scriptsArr.error() == simdjson::SUCCESS)
+            {
+                for (auto scriptEl : scriptsArr.value())
+                {
+                    simdjson::ondemand::object scriptObj;
+                    if (scriptEl.get_object().get(scriptObj) != simdjson::SUCCESS)
+                    {
+                        continue;
+                    }
+
+                    std::string_view pathView;
+                    if (scriptObj["path"].get_string().get(pathView) != simdjson::SUCCESS)
+                    {
+                        continue;
+                    }
+                    std::string scriptPath(pathView);
+
+                    std::string_view contentView;
+                    if (scriptObj["content"].get_string().get(contentView) != simdjson::SUCCESS)
+                    {
+                        continue;
+                    }
+                    std::string content(contentView);
+
+                    bool executable = false;
+                    [[maybe_unused]] auto execErr = scriptObj["executable"].get_bool().get(executable);
+
+                    if (scriptPath.rfind("scripts/", 0) != 0)
+                    {
+                        crow::json::wvalue err;
+                        err["path"] = scriptPath;
+                        err["error"] = "Path must start with 'scripts/'";
+                        errorsList.push_back(std::move(err));
+                        continue;
+                    }
+
+                    fs::path normalized = fs::path(scriptPath).lexically_normal();
+                    if (normalized.string().rfind("scripts/", 0) != 0)
+                    {
+                        crow::json::wvalue err;
+                        err["path"] = scriptPath;
+                        err["error"] = "Path escapes scripts/ directory";
+                        errorsList.push_back(std::move(err));
+                        continue;
+                    }
+
+                    std::string scriptWriteError;
+                    if (!EngineCore::AtomicWriteFile(normalized, content, scriptWriteError))
+                    {
+                        crow::json::wvalue err;
+                        err["path"] = scriptPath;
+                        err["error"] = scriptWriteError;
+                        errorsList.push_back(std::move(err));
+                        continue;
+                    }
+
+                    std::error_code ec;
+                    if (executable || scriptPath.ends_with(".sh"))
+                    {
+                        fs::permissions(normalized,
+                                        fs::perms::owner_exec | fs::perms::group_exec | fs::perms::others_exec,
+                                        fs::perm_options::add, ec);
+                    }
+
+                    writtenList.push_back(scriptPath);
+                    LOG_APP_INFO("[ai-write-scripts] Wrote script: {}", normalized.string());
+                }
+            }
+
+            result["ok"] = errorsList.empty();
+            result["written"] = std::move(writtenList);
+            result["errors"] = std::move(errorsList);
+
+            {
+                std::lock_guard<std::mutex> lock(m_Mutex);
+                m_PendingBroadcasts.push_back(result.dump());
+            }
+            return true;
+        }
+
+        if (type == "ai-fix-failed-script")
+        {
+            std::string scriptPath;
+            std::string stderrContent;
+            std::string taskType;
+
+            {
+                std::string_view sv;
+                if (doc["scriptPath"].get_string().get(sv) == simdjson::SUCCESS)
+                {
+                    scriptPath = std::string(sv);
+                }
+                if (doc["stderr"].get_string().get(sv) == simdjson::SUCCESS)
+                {
+                    stderrContent = std::string(sv);
+                }
+                if (doc["taskType"].get_string().get(sv) == simdjson::SUCCESS)
+                {
+                    taskType = std::string(sv);
+                }
+            }
+
+            if (scriptPath.empty())
+            {
+                std::lock_guard<std::mutex> lock(m_Mutex);
+                m_PendingBroadcasts.push_back(
+                    R"({"type":"ai-fix-script-result","ok":false,"error":"Missing scriptPath"})");
+            }
+            else
+            {
+                m_AiJcwfService.FixFailedScriptAsync(scriptPath, stderrContent, taskType);
+            }
+            return true;
+        }
+
+        return false;
     }
 
 

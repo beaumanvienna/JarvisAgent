@@ -90,9 +90,11 @@ python3 test/assistant/test_assistant.py --with-ai --auto-approve # all 70 tests
 - **Column limit**: 125 characters
 - **Indent**: 4 spaces
 - **Pointer alignment**: Left (`int* ptr`, not `int *ptr`)
-- C++20 standard
+- C++23 standard (`premake5.lua::cppdialect "C++23"`)
 
 Format with clang-format using the `.clang-format` config at the root. No automated linting in CI — formatting is manual/IDE-driven.
+
+Local clang ≤18 dev: build via `premake5 gmake --clang` then `make` — this routes through libc++ (`-stdlib=libc++`) because libstdc++'s `<expected>` requires `__cpp_concepts >= 202002L` and clang 18 reports `201907L` (fixed in clang 19+).  CI Linux + Docker use gcc 13+ (stock libstdc++ works); Rocky 9's RPM job activates `gcc-toolset-13` via `scl enable`.  See `DEVELOPMENT.md` "C++23 toolchain notes" for the full build-matrix table.
 
 ### Discipline rules (each one came from a real bug — don't relax them)
 
@@ -104,6 +106,7 @@ Format with clang-format using the `.clang-format` config at the root. No automa
 - **Filesystem-touching paths from external strings go through `application/file/pathConfinement.h::ConfineUnderProjectRoot()`**, not local re-implementations. Fail-closed; rejection logs at ERROR with the offending input. Use sites: Python `sys.path` entries, Python `taskWorkingDirectory`, `PythonEnginePool::Initialize`'s `scriptPath`, `WorkflowRuntimeManager::CleanWorkflow`'s 5 `fs::remove*` sites. When a 6th site appears — extend the helper's use-site list, don't write a fresh local copy.
 - **Outbound HTTP from workflow context (e.g. completion-callback `callbackUrl`) goes through an SSRF gate**: scheme allowlist (`https://` only), DNS resolution + per-address rejection of loopback / RFC 1918 / link-local / unique-local / multicast / cloud-metadata ranges (incl. IPv4-mapped IPv6 unwrap), TLS verify + no-redirect + protocol allowlist. The reference implementation is `IsCallbackUrlAllowed` in `workflowRuntimeManager.cpp`; cloud-connector requests use `ConnectorHttp` which has its own equivalent. Don't add a new outbound-HTTP surface without one.
 - **Hand-built file writes go through `EngineCore::AtomicWriteFile()`** (`engine/auxiliary/file.h`), not local `std::ofstream` + `fs::rename` re-implementations. The helper creates parent directories, opens `<path>.tmp.<atomic-counter>` with `ofstream::exceptions(failbit | badbit)`, writes, closes, then atomically renames over the destination. Returns `bool` + populated `errorMessage`; does not log internally (callers with run/workflow context emit the ERROR line). Opt-outs are limited to streaming writers with running caps (`dbQueryCloudTaskExecutor`), append-mode logs (`assistantSession.cpp`), and operator-diagnostic stdout/stderr dumps — those get `out.exceptions(failbit | badbit)` + try/catch instead. See `application/file/README.md` "Atomic-rename writes" for the use-site list.
+- **New error-returning APIs use `[[nodiscard]] std::expected<T, SubsystemError>`** — not the legacy `bool DoX(..., std::string& errorMessage)` shape.  Subsystem-scoped error enums (`ConnectorError` in `application/cloud/connectorError.h`, `ParserError` + `RegistryError` in `application/workflow/`) carry a `Code` enum (no `default:` arm — `-Wswitch` is the enforcement) plus a `std::string m_Details` for the human-readable message.  Caller logs `Describe(err.m_Code)` (typed category) + `err.m_Details` (variable detail) at ERROR with run/workflow context.  Reference impl: `WorkflowRegistry::RemoveWorkflow` → `std::expected<void, RegistryError>` (Sitting 7a, 2026-05-19).  The remaining legacy `bool + std::string&` surfaces — 13 `TestConnection` cloud-connector overrides + ~15 chained workflow JSON parsers — are tracked as Sittings 7b + 7c in `pre-1_0_follow-ups.md`.
 
 ## Architecture
 

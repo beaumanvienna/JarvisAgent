@@ -23,6 +23,7 @@
 
 #pragma once
 
+#include <expected>
 #include <filesystem>
 #include <mutex>
 #include <optional>
@@ -30,6 +31,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "workflow/registryError.h"
 #include "workflow/workflowTypes.h"
 
 namespace AIAssistant
@@ -96,9 +98,23 @@ namespace AIAssistant
                                                         std::filesystem::path const& workflowFilePathAbsolute,
                                                         std::string& errorMessage);
 
+        // Install a complete .jcwf zip blob at the given target path and register
+        // it.  The caller hands us raw zip bytes (e.g. read from a version
+        // snapshot under `.history/<id>/<ts>.jcwf`) and we atomically write them
+        // to disk, wipe any stale extracted folder + evict prior entries that
+        // share this container path, then re-extract and re-register via the
+        // standard container ingestion path.  Validates the zip magic (`PK\x03\x04`)
+        // before touching disk; path-confines `workflowFilePathAbsolute` under
+        // the project root.  Fail-closed on any step.
+        [[nodiscard]] bool UpsertJcwfFromZipBytes(std::string const& zipBytes,
+                                                   std::filesystem::path const& workflowFilePathAbsolute,
+                                                   std::string& errorMessage);
+
         // Remove a workflow from the registry. If deleteFile is true and the registry knows the file path,
-        // the file will be deleted as well.
-        [[nodiscard]] bool RemoveWorkflow(std::string const& workflowId, bool deleteFile, std::string& errorMessage);
+        // the file will be deleted as well.  Returns `{}` on success; on failure carries a typed
+        // RegistryError categorising the cause (NotFound / PathRefused / IoError).
+        [[nodiscard]] std::expected<void, RegistryError>
+        RemoveWorkflow(std::string const& workflowId, bool deleteFile);
 
         void Clear();
 

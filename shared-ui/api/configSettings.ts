@@ -1,3 +1,5 @@
+import { authFetch } from "@shared/api/auth";
+
 export type ConfigSettings = {
   ok: boolean;
   api_index: number;
@@ -27,7 +29,7 @@ export type ConfigSettingsUpdateResponse = {
 
 export async function getConfigSettings(): Promise<ConfigSettings>
 {
-  const response = await fetch("/api/settings/config");
+  const response = await authFetch("/api/settings/config");
   return (await response.json()) as ConfigSettings;
 }
 
@@ -35,7 +37,7 @@ export async function updateConfigSettings(
   settings: Partial<Pick<ConfigSettings, "api_index" | "max_threads" | "verbose" | "max_file_size_kb" | "jcwf_batch_size" | "jcwf_ai_interface" | "use_bash">>
 ): Promise<ConfigSettingsUpdateResponse>
 {
-  const response = await fetch("/api/settings/config", {
+  const response = await authFetch("/api/settings/config", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(settings),

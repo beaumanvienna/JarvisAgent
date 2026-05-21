@@ -248,6 +248,50 @@ The `dynamic_cast` cascade is allowlist-style: connectors that legitimately acce
 shapes (e.g. Jira Cloud's BasicAuth vs Jira DC's PAT, S3's three conventions) explicitly
 check each valid type and fail closed if none match.  No "default-to-ApiKey" fallback.
 
+### Snapshot pattern for deferred dispatch
+
+`WithCredential`'s lock-scoped contract works for any consumer that uses the credential
+immediately and completes synchronously.  Async-dispatch paths (`AiRequestPool::Submit`
+queues a request that may sit in the dispatcher's inbox / retry queue for minutes
+before the signer fires) need a different shape: the credential pointer must outlive
+the callback.  The pattern is a **deep-copy snapshot taken inside the `WithCredential`
+callback**, wrapped in `std::shared_ptr<T const>`:
+
+```cpp
+// aiRequestPool.cpp::ResolveAwsCredentialSnapshot
+std::shared_ptr<AwsCredential const> ResolveAwsCredentialSnapshot(api)
+{
+    std::shared_ptr<AwsCredential> snap;
+    keyManager.WithCredential(api.m_KeyName,
+        [&](ICredential const& cred)
+        {
+            auto const* aws = dynamic_cast<AwsCredential const*>(&cred);
+            if (!aws) return;                              // wrong type — fail closed
+            snap = std::make_shared<AwsCredential>();
+            // metadata + non-secret fields: plain assignment
+            snap->m_AccessKeyId = aws->m_AccessKeyId;
+            snap->m_Region      = aws->m_Region;
+            // SecureString fields: copy via Set(Get()) — non-copyable type
+            snap->m_SecretAccessKey.Set(aws->m_SecretAccessKey.Get());
+            snap->m_SessionToken.Set(aws->m_SessionToken.Get());
+        });
+    return snap;
+}
+```
+
+The snapshot is stored in `CurlWrapper::QueryData::m_AwsCredential` (`shared_ptr<AwsCredential const>`)
+and consumed by `SigV4Signer::Apply()` at signing time — the dispatcher may have queued
+the request long after `WithCredential` returned, but the snapshot still carries the
+correct credential.  A concurrent `RemoveProvider` / `SetDefaultProvider` mutates the
+KeyManager registry without touching the snapshot — the in-flight request signs with
+the credential that existed at submit time, which is the correct semantic.
+
+Use this pattern for ANY caller that needs the credential to outlive `WithCredential`'s
+synchronous scope.  Don't smuggle the raw `ICredential const&` out via lambda capture —
+the reference dangles after the callback returns.  Don't copy secret material into a
+plain `std::string` field — keep `SecureString` end-to-end so the mlock'd buffer + zero-
+on-destruct invariant survives.
+
 ### 6.1 Startup sequence
 
 ```

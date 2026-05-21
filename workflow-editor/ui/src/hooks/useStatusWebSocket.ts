@@ -15,7 +15,12 @@ function buildWsUrl(path: string): string
   return `${protocol}//${window.location.host}${path}`;
 }
 
-export function useStatusWebSocket(): StatusState
+export interface StatusHookReturn extends StatusState
+{
+  forceReconnect: () => void;
+}
+
+export function useStatusWebSocket(): StatusHookReturn
 {
   const [state, setState] = useState<StatusState>({
     connected: false,
@@ -27,6 +32,7 @@ export function useStatusWebSocket(): StatusState
   });
 
   const wsRef = useRef<WebSocket | null>(null);
+  const reconnectTimer = useRef<number | null>(null);
   const sessionsRef = useRef<Map<string, number>>(new Map());
 
   const connect = useCallback(() => {
@@ -50,7 +56,7 @@ export function useStatusWebSocket(): StatusState
       if ((ws as any)._pingId) clearInterval((ws as any)._pingId);
       wsRef.current = null;
       setState((prev) => ({ ...prev, connected: false }));
-      setTimeout(connect, 2000);
+      reconnectTimer.current = window.setTimeout(connect, 2000);
     };
 
     ws.onerror = () => { ws.close(); };
@@ -120,9 +126,29 @@ export function useStatusWebSocket(): StatusState
     };
   }, []);
 
+  // Called by App.tsx after a successful login.  Pre-auth WS upgrade attempts
+  // would otherwise leave the next reconnect attempt up to 2s away even though
+  // the cookie is now valid.  Cancel any pending timer, then connect now.
+  const forceReconnect = useCallback(() => {
+    if (reconnectTimer.current !== null)
+    {
+      clearTimeout(reconnectTimer.current);
+      reconnectTimer.current = null;
+    }
+    if (!wsRef.current)
+    {
+      connect();
+    }
+  }, [connect]);
+
   useEffect(() => {
     connect();
     return () => {
+      if (reconnectTimer.current !== null)
+      {
+        clearTimeout(reconnectTimer.current);
+        reconnectTimer.current = null;
+      }
       if (wsRef.current)
       {
         wsRef.current.close();
@@ -131,5 +157,5 @@ export function useStatusWebSocket(): StatusState
     };
   }, [connect]);
 
-  return state;
+  return { ...state, forceReconnect };
 }

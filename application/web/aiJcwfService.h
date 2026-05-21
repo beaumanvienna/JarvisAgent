@@ -97,13 +97,6 @@ namespace AIAssistant
         void FixFailedScriptAsync(std::string const& scriptPath, std::string const& stderrContent,
                                   std::string const& taskType);
 
-        // Test a specific AI interface by index. Sends a simple prompt and returns
-        // whether the interface responded successfully. Blocking call — intended to be
-        // called from a Crow HTTP handler thread, not the main thread.
-        // Returns true on success; outResponsePreview contains the first ~200 chars.
-        bool TestAiInterface(size_t interfaceIndex, std::string& outResponsePreview, std::string& outError,
-                             int64_t& outLatencyMs);
-
         // Shutdown: signal all background threads to stop and join them.
         void Shutdown();
 

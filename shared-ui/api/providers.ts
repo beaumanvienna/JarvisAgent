@@ -1,3 +1,5 @@
+import { authFetch } from "@shared/api/auth";
+
 export type CredentialType = "api_key" | "oauth" | "key_pair" | "credentials" | "aws";
 
 export type ProviderEntry = {
@@ -50,7 +52,7 @@ function ensureOk(response: Response): void
 
 export async function listProviders(): Promise<ProvidersListResponse>
 {
-  const response = await fetch("/api/settings/providers");
+  const response = await authFetch("/api/settings/providers");
   ensureOk(response);
   return (await response.json()) as ProvidersListResponse;
 }
@@ -78,7 +80,7 @@ export type ProviderCreateInput = {
 
 export async function createProvider(input: ProviderCreateInput): Promise<ProviderMutationResponse>
 {
-  const response = await fetch("/api/settings/providers", {
+  const response = await authFetch("/api/settings/providers", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),
@@ -102,7 +104,7 @@ export type ProviderUpdateInput = {
 
 export async function updateProvider(name: string, input: ProviderUpdateInput): Promise<ProviderMutationResponse>
 {
-  const response = await fetch(`/api/settings/providers/${encodeURIComponent(name)}`, {
+  const response = await authFetch(`/api/settings/providers/${encodeURIComponent(name)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),
@@ -112,7 +114,7 @@ export async function updateProvider(name: string, input: ProviderUpdateInput): 
 
 export async function deleteProvider(name: string): Promise<ProviderMutationResponse>
 {
-  const response = await fetch(`/api/settings/providers/${encodeURIComponent(name)}`, {
+  const response = await authFetch(`/api/settings/providers/${encodeURIComponent(name)}`, {
     method: "DELETE",
   });
   return (await response.json()) as ProviderMutationResponse;
@@ -120,7 +122,7 @@ export async function deleteProvider(name: string): Promise<ProviderMutationResp
 
 export async function setDefaultProvider(name: string): Promise<ProviderMutationResponse>
 {
-  const response = await fetch(`/api/settings/providers/${encodeURIComponent(name)}/default`, {
+  const response = await authFetch(`/api/settings/providers/${encodeURIComponent(name)}/default`, {
     method: "POST",
   });
   return (await response.json()) as ProviderMutationResponse;
@@ -134,7 +136,7 @@ export async function saveProviders(masterPassword?: string): Promise<ProviderSa
     body.master_password = masterPassword;
   }
 
-  const response = await fetch("/api/settings/providers/save", {
+  const response = await authFetch("/api/settings/providers/save", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),

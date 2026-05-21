@@ -19,7 +19,7 @@ cd JarvisAgent
 
 JarvisAgent depends on:
 
-- **C++ toolchain** — gcc/g++ or clang, plus `make`
+- **C++ toolchain** — C++23-capable gcc (≥12) or clang (≥16 with libc++, or ≥19 with libstdc++), plus `make`.  See **C++23 toolchain notes** below if you're on clang 18 or Rocky 9.
 - **Python 3** and development headers (on Ubuntu/Debian: `python3`, `python3-dev`)
 - **libz** (Linux — linked at build time; vendored on Windows; included in Xcode SDK on macOS)
 - **libpq** — PostgreSQL client library, required by the DB-query cloud connector on all platforms
@@ -64,6 +64,15 @@ sudo cp bin/release/premake5 /usr/bin/
 ```
 
 Other distros (Fedora / RHEL / Arch / …): install the equivalent packages from the list above, then build premake5 the same way (Fedora needs `libuuid-devel` for the Bootstrap compile).
+
+### C++23 toolchain notes
+
+j9t builds at `cppdialect "C++23"` since Sitting 7a (2026-05-19). The matrix is fine on stock compilers everywhere EXCEPT two corner cases:
+
+- **Clang ≤18 on Linux** — libstdc++'s `<expected>` header guards on `__cpp_concepts >= 202002L`, but clang 18 reports `201907L` (fixed in clang 19+).  Workaround: `sudo apt install libc++-18-dev libc++abi-18-dev` and build via `premake5 gmake --clang` — the `--clang` opt-in routes through libc++ (`-stdlib=libc++` in build + link flags) which ships its own `<expected>` without the guard.  Remove the `--clang` option once clang ≥19 lands in Ubuntu LTS.
+- **Rocky Linux 9 RPM build** — system gcc is 11.5 (predates libstdc++'s `<expected>`, which arrived in libstdc++ 12).  The CI job installs `gcc-toolset-13-gcc gcc-toolset-13-gcc-c++` from the standard AppStream repo and wraps the build with `scl enable gcc-toolset-13 -- bash build-rpm.sh`.  The resulting RPM binary links to the system `libstdc++.so.6` at runtime (via embedded `libstdc++_nonshared.a` for the new ABI symbols), so it's runtime-portable to any stock Rocky 9 box without needing gcc-toolset installed.
+
+Everything else (Ubuntu CI gcc 13, macOS Apple Clang 17 + libc++ 19, Windows MSVC 19.50, Arch gcc 16, Flatpak SDK 24.08 gcc 14, Docker linux/amd64+arm64 Ubuntu 24.04 gcc 13) ships `<expected>` natively at the current default compiler version.
 
 ---
 

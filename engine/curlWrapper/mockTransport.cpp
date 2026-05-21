@@ -24,12 +24,15 @@
 #include <curl/curl.h>
 
 #include <algorithm>
+#include <deque>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <unordered_set>
 
 #include "simdjson/simdjson.h"
 
+#include "curlWrapper/authSigner.h"
 #include "engine.h"
 #include "file/pathConfinement.h"
 #include "workflow/workflowTypes.h"  // SanitizeUtf8
@@ -56,7 +59,31 @@ namespace AIAssistant
             return lower == "content-type" || lower == "retry-after";
         }
 
+        // Process-global ring buffer of captured signing outputs.  Producer is
+        // the dispatcher's I/O thread (one MockTransport::Submit at a time per
+        // dispatcher); consumer is the web-server's debug-signals handler thread.
+        // Mutex-guarded; capped at MockTransport::kMaxCapturedSignatures (FIFO
+        // eviction).  Lives at file scope so the static getter can return a
+        // snapshot without needing a live MockTransport instance pointer — tests
+        // run against whatever dispatcher exists in the process.
+        std::mutex& CapturedMutex()
+        {
+            static std::mutex m;
+            return m;
+        }
+        std::deque<MockSignatureCapture>& CapturedRing()
+        {
+            static std::deque<MockSignatureCapture> ring;
+            return ring;
+        }
+
     } // namespace
+
+    std::vector<MockSignatureCapture> MockTransport::GetRecentCapturedSignatures()
+    {
+        std::lock_guard<std::mutex> guard(CapturedMutex());
+        return {CapturedRing().begin(), CapturedRing().end()};
+    }
 
     MockTransport::MockTransport() = default;
 
@@ -97,12 +124,62 @@ namespace AIAssistant
 
         long httpStatus = 200;
         std::string rawHeaders;
+        std::string amzDateOverride;
         if (!LoadFixtureMeta(queryData.m_FixturePath, queryData.m_CancelKey,
-                             queryData.m_QuotaKey, httpStatus, rawHeaders, errMsg))
+                             queryData.m_QuotaKey, httpStatus, rawHeaders, amzDateOverride, errMsg))
         {
             pc.m_Response.m_Result = QueryResult::Fail(QueryErrorCode::InvalidQueryData, std::move(errMsg));
             m_PendingCompletions.push_back(std::move(pc));
             return;
+        }
+
+        // Thread the optional AmzDate override into the QueryData copy we use
+        // for signing.  Mock-only — live paths leave the field empty and the
+        // SigV4 signer falls back to FormatAmzDateNow().  This is what makes
+        // the captured Authorization deterministic for signature KAT tests.
+        if (!amzDateOverride.empty())
+        {
+            queryData.m_AmzDateOverride = amzDateOverride;
+        }
+
+        // Run the SigV4 signer to capture what would have been sent on the wire.
+        // Scope: AwsSigV4 AND m_AwsCredential populated.  The other auth styles
+        // (Bearer / x-api-key / x-goog-api-key / api-key) just compose a single
+        // header from m_ApiKey and have nothing KAT-worthy to capture.  The
+        // m_AwsCredential null check is what keeps parser-only fault tests
+        // (test_api5_mock_errors uses API5 with empty key_name, which leaves
+        // m_AwsCredential null) working — they don't care about the request
+        // side and shouldn't be gated by the signer.  When the credential IS
+        // populated, the caller is exercising the typed-credential pipeline
+        // and signer failure is a real error: fail closed.
+        if (queryData.m_AuthStyle == CurlWrapper::AuthStyle::AwsSigV4 &&
+            queryData.m_AwsCredential != nullptr)
+        {
+            std::vector<std::string> capturedHeaders;
+            std::string signErrMsg;
+            auto const& signer = IAuthSigner::Get(queryData.m_AuthStyle);
+            if (signer.Apply(queryData, capturedHeaders, signErrMsg))
+            {
+                std::lock_guard<std::mutex> guard(CapturedMutex());
+                auto& ring = CapturedRing();
+                while (ring.size() >= kMaxCapturedSignatures)
+                {
+                    ring.pop_front();
+                }
+                ring.push_back(MockSignatureCapture{queryData.m_CancelKey,
+                                                    queryData.m_QuotaKey,
+                                                    std::move(capturedHeaders)});
+            }
+            else
+            {
+                LOG_CORE_ERROR("MockTransport: SigV4 signer rejected request cancelKey='{}' "
+                               "quotaKey='{}': {}",
+                               queryData.m_CancelKey, queryData.m_QuotaKey, signErrMsg);
+                pc.m_Response.m_Result = QueryResult::Fail(QueryErrorCode::InvalidQueryData,
+                                                           std::move(signErrMsg));
+                m_PendingCompletions.push_back(std::move(pc));
+                return;
+            }
         }
 
         pc.m_Response.m_Body              = std::move(body);
@@ -244,10 +321,12 @@ namespace AIAssistant
                                         std::string const& quotaKey,
                                         long& outHttpStatus,
                                         std::string& outRawHeaders,
+                                        std::string& outAmzDateOverride,
                                         std::string& outErrorMessage)
     {
         outHttpStatus = 200;
         outRawHeaders.clear();
+        outAmzDateOverride.clear();
 
         fs::path const metaPath = fs::path(fixturePath).string() + ".meta.json";
         fs::path const confined = ConfineUnderProjectRoot(metaPath.string());
@@ -404,6 +483,32 @@ namespace AIAssistant
                     outRawHeaders.append(hVal);
                     outRawHeaders.append("\r\n");
                 }
+            }
+            else if (key == "x_amz_date_override")
+            {
+                // Optional AWS SigV4 AmzDate override for signature KAT tests.
+                // Format: "YYYYMMDDTHHMMSSZ" (matches the wire shape).  The
+                // signer is permissive about the format (it just substring's
+                // the first 8 chars for credentialScope's dateStamp), so we
+                // do a basic length+shape check here rather than a full parse.
+                std::string_view dateView;
+                if (field.value().get_string().get(dateView) != simdjson::SUCCESS)
+                {
+                    LOG_CORE_ERROR("MockTransport: meta.json 'x_amz_date_override' must be a string "
+                                   "path='{}' cancelKey='{}' quotaKey='{}'",
+                                   confined.string(), cancelKey, quotaKey);
+                    outErrorMessage = "MockTransport: meta.json 'x_amz_date_override' must be a string";
+                    return false;
+                }
+                if (dateView.size() != 16 || dateView[8] != 'T' || dateView.back() != 'Z')
+                {
+                    LOG_CORE_ERROR("MockTransport: meta.json 'x_amz_date_override' '{}' does not match "
+                                   "'YYYYMMDDTHHMMSSZ' shape path='{}' cancelKey='{}' quotaKey='{}'",
+                                   dateView, confined.string(), cancelKey, quotaKey);
+                    outErrorMessage = "MockTransport: meta.json 'x_amz_date_override' must be YYYYMMDDTHHMMSSZ";
+                    return false;
+                }
+                outAmzDateOverride.assign(dateView);
             }
             // Future fields (body_path, etc.) parse here.  Unknown keys are
             // silently ignored — the schema is forward-compatible.

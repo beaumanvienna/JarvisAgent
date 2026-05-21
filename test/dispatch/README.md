@@ -84,6 +84,46 @@ fixtures capture: Anthropic `credit_balance_too_low` returns 400 (not
 `ServiceQuotaExceededException` returns 400; `AccessDeniedException`
 returns 403.
 
+### SigV4 signature KAT (pre-1.0 Sitting 6, 2026-05-19)
+
+```
+python3 test/dispatch/test_bedrock_sigv4.py                # Bedrock SigV4 Authorization-header KAT
+```
+
+Drives the typed-credential threading end-to-end: provisions a fresh
+`aws` credential via `POST /api/settings/providers` (using the
+AWS-published example access-key + secret), an `is_mock: true` API5
+interface, and an adhoc workflow that dispatches one ai_call.
+MockTransport now runs the live `IAuthSigner::Get(...).Apply(...)`
+pipeline (when `AuthStyle == AwsSigV4` AND `m_AwsCredential != nullptr`),
+captures the resulting Authorization header into a process-global FIFO
+ring (`MockSignatureCapture`, cap 32, exposed via
+`/api/debug/signals::last_mock_signatures` in debug builds), and replays
+the fixture body to keep the parser path unchanged.  The test asserts
+both the Authorization-header structure (`Credential=AKIDEXAMPLE/.../bedrock/aws4_request`,
+`SignedHeaders=host;x-amz-content-sha256;x-amz-date`) and the locked
+signature hex `1a6d660...07ae021`.
+
+The locked signature was authored via the **crypto-test bootstrap
+pattern** (`feedback_crypto_test_bootstrap_pattern.md`): placeholder
+constant → first run prints the captured value → copy-paste lock.
+Pairs with `awsSigV4.cpp::RunSelfTest #2` (signing-key derivation
+against AWS-published `kSigning` vector at engine startup) as the
+independent reference vector required by the pattern's
+"never use bootstrap as the SOLE crypto test" constraint.
+
+Fixture inputs are pinned to overlap with the existing self-test #3
++ #4 chain (`AKIDEXAMPLE`, AWS-published example secret, us-east-1,
+bedrock, `20240101T120000Z` AmzDate via fixture `.meta.json`'s new
+`x_amz_date_override` field); the actual request body differs from
+self-test #4 because the JCWF path runs the real
+`BedrockRequestBuilder::BuildBedrockAnthropicBody`, so the locked
+signature differs from the self-test value.  Both still exercise the
+HMAC chain end-to-end.
+
+Requires DEBUG build (`/api/debug/signals` is compiled out of Release).
+Run via `./jarvisagent.sh --debug` before invoking the test.
+
 ### WebSocket payload verification (Workstream B + E / Sittings 4 + 6, 2026-05-15)
 
 ```

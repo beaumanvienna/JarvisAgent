@@ -146,10 +146,22 @@ struct QueryData
     // Auth + transport (used by both sync CurlWrapper::Query and async dispatcher)
     std::string m_Url;                          // API endpoint URL
     std::string m_Data;                         // JSON POST body
-    std::string m_ApiKey;                       // Static-header credential (Bearer / x-api-key / api-key / x-goog-api-key) OR AWS access_key_id for SigV4
+    std::string m_ApiKey;                       // Static-header credential (Bearer / x-api-key / api-key / x-goog-api-key); ignored on the SigV4 path — see m_AwsCredential
     AuthStyle m_AuthStyle{AuthStyle::Bearer};   // Authentication header style — selects the IAuthSigner
     long m_TimeoutMs{0};                        // 0 = no timeout; >0 = max transfer time in ms
-    std::unordered_map<std::string, std::string> m_Params{}; // Per-style auxiliary fields (e.g. SigV4 reads "secret_access_key", "region", "session_token")
+    std::unordered_map<std::string, std::string> m_Params{}; // Per-style auxiliary non-secret fields (e.g. SigV4 reads "service" with default "bedrock"); secret material lives in typed credential pointers, not this map
+
+    // Typed-credential snapshot (Sitting 6).  Populated at submit time when AuthStyle is AwsSigV4;
+    // null for the other styles which read m_ApiKey directly.  shared_ptr to a deep copy taken
+    // under KeyManager's lock so the request's view of the credential is stable across concurrent
+    // RemoveProvider / SetDefaultProvider mutations.
+    std::shared_ptr<AwsCredential const> m_AwsCredential{};
+
+    // Optional AWS SigV4 timestamp override ("YYYYMMDDTHHMMSSZ"). Mock-only — set by
+    // MockTransport from <fixture>.meta.json::x_amz_date_override so the captured
+    // Authorization is byte-deterministic for signature KAT tests.  Live paths leave
+    // this empty; SigV4Signer::Sign falls back to FormatAmzDateNow().
+    std::string m_AmzDateOverride;
 
     // Dispatcher-routing fields (async path only — see Section 15)
     int m_InterfaceType{-1};                    // ConfigParser::EngineConfig::InterfaceType encoded as int; -1 = unknown / sync caller
@@ -178,11 +190,11 @@ enum class AuthStyle
 };
 ```
 
-`IAuthSigner::Get(style)` returns the singleton signer for each variant.  Adding a new style triggers `-Wswitch` (no `default:` arm) at every consumer; the helper throws `std::logic_error` for unknown integer values as a runtime backstop.  Per-style validation (empty / whitespace credentials, SigV4 dual-secret + region presence, etc.) lives inside each signer's `Apply()` — see `doc/cyber security.md` "IAuthSigner Security".
+`IAuthSigner::Get(style)` returns the singleton signer for each variant.  Adding a new style triggers `-Wswitch` (no `default:` arm) at every consumer; the helper throws `std::logic_error` for unknown integer values as a runtime backstop.  Per-style validation (empty / whitespace credentials, SigV4 typed-credential presence + region, etc.) lives inside each signer's `Apply()` — see `doc/cyber security.md` "IAuthSigner Security".
 
 ### Validation
 
-`IsValid()` is a coarse pre-flight check: it returns `false` (and logs `LOG_CORE_ERROR`) if any of `m_Url`, `m_Data`, `m_ApiKey` is empty.  This is intentionally cheap and style-agnostic.  Style-specific validation (e.g. SigV4's `secret_access_key` and `region` non-empty) lives inside `IAuthSigner::Apply()` and runs after `IsValid()` — a request that passes `IsValid()` may still be rejected by the signer with `QueryErrorCode::NoApiKey` if a style-specific field is missing.
+`IsValid()` is a coarse pre-flight check: it returns `false` (and logs `LOG_CORE_ERROR`) if any of `m_Url`, `m_Data`, `m_ApiKey` is empty.  This is intentionally cheap and style-agnostic.  Style-specific validation (e.g. SigV4 requires `m_AwsCredential` non-null with non-empty `m_SecretAccessKey` and `m_Region`) lives inside `IAuthSigner::Apply()` and runs after `IsValid()` — a request that passes `IsValid()` may still be rejected by the signer with `QueryErrorCode::NoApiKey` if a style-specific field is missing.  Note that SigV4 paths skip the `m_ApiKey`-blank check inside `IsValid()` implicitly: `AiRequestPool::ResolveApiKey` populates `m_ApiKey` with the AWS access_key_id for legacy compatibility, but the actual signer reads `m_AwsCredential->m_AccessKeyId` directly.
 
 ---
 
@@ -193,7 +205,7 @@ enum class AuthStyle
 1. Checks `m_Initialized` — returns `QueryResult::Fail(CurlNotInitialized, …)` if not ready.
 2. Validates `queryData.IsValid()` — returns `QueryResult::Fail(InvalidQueryData, …)` on coarse pre-flight failure (empty URL / data / API key).
 3. Clears `m_ReadBuffer` so sequential queries on the same `CurlWrapper` don't concatenate (see Section 7).
-4. Calls `IAuthSigner::Get(m_AuthStyle).Apply(queryData, headers, errorMessage)` to produce auth headers per the selected style.  On signer rejection (empty / whitespace credential, SigV4 missing `secret_access_key` / `region`, etc.) returns `QueryResult::Fail(NoApiKey, …)` and emits `LOG_CORE_ERROR("CurlWrapper::Query: auth signer rejected request url='...' quotaKey='...': ...")`.
+4. Calls `IAuthSigner::Get(m_AuthStyle).Apply(queryData, headers, errorMessage)` to produce auth headers per the selected style.  On signer rejection (empty / whitespace credential, SigV4 null `m_AwsCredential` or missing region, etc.) returns `QueryResult::Fail(NoApiKey, …)` and emits `LOG_CORE_ERROR("CurlWrapper::Query: auth signer rejected request url='...' quotaKey='...': ...")`.
 5. Builds a `CurlSlist` with the signer-produced auth headers + `Content-Type: application/json`.
 6. Sets curl options:
    - `CURLOPT_URL`, `CURLOPT_HTTPHEADER`, `CURLOPT_POSTFIELDS`
@@ -354,7 +366,7 @@ While `CurlWrapper::Query` is the synchronous one-shot path used by REST handler
 The dispatcher does not own the curl machinery directly.  It composes with two `IInterfaceTransport` implementations (`engine/curlWrapper/interfaceTransport.h`) and selects between them per-request:
 
 - **`LiveTransport`** (`engine/curlWrapper/liveTransport.{h,cpp}`) — the production HTTPS path.  Owns the curl easy/multi handles, `IAuthSigner` integration, write/header/progress callbacks, response capture (body + raw headers + HTTP status + version label).
-- **`MockTransport`** (`engine/curlWrapper/mockTransport.{h,cpp}`) — fixture-driven replay for hermetic dispatch tests, demo-JCWF replay, and CI without provider credit burn.  Reads a config-supplied JSON fixture (with optional `<fixture>.meta.json` sibling controlling HTTP status + headers) and synthesises the same `Response` shape LiveTransport produces.
+- **`MockTransport`** (`engine/curlWrapper/mockTransport.{h,cpp}`) — fixture-driven replay for hermetic dispatch tests, demo-JCWF replay, and CI without provider credit burn.  Reads a config-supplied JSON fixture (with optional `<fixture>.meta.json` sibling controlling HTTP status, headers, and an `x_amz_date_override` for deterministic SigV4 captures) and synthesises the same `Response` shape LiveTransport produces.  When the request's `m_AuthStyle == AwsSigV4` AND `m_AwsCredential != nullptr`, MockTransport additionally invokes the signer and captures the resulting Authorization header into a process-global ring buffer (`MockSignatureCapture`, cap 32, FIFO eviction).  The captures are surfaced via `/api/debug/signals::last_mock_signatures` (debug-build only) — see `test/dispatch/test_bedrock_sigv4.py` for the canonical SigV4 KAT consumer.  Tests that DON'T care about signing leave `m_AwsCredential` null (e.g. parser-only fault suites configure `key_name=""`); MockTransport skips the signer for those and replays the fixture unchanged.
 
 Selection is per-request: `CurlMultiDispatcher::DrainInbox` routes requests whose `QueryData::m_IsMock` is `true` to MockTransport, everything else to LiveTransport.  Both transports share the dispatcher's monotonic `RequestId` counter + `OnTransportComplete` sink — the dispatcher doesn't track which transport carried which id.  Completions correlate via the `RequestId` carried through `IInterfaceTransport::Submit` → completion callback.
 

@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useCallback } from "react";
+import { authFetch } from "@shared/api/auth";
 
 type TreeChild = {
   id: string;
@@ -30,7 +31,7 @@ export default function WorkflowTreeView(props: {
     try
     {
       // Try the container tree endpoint first.
-      const treeResponse = await fetch(`/api/workflows/${encodeURIComponent(rootId)}/tree`);
+      const treeResponse = await authFetch(`/api/workflows/${encodeURIComponent(rootId)}/tree`);
       if (treeResponse.ok)
       {
         const data = await treeResponse.json();
@@ -44,7 +45,7 @@ export default function WorkflowTreeView(props: {
       }
 
       // Fall back to dependency graph.
-      const graphResponse = await fetch("/api/workflows/dependency-graph");
+      const graphResponse = await authFetch("/api/workflows/dependency-graph");
       if (!graphResponse.ok) return;
       const graphData = await graphResponse.json();
       if (Array.isArray(graphData.edges) && graphData.edges.length > 0)

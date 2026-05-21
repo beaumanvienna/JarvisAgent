@@ -15,6 +15,521 @@ Keep entries self-contained — a fresh-context Claude should be able to read ju
 
 ---
 
+## 2026-05-19 (Sitting 7a — C++23 toolchain bringup + typed error scaffolds + `RemoveWorkflow` pilot) → next session
+
+Project moved to C++23 (`cppdialect "C++23"` in premake5.lua) with native `std::expected` support across the entire build matrix.  Three subsystem-scoped typed error scaffolds landed (`ConnectorError`, `ParserError`, `RegistryError`) following the new "API shape" pattern from `pre-1_0_follow-ups.md` Sitting 7.  Pilot conversion: `WorkflowRegistry::RemoveWorkflow` flipped from `bool + std::string& errorMessage` to `[[nodiscard]] std::expected<void, RegistryError>` — 1 method + 1 caller updated, builds clean, regression tests stay green.  The bigger surfaces (13 cloud-connector `TestConnection` overrides at ~190 return sites, ~15 chained workflow JSON parsers) carved out as **Sitting 7b** + **Sitting 7c** in the plan doc — the all-or-nothing mechanics of each subsystem sweep didn't fit a same-day continuation.
+
+JC explicitly opted into clang 18 + libc++ for local dev this session (instead of g++); the `--clang` premake option lands the toolchain switch.  Verification matrix below confirms `<expected>` availability on every CI target plus the dev machine.
+
+### Part A — C++23 toolchain bringup
+
+| Theme | Files | Why |
+|---|---|---|
+| **`cppdialect "C++23"`** | `premake5.lua:50` | Required for `std::expected` (C++23 / P0323R12).  All current CI targets ship libstdc++ ≥12 / libc++ ≥16 / MSVC 19.33+, which means the header is natively present.  Bump verified empirically — see "Build matrix verification" below. |
+| **`--clang` opt-in** | `premake5.lua` (new `newoption` block; `toolset "clang"` + `-stdlib=libc++` on buildoptions+linkoptions when set) | Clang ≤18 has a `__cpp_concepts` version mismatch with libstdc++'s `<expected>` (clang reports 201907L, libstdc++ guards on 202002L — fixed in clang 19+).  Workaround: route through libc++ which ships its own `<expected>` without the concepts-version guard.  Default Linux toolchain remains gcc (matches CI); `--clang` is a local-dev opt-in.  Remove the option when clang ≥19 lands in Ubuntu LTS. |
+| **Rocky 9 CI gets `gcc-toolset-13`** | `.github/workflows/linux-workflow.yml::package-rpm` (`dnf install -y gcc-toolset-13-gcc gcc-toolset-13-gcc-c++` + `scl enable gcc-toolset-13 -- bash build-rpm.sh`) | Rocky 9's system gcc is 11.5, whose libstdc++ predates `<expected>` (added in libstdc++ 12 per https://gcc.gnu.org/pipermail/gcc-patches/2022-March/592356.html).  `gcc-toolset-13` is in the standard Rocky 9 AppStream repo (no third-party dependencies).  The toolset's binary links to the system `libstdc++.so.6` at runtime (via embedded `libstdc++_nonshared.a` for the new ABI symbols), so the resulting RPM is runtime-portable to any stock Rocky 9 box without requiring gcc-toolset to be installed there.  Verified in Docker: `dnf install gcc-toolset-13-gcc-c++ && source /opt/rh/gcc-toolset-13/enable && g++ -std=c++23 ...` compiles `<expected>` cleanly + the binary runs. |
+
+### Part B — Typed error scaffolds (3 subsystems)
+
+| Theme | Files | Why |
+|---|---|---|
+| **`ConnectorError`** | `application/cloud/connectorError.{h,cpp}` (new) | 9 codes: `InvalidConfig` / `InvalidEndpoint` / `CredentialMissing` / `CredentialInvalid` / `OAuthError` / `NetworkError` / `AuthFailure` / `HttpError` / `UnknownError`.  Scope: cloud-connector entry points (`TestConnection` family, `ValidatePublicHttpEndpoint`, `ValidatePostgresParams`).  Conversion of the 13 `TestConnection` overrides + utilities deferred to Sitting 7b (~190 return sites).  The scaffold is ready; the sweep is mechanical. |
+| **`ParserError`** | `application/workflow/parserError.{h,cpp}` (new) | 5 codes: `TypeMismatch` / `MissingField` / `ValueOutOfRange` / `SimdjsonError` / `UnknownError`.  Scope: workflow JSON parsers (`ParseTask` + ~14 chained siblings).  Conversion deferred to Sitting 7c — the inter-method call chain (`ParseTasks` → `ParseTask` → `ParseTaskInputs/Outputs/QueueBinding/Environment/Dataflow/...`) means it's all-or-nothing per subsystem. |
+| **`RegistryError`** | `application/workflow/registryError.{h,cpp}` (new) | 4 codes: `NotFound` / `PathRefused` / `IoError` / `UnknownError`.  Scope: `WorkflowRegistry` mutators.  Sole consumer today (`RemoveWorkflow`) converted in Part C below. |
+| **Shared scaffold shape** | (across all three) | Each error type has: (a) `enum class XxxErrorCode { ..., UnknownError }` (no `default:` arm — `-Wswitch` enforces exhaustiveness when a new variant is added); (b) `struct XxxError { Code; std::string m_Details; static Make(...) }`; (c) `std::string_view Describe(Code)` for stable category labels in log lines.  Pairs with `std::expected<T, XxxError>` — `Code` is the machine-actionable category, `m_Details` is the human-readable composed message (replaces the legacy `std::string& errorMessage` outparam). |
+
+### Part C — Pilot conversion (`RemoveWorkflow`)
+
+| Theme | Files | Why |
+|---|---|---|
+| **Header signature flip** | `application/workflow/workflowRegistry.h` (added `#include <expected>` + `#include "workflow/registryError.h"`) | `[[nodiscard]] bool RemoveWorkflow(std::string const& workflowId, bool deleteFile, std::string& errorMessage)` → `[[nodiscard]] std::expected<void, RegistryError> RemoveWorkflow(std::string const& workflowId, bool deleteFile)`.  The legacy `std::string& errorMessage` outparam drops out entirely; failure carries through the typed `RegistryError` in `result.error()`. |
+| **Impl conversion** | `application/workflow/workflowRegistry.cpp` | 4 return sites flipped: workflow-not-found → `RegistryErrorCode::NotFound`, path-not-under-project-root → `PathRefused`, `fs::remove` failure → `IoError`, success → `return {};`.  Each `std::unexpected(RegistryError::Make(...))` call site reads cleanly — concise enough not to need a wrapper helper. |
+| **Caller updated** | `application/web/webServer_studio.cpp::HandleWorkflowDelete` (1 caller) | `if (!m_WorkflowRegistry->RemoveWorkflow(workflowId, false, removeError)) { LOG_APP_WARN(...): {}", workflowId, removeError); }` → `if (auto removeResult = m_WorkflowRegistry->RemoveWorkflow(workflowId, false); !removeResult) { LOG_APP_WARN("... code={}: {}", workflowId, Describe(removeResult.error().m_Code), removeResult.error().m_Details); }`.  Caller log now carries both the typed category (`Describe(code)` → e.g. `"path_refused"`) AND the human-readable detail — strictly more information than the legacy `errorMessage` string. |
+
+### What's verified
+
+| Check | Result |
+|---|---|
+| **Build matrix verification — empirical Docker probes** | Rocky 9: stock gcc 11.5 → no `<expected>`; `gcc-toolset-13` install → gcc 13.3.1 → compiles `<expected>` cleanly; binary links system libstdc++ ✓.  Arch: stock gcc 16.1 ✓.  Ubuntu 24.04 (CI Linux + Docker amd64+arm64 base): stock gcc 13.3 ✓.  Zorin 18 (dev): gcc 13.3 ✓; clang 18 + libstdc++ ✗ (concepts mismatch); clang 18 + libc++-18-dev ✓. |
+| **Build matrix verification — cppreference + runner-image research** | macOS-latest (macos-15): Apple Clang 17.0.0, libc++ 19 ✓.  Windows-latest: MSVC 19.50 (VS 2022 17.14) ✓.  Freedesktop SDK 24.08: gcc 14.2 ✓. |
+| Studio Release build with clang + libc++ + C++23 | Clean, zero warnings (except 4 pre-existing asio `-Wshadow` in vendor headers — not from our code) |
+| Binary linkage | `ldd bin/Release/jarvisAgent-studio` shows `libc++.so.1` + `libc++abi.so.1` (not libstdc++) — confirms `--clang` path is wiring `-stdlib=libc++` correctly through both compile + link |
+| Smoke test | `bin/Release/jarvisAgent-studio --help` runs cleanly |
+| **Live test — `test_mock_dispatch_hermetic.py`** | OK — confirms the C++23 binary still drives MockTransport end-to-end |
+| **Live test — `test_bedrock_sigv4.py`** | OK — SigV4 KAT signature unchanged at `1a6d6607ae8458641685888fa012825e591fb38ca4db178eab28d9a9b07ae021`; confirms the typed-credential path + signer math survives the C++23 + clang toolchain switch |
+| **Live test — `test_api5_mock_errors.py`** | 6/6 pass — confirms the per-API parser-fault batteries are unaffected by the toolchain change |
+| Symbol presence in binary | `nm bin/Release/jarvisAgent-studio | grep -iE "ConnectorError\|ParserError\|RegistryError\|RemoveWorkflow"` — all 4 expected symbols present, including the new `RemoveWorkflow` signature (no longer takes the third `errorMessage` arg, visible in the mangled name) |
+| Active edition at session end | `studio` (per `.build-edition`) |
+
+### Design decisions settled this sitting
+
+| Q | Answer |
+|---|---|
+| C++23 + `std::expected` vs polyfill vs engine-local Expected template? | **C++23 + native `std::expected`.**  Original concern was Rocky 9 (libstdc++ 11 predates `<expected>`), but `gcc-toolset-13` from the standard Rocky 9 AppStream repo closes that gap with a runtime-portable binary.  All other CI targets ship `<expected>` natively at current default compiler versions.  No polyfill, no engine-local helper, no toolchain workaround beyond Rocky 9's gcc-toolset pattern. |
+| Use clang 18 as the local dev compiler instead of g++? | **Yes — opt-in via `--clang`.**  JC installed clang 18 + libc++-18-dev locally for this session.  Premake `--clang` option sets `toolset "clang"` + `-stdlib=libc++` (build + link); generated Makefile picks up `CXX = clang++` and the libc++ flags.  Default Linux toolchain still gcc (matches CI gcc 13).  Remove `--clang` option when clang ≥19 lands in Ubuntu LTS (fixes the `__cpp_concepts` reporting). |
+| Subsystem-scoped error enums vs single mega-enum? | **Three subsystem-scoped enums** — `ConnectorError`, `ParserError`, `RegistryError`.  Each `switch (code)` over its own enum stays small + exhaustively coverable; a unified 40-variant enum across the codebase would dilute `-Wswitch` discipline (most callers care about only their subsystem's variants).  Pattern is extensible: a future subsystem with bool+string& APIs gets its own `XxxError` header, not a new variant in a mega-enum. |
+| Where to physically place the error headers? | Each next to the primary user — `application/cloud/connectorError.{h,cpp}`, `application/workflow/parserError.{h,cpp}`, `application/workflow/registryError.{h,cpp}`.  Avoids a tempting-but-wrong "shared" location that would force all three subsystems to take a dependency on a single header. |
+| `Make()` factory on the error struct vs aggregate-init? | **`Make()` factory.**  Keeps call sites terse: `return std::unexpected(RegistryError::Make(Code::NotFound, "..."));`.  Aggregate-init (`return std::unexpected(RegistryError{RegistryErrorCode::NotFound, "..."});`) requires the struct's field order in head — `Make()` is named-arg-style. |
+| Scope for today — full plan (22 methods + 50-80 callers) or pilot only? | **Pilot only.**  Plan-as-written estimated "Large (~1 day)" but the actual TestConnection sweep is ~190 return sites across 13 connector .cpp files (each needs context-sensitive `ConnectorErrorCode` selection per site), and the parser sweep is 15 chained methods with intra-subsystem caller fanout that prevents partial conversion.  Splitting into 7a (toolchain + scaffolds + RegistryError pilot, this sitting) + 7b (connectors) + 7c (parsers) lets each ship as a complete, regression-tested unit.  The pattern is proven on the pilot; the rest is mechanical follow-up.  Plan doc updated to reflect the carve-out + new "9 sittings remain" count. |
+| Use of `[[nodiscard]]` on `std::expected` returns? | **Yes, redundant but explicit.**  `std::expected` itself isn't `[[nodiscard]]` by spec (LWG views it as discardable for the void-on-success case).  Explicit annotation closes the gap — the compiler warns if a caller drops the return.  Matches existing project pattern (`[[nodiscard]] bool ...` was already used on the legacy shapes). |
+
+### Architecture notes for next-session-Claude
+
+- **`std::expected<T, XxxError>` is the canonical error-returning shape for new APIs.**  Codified as a new discipline rule in CLAUDE.md.  Subsystem-scoped enums (`ConnectorError` / `ParserError` / `RegistryError`) live next to their primary user; extend the closest existing one rather than inventing a sibling.  When a new subsystem with bool+string& APIs needs typing, create `application/<subsystem>/xxxError.{h,cpp}` following the existing pattern: `enum class Code { ..., UnknownError }` + `struct Error { Code; std::string m_Details; static Make() }` + `Describe()` switch helper.
+- **`Describe(Code)` returns a stable lowercase-snake string** suitable for log substrings the dashboard run analyzer can grep — `"path_refused"`, `"credential_invalid"`, etc.  These are stable identifiers; renaming a code variant breaks the analyzer's filter, so treat them as a wire format.
+- **The `--clang` premake opt-in is local-dev only.**  CI uses gcc on Linux, MSVC on Windows, Apple Clang on macOS, and Rocky 9's `gcc-toolset-13`.  Running `premake5 gmake --clang` writes `toolset "clang"` to the Makefile + adds `-stdlib=libc++` to build + link flags.  Without `--clang`, gcc is the default — same as before this sitting.
+- **Rocky 9's `gcc-toolset-13` is in the standard AppStream repo.**  No third-party repos, no SCL packaging from outside Red Hat / Rocky.  `scl enable gcc-toolset-13 -- bash <command>` is the canonical activation pattern.  The toolset's binary is runtime-portable to stock Rocky 9 via the `libstdc++_nonshared.a` static-symbols trick — verified in Docker.
+- **Pilot conversion (`RemoveWorkflow`) is the reference impl for the bigger sweeps.**  Sitting 7b's TestConnection sweep follows the same pattern: header signature flip (drop `std::string& errorMessage`, return `std::expected<void, ConnectorError>`), impl `return std::unexpected(ConnectorError::Make(Code::X, "..."));` at each error site + `return {};` on success, caller updates `if (auto r = ...; !r) { ... Describe(r.error().m_Code) ... r.error().m_Details ... }`.  Sitting 7c's parser sweep is structurally identical, just with `ParserError` instead of `ConnectorError`.
+
+### Open items / next-session candidates
+
+Per `pre-1_0_follow-ups.md` ordering, **Sitting 7b — Connector subsystem sweep** is next.  ~190 return sites across 13 cloud-connector `TestConnection` implementations + `ValidatePublicHttpEndpoint` + `ValidatePostgresParams` + 1 caller in `webServer.cpp` + ~17 intra-connector ValidatePublicHttpEndpoint callers.  Half-day to a day; mechanical sweep.  After that, **Sitting 7c — Workflow JSON parser sweep** (~15 chained methods, half-day).  Then Sitting 8 (SecureString-only path through HTTP layer) and the rest of the plan.
+
+**Out of scope but worth flagging:**
+
+- **`AiRequestPool::Submit` doesn't fit the `std::expected` pattern as-is** — it's a queueing operation that doesn't return the result synchronously.  Submission failure currently surfaces via `return false` + structured ERROR log.  Could be converted to `std::expected<void, SubmitError>` where `SubmitError` covers "interface not configured" / "ConfineUnderProjectRoot rejected output path" / "schema-retry budget exhausted at submit" / etc.  Out of scope for the legacy-API-shape sweep — the submission failure shape was already structured, and the actual AI-call result flows through a different async-completion path.  Worth a separate think when the time comes.
+- **`AiCallTaskExecutor` has 3-4 internal helpers** that take `std::string& errorMessage` (queue-binding materialisers).  These are intra-class private helpers; the typed-error story applies but the conversion is bounded by the file.  Could fold into Sitting 7c as a parallel exercise, or skip until a future cleanup.
+- **The Makefile generated by `premake5 gmake --clang` has `-stdlib=libc++` in CFLAGS** (C compiler flags) too, not just CXXFLAGS.  Harmless — clang ignores the flag for C files — but emits a noisy unused-flag warning per .c TU.  Cosmetic; not chasing today.
+
+### Doc sweep (same sitting)
+
+Touched 4 tracked docs reflecting the C++23 bringup + typed-error pattern:
+
+| Doc | Change |
+|---|---|
+| `CLAUDE.md` | "C++20 standard" → "C++23 standard"; cross-reference to `DEVELOPMENT.md` "C++23 toolchain notes" for the local-clang-18 opt-in.  New discipline rule appended: "New error-returning APIs use `[[nodiscard]] std::expected<T, SubsystemError>`" — full pattern + reference impl + cross-ref to `pre-1_0_follow-ups.md` for the deferred sweeps. |
+| `DEVELOPMENT.md` | Dependencies section: C++ toolchain requirement updated to "C++23-capable gcc (≥12) or clang (≥16 with libc++, or ≥19 with libstdc++)".  New "C++23 toolchain notes" sub-section before the macOS section: clang ≤18 + libc++ workaround, Rocky 9 `gcc-toolset-13` workaround, full build-matrix table showing which compiler is on which target.  This is the canonical home for build-mechanics per `feedback_doc_routing`. |
+| `doc/architecture.md` | Key Design Decisions table: new row "New error-returning APIs use `std::expected<T, SubsystemError>`" covering all three error enums + the `[[nodiscard]]`/`Describe()`/`Make()` pattern + the C++23/clang/Rocky 9 toolchain commentary + cross-ref to `DEVELOPMENT.md`.  Sits next to the typed-credential row from Sitting 6. |
+| `application/workflow/README.md` | `workflowRegistry.h/cpp` row updated to mention `RemoveWorkflow` now returns `std::expected<void, RegistryError>` with the three codes + reference to `registryError.h`.  Calls out 7b + 7c as the in-flight broader sweep. |
+
+**Skipped by design:**
+- `doc/combinedDocumentation.md` / `combinedCyberSecAudit.md` / `combinedSafetyAudit.md` — JCWF-generated per `feedback_combined_doc_generated`.
+- Predecessor plan docs (`cpp-safety-hardening-dev-plan.md`, etc.) — historical, not active references.
+- Per-domain session notes (`S1-D2-session-note.md`, etc.) — historical snapshots.
+- `application/cloud/README.md` — `ConnectorError` references will land in Sitting 7b's doc sweep alongside the TestConnection conversion.
+- `INSTALL.md` — runtime install doc, no compiler-version concerns.
+- `engine/README.md`, `engine/keys.md`, `engine/curlWrapper/curlWrapper.md` — no `bool + std::string&` surfaces affected by Sitting 7a.
+
+### Memory entries added this sitting
+
+| Memory | Distilled rule |
+|---|---|
+| `feedback_expected_error_pattern.md` | New error-returning C++ APIs use `[[nodiscard]] std::expected<T, SubsystemError>` from intake. Never `bool + std::string& errorMessage`. Subsystem-scoped error enums + `m_Details` + `Make()` + `Describe()`. |
+| `feedback_cpp23_clang_libcxx.md` | Project is C++23 (`cppdialect "C++23"`). Build-matrix table: which compiler is on which target + whether it ships `<expected>` natively. `--clang` opt-in is local-dev for clang ≤18 (libc++); Rocky 9 CI uses `gcc-toolset-13`. |
+
+### Gotchas next-session-Claude should know
+
+- **Working tree contains Sittings 1+2+3+4+5+5-follow-ups+6+7a + Sitting 6 doc sweep + Sitting 7a doc sweep.**  Substantial.  Per `feedback_git_commits` JC handles commits.  Natural splits for Sitting 7a if JC wants them: (a) toolchain bringup (premake5.lua + linux-workflow.yml) as one commit, (b) typed error scaffolds (6 new files) as another, (c) `RemoveWorkflow` conversion (workflowRegistry.{h,cpp} + webServer_studio.cpp) as a third, (d) doc sweep as a fourth.  Or all-in-one — JC's call.
+- **The active local toolchain is clang 18 + libc++** (via `premake5 gmake --clang`).  Switching back to g++ requires `premake5 gmake` (no `--clang`) + `make clean` (or wipe `bin-int/`) since the object files were built with libc++ ABI.  When CI surfaces a divergence (e.g. a clang-permissive thing that gcc warns on), it's an actual code issue not a flag mismatch.
+- **`std::expected` on clang ≤18 requires libc++.**  The CLAUDE.md rule documents this; `feedback_cpp23_clang_libcxx.md` carries the full matrix.  If next-session-Claude is on a different machine with stock clang 18 + libstdc++ and tries to compile, the build will fail with "no template named 'expected'" — the fix is either `--clang` (auto-libc++) or use g++.
+- **The pilot `RemoveWorkflow` conversion shows the canonical caller-update pattern.**  Future converters of 7b/7c should mirror it: extract the result via `auto r = ...; if (!r) { ... Describe(r.error().m_Code) ... r.error().m_Details ... }`.  The dashboard run analyzer indexes by `runId`/`workflowId` substring presence in ERROR/WARN lines, and the `Describe()` category appears as a stable substring callers can grep — the typed enum doesn't hide the diagnosis, it adds a stable label alongside.
+- **Sitting 7b (connector sweep) is the next-largest mechanical task in the project.**  ~190 return sites is real volume — when starting it, plan to do all 13 connectors in one sitting (the base class change forces all overrides to update; partial state doesn't compile).  The `ConnectorError` scaffold is ready in `application/cloud/connectorError.h` with 9 codes — Sitting 7b's per-site work is choosing the right code from that list at each `errorMessage = "X"; return false;` site.
+- **j9t Studio Debug was running at session end and shut down via REST.**  No background process at handoff.
+- **Late-session dispatch-suite results need triage tomorrow before any conclusions about Sitting 7a's correctness.**  Ran the full dispatch suite on the fresh Studio Debug C++23 binary as a "kick the tires" pass.  Real-API smoke (ai-zip-demo via OpenAI gpt-4.1, 3 ai_calls) passed cleanly + counters moved correctly on `/api/debug/signals`.  But the broader suite came back **11/21 PASS, 10 FAIL**:
+    - **PASS** — `test_mock_dispatch_hermetic`, `test_envelope_empty_body_rejected`, `test_bedrock_sigv4` (locked KAT signature unchanged), `test_schema_covers_parser`, `test_rate_limit_observation_parse`, `test_rate_limit_strategy_dispatch`, `test_observe_idempotent`, `test_size_aware_budget`, `test_quota_key_isolation`, `test_aimd_concurrency_cap`, `test_token_bucket_mirror`.
+    - **FAIL (ReadTimeout 10s)** — `test_tcp_keepalive_set`, `test_chunking_fanout`, `test_direct_dispatch_signals`.  These all hit the per-request 10s timeout on a `requests` call to j9t.
+    - **FAIL (exit=124 after 60s timeout)** — `test_api1_mock_errors`, `test_api2_mock_errors`, `test_api3_mock_errors`, `test_api4_mock_errors`, `test_api5_mock_errors`, `test_api6_mock_errors`.  All six per-API parser-fault batteries (6 cases each, ~30s typical) hit my outer `timeout 60` wrapper — j9t responding too slow per-request to clear 6 cases.
+    - **FAIL (real assertion)** — `test_curlopt_timeout_fires`: `timeout_ms=101950 expected=1000 — rate_limit override not applied?`.  This is the ONLY real test-logic failure (vs. ReadTimeout).  The size-aware budget (~101950ms) is overriding the rate_limit's `timeout_ms: 1000` override.  Could be pre-existing or new — I didn't touch this code path, but it's worth verifying.
+  - **Hypothesis ranking for tomorrow:**
+    1. **MOST LIKELY: Debug-build perf cliff.**  This was a Studio **DEBUG** binary (185 MB).  ~half of the failures are exactly the symptom of "j9t took >10s to respond" — the api_mock_errors batteries fire ~6 adhoc workflows each, and a Debug-build runs every operation 5-10× slower than Release.  Test timeouts are calibrated to Release.  Easy verify: re-run the same suite against the Release binary.  If Release passes, this is the answer.
+    2. **Possibly: state leakage from the earlier `pkill` of the test runner mid-flight.**  My `pkill -f "test/dispatch"` left adhoc workflows partially-cancelled, which then made `/api/debug/signals` hang >30s on the previous j9t instance.  Shutdown + relaunch fully restored `/api/debug/signals` to 50ms.  But during the SECOND (clean) suite run on the fresh j9t, the same failures appeared — so this isn't the cause.
+    3. **Unlikely but possible: Sitting 7a regression.**  The only Sitting 7a code change to the dispatch path is `RemoveWorkflow`'s signature flip, which has 1 caller in `webServer_studio.cpp::HandleWorkflowDelete` and isn't hit by these tests.  The C++23 + clang + libc++ ABI swap COULD have introduced timing differences though.  Easy verify: stash the Sitting 7a changes, rebuild, retest.  If Release still passes vs Debug fails on the same checkout, it's the perf cliff.
+    4. **Possible (orthogonal): `test_curlopt_timeout_fires` is a real bug.**  The assertion message says the rate_limit `timeout_ms: 1000` override is being ignored in favor of the size-aware budget.  Worth investigating regardless — could be a long-standing latent bug or a recent regression.  Not in the path I touched.
+  - **Recommended tomorrow:** (a) re-run the failed 10 against the **Release** binary first to differentiate perf-cliff from real regression; (b) if Release passes, the failures are just Debug-too-slow + tomorrow's work proceeds cleanly with Sitting 7b; (c) if Release ALSO fails on the same 10, bisect Sitting 7a's changes by stashing the typed-error + RemoveWorkflow conversion locally and rebuilding — that splits "C++23 toolchain" vs "API-shape changes" as the suspect; (d) regardless of the others, `test_curlopt_timeout_fires` is worth a short investigation since the assertion message is specific and actionable.
+- **JC's directive at end-of-session: NO COMMITS today.**  Working tree contains Sittings 5+6+7a + post-test follow-ups + Sitting 7a doc sweep.  Next session: close Sittings 7b + 7c (deferred connector + parser sweeps) AND triage the test results above.
+
+---
+
+## 2026-05-19 (Sitting 5 follow-ups + Sitting 6 — typed AwsCredential through QueryData + MockTransport SigV4 capture) → next session
+
+Two-part sitting on a continuous day-of work.  **Part A** — Sitting 5 follow-ups surfaced by JC's live test: the AdminLoginDialog UX shipped but every API call from the editor returned 401, the "Disconnected" LED stayed red for up to 30 s after login, and the workflow-list view kept showing a stuck "Error: HTTP 401 Unauthorized" until manual browser refresh.  Three orthogonal fixes landed.  **Part B** — Sitting 6 proper per `pre-1_0_follow-ups.md`: typed `AwsCredential` snapshot threading through `QueryData`, SigV4 signer reads from typed credential (no more stringy reinjection), MockTransport invokes the signer and captures the Authorization header for hermetic KAT tests, new `/api/debug/signals::last_mock_signatures` array, new `test/dispatch/test_bedrock_sigv4.py` with bootstrap-then-lock pattern.  All 4 binary configs build clean; all 6 per-API mock-fault suites stay green at 6/6 each; new SigV4 KAT passes with locked signature `1a6d6607ae8458641685888fa012825e591fb38ca4db178eab28d9a9b07ae021`.  Doc sweep across 8 tracked docs + 3 new memory entries.
+
+### Part A — Sitting 5 follow-ups (3 fixes after the live test)
+
+| Theme | Files | Why |
+|---|---|---|
+| **`authFetch` sweep — 47 plain `fetch()` call sites converted** | `workflow-editor/ui/src/api/{workflows,versions}.ts` (20 sites), `workflow-editor/ui/src/editor/WorkflowTreeView.tsx` (2 sites), `shared-ui/api/{connections,configSettings,aiInterfaces,providers,keys}.ts` (25 sites) | Editor's `whoami` worked but every other API call returned 401 in Brave.  Root cause: session cookie is `SameSite=Strict; HttpOnly; Secure; Path=/`.  Some browsers (Brave with hardened privacy in particular) require `credentials: "same-origin"` to be set explicitly on `fetch()` for the cookie to flow even for same-origin requests; modern fetch's "same-origin" default isn't universally honoured.  `authFetch` from `@shared/api/auth` sets the flag explicitly AND fires the `j9t-auth-required` event on 401/403 — making the sweep adopt the dashboard's session-expiry detection pattern as a bonus.  See `feedback_authfetch_everywhere`. |
+| **`forceReconnect()` on the WebSocket hooks** | `dashboard/ui/src/hooks/useWebSocket.ts`, `dashboard/ui/src/App.tsx::handleAuthenticated`, `workflow-editor/ui/src/hooks/useStatusWebSocket.ts`, `workflow-editor/ui/src/App.tsx::handleAuthenticated` | The Sitting 8 (`AI provider error visibility` — commit `c70dba9`) exponential backoff (2 → 4 → 8 → 16 → 30 s, capped at 30 s) was added to throttle pre-auth `[security] ws_upgrade_rejected` log noise.  Side effect surfaced during JC's test: backoff grows during the master-password + login flow; the next reconnect after a successful login could be up to 30 s away → "Disconnected" LED red the whole time.  Fix: expose `forceReconnect()` which cancels the pending timer, resets the delay to base, and calls `connect()` if no socket exists; `App.tsx::handleAuthenticated` calls it after `setNeedsAuth(false)`.  Editor's fixed-2 s reconnect got the same fix for parity.  See `feedback_ws_reset_backoff_on_auth`. |
+| **Gate `<main>` content on auth-ready** | `workflow-editor/ui/src/App.tsx` | The editor's WorkflowListView mounted on first paint, fired `listWorkflows()` BEFORE login completed, got 401, stored the error in component state, and never re-fetched (its useEffect deps didn't include auth state).  Manual browser refresh was the only way to clear the stuck error.  Fix: render `{authReady ? content : null}` in `<main>`, where `authReady = keysStatus?.status === "ok" && !needsAuth`.  When auth flips false → true, the content mounts fresh, useEffects fire, fetches succeed.  See `feedback_gate_main_content_on_auth`. |
+
+**Part A verification:** restart j9t → unlock keystore → sign in → main content renders without any 401 error → "Sign out" button in nav → click Sign out → AdminLoginDialog reappears.  Confirmed working on both dashboard + editor (JC: "it works very well now ... swift and works from both sites").
+
+### Part B — Sitting 6 (SigV4 clean design + MockTransport capture + Bedrock fixture)
+
+| Theme | Files | Why |
+|---|---|---|
+| **Typed `AwsCredential` snapshot in `QueryData`** | `engine/curlWrapper/curlWrapper.h` (forward decl + new fields), `application/workflow/aiRequestPool.cpp` (new `ResolveAwsCredentialSnapshot` helper + populated `m_AwsCredential` at both QueryData construction sites — main `Submit` path + `TestInterface` probe path) | New `QueryData::m_AwsCredential` field: `std::shared_ptr<AwsCredential const>` populated when `authStyle == AwsSigV4`, null otherwise.  The snapshot is a deep copy of the resolved KeyManager entry taken **inside** the `WithCredential` callback (so the lock-scoped pointer never escapes); `SecureString` fields copied via `dst.Set(src.Get())` since they're non-copyable by design.  Callers receive a stable view of the credential that outlives `WithCredential`'s synchronous scope — necessary for the dispatcher's inbox + retry queue, which can hold a request for minutes.  New `QueryData::m_AmzDateOverride` field: optional `"YYYYMMDDTHHMMSSZ"` timestamp set only by MockTransport for deterministic SigV4 KAT signatures. |
+| **SigV4 signer reads typed credential** | `engine/curlWrapper/awsSigV4.cpp` (`Apply()` rewritten to consume `q.m_AwsCredential->m_*`; null guard fails closed) | `Apply()` reads `m_SecretAccessKey` / `m_SessionToken` / `m_Region` / `m_AccessKeyId` from the typed snapshot.  Null `m_AwsCredential` on the SigV4 path returns `false` with `"SigV4: QueryData::m_AwsCredential is null (caller must populate before dispatch)"`.  The non-secret `service` field (default `"bedrock"`) stays in `m_Params` because it's a request-target attribute, not a secret.  `m_AmzDateOverride` threads to `Sign(in.m_AmzDate)`; empty value falls back to `FormatAmzDateNow()`. |
+| **Reinjection dropped in `ResolveProviderParams`** | `application/workflow/aiRequestPool.cpp` | The three `params["secret_access_key" / "session_token" / "region"]` lines that materialised `SecureString` content into a `std::string` map are gone.  Helper now only copies the credential's non-secret `m_Params` and returns; renamed mentally to "thin wrapper that doesn't grow inline lambdas at call sites", kept under the original name to avoid call-site churn.  Stale "post-sitting-20 dead code" comment removed. |
+| **MockTransport signs + captures the Authorization header** | `engine/curlWrapper/mockTransport.{h,cpp}` (new `MockSignatureCapture` struct, file-scope mutex-guarded `std::deque<MockSignatureCapture>` cap 32, `LoadFixtureMeta` parses `x_amz_date_override`, `Submit` invokes signer when `AuthStyle == AwsSigV4 && m_AwsCredential != nullptr`, captures on success / fails closed on signer error), `application/web/webServer.cpp` (`HandleDebugSignalsGet` adds `last_mock_signatures`) | `MockTransport::Submit` now runs the live `IAuthSigner::Get(...).Apply(...)` pipeline against the request's `QueryData` AFTER fixture body + meta load.  Scope: SigV4-only AND credential-populated.  The conjunction is load-bearing: the existing per-API mock-fault tests (test_api{1..6}_mock_errors) configure interfaces with `key_name=""` which leaves `m_AwsCredential` null — those tests are parser-only and shouldn't be gated by the signer.  When the credential IS populated, signer failure fails the dispatch closed (typed-credential threading is broken upstream — surface it as a dispatch failure, not a silent fixture replay with a missing Authorization header).  Captured headers ring is a `std::deque` (FIFO eviction at cap), accessed via `MockTransport::GetRecentCapturedSignatures()` static getter (process-global, mutex-guarded).  `/api/debug/signals` surfaces it as `last_mock_signatures: [{cancel_key, quota_key, headers}, ...]` (debug builds only per `feedback_debug_signals`). |
+| **Fixture + new test** | `test/dispatch/fixtures/api5/sigv4_kat.{json,json.meta.json}`, `test/dispatch/test_bedrock_sigv4.py` | Fixture body is a stub Bedrock-Anthropic response (irrelevant content — only the captured Authorization matters).  Meta carries `http_status: 200`, `Content-Type: application/json`, `x_amz_date_override: "20240101T120000Z"`.  Test provisions a fresh `aws` credential via `POST /api/settings/providers` (AKIDEXAMPLE + AWS-published example secret + us-east-1, matching `awsSigV4.cpp::RunSelfTest #3+#4` inputs so the signing-key derivation overlaps with the at-startup KAT), an API5 mock interface, runs an adhoc workflow, polls `/api/debug/signals` for the captured Authorization, and verifies (a) header structure matches `Credential=AKIDEXAMPLE/20240101/us-east-1/bedrock/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=...` and (b) signature hex matches the locked KAT value `1a6d6607ae8458641685888fa012825e591fb38ca4db178eab28d9a9b07ae021`. |
+
+### What's verified (Part B)
+
+| Check | Result |
+|---|---|
+| Studio Debug build | Clean, zero warnings |
+| Studio Release build | Clean, zero warnings |
+| Engine Debug build | Clean, zero warnings (`premake5 gmake --engine`, then `make config=debug`) |
+| Engine Release build | Clean, zero warnings |
+| **`test/dispatch/test_bedrock_sigv4.py` first run (bootstrap)** | Captured signature `1a6d660...07ae021` printed in failure message; locked into the test constant. |
+| **`test/dispatch/test_bedrock_sigv4.py` second run (locked)** | `OK: SigV4 captured signature matches locked KAT (runId=adhoc_..., terminal=succeeded)` |
+| **Regression: `test/dispatch/test_mock_dispatch_hermetic.py`** | OK |
+| **Regression: `test/dispatch/test_envelope_empty_body_rejected.py`** | OK |
+| **Regression: per-API mock-fault suites** | `test_api1_mock_errors`: 6/6 pass; `test_api2_mock_errors`: 6/6; `test_api3_mock_errors`: 6/6; `test_api4_mock_errors`: 6/6; `test_api5_mock_errors`: 6/6; `test_api6_mock_errors`: 6/6.  Total 36/36 across the existing parser-fault batteries — no regressions from the new MockTransport signer-invocation. |
+| Active edition at session end | `studio` (per `.build-edition`) |
+| Premake regeneration | Triggered twice (Studio → Engine → Studio) during the 4-config build matrix. |
+
+### Design decisions settled this sitting
+
+| Q | Answer |
+|---|---|
+| Scope of typed-credential threading — AwsCredential only, or all three (Aws + OAuth + ApiKey)? | **AwsCredential only.**  The plan's parenthetical "and similar typed references for OAuth/ApiKey if the shape extends naturally" doesn't extend naturally — OAuth and ApiKey are single-secret styles that work fine with the current `m_ApiKey` field.  SigV4 is the only style with a multi-secret problem to solve.  Adding typed pointers for OAuth/ApiKey would be churn without payoff.  Revisit if a future signer needs typed multi-field access. |
+| MockTransport — always run the signer, or scope to SigV4-only? | **SigV4-only AND credential-populated.**  Two-condition gate.  The first condition (`AuthStyle == AwsSigV4`) excludes Bearer / x-api-key / x-goog-api-key / api-key — those just compose a header from `m_ApiKey` and have nothing KAT-worthy to capture.  Initial attempt was SigV4-only without the credential check, but that broke `test_api5_mock_errors` (those tests configure `key_name=""` → no AwsCredential → signer fails closed → request never reaches the parser).  Second condition (`m_AwsCredential != nullptr`) keeps parser-only fault tests working: tests opt INTO signing by provisioning a credential.  When both gates are true, signer failure fails the dispatch closed (the typed-credential threading is the entire point on this path). |
+| Capture surface — `/api/debug/signals` extension, sidecar file, or dedicated endpoint? | **Extend `/api/debug/signals`** per `feedback_debug_signals` ("extend it instead of adding ad-hoc tracing").  Process-global `std::deque<MockSignatureCapture>` (cap 32, FIFO eviction) accessed via a static getter on `MockTransport`.  Test reads `signals.last_mock_signatures[-1]` after running a workflow.  No disk I/O, no layer coupling to workflow-runtime paths, no new endpoint. |
+| AmzDate determinism — fixture-meta field, code-side test constant, or per-test injection? | **Fixture `.meta.json::x_amz_date_override`**.  Mock-only — MockTransport reads it from the existing meta-load step, stuffs it into `queryData.m_AmzDateOverride`, signer threads it to `Sign(in.m_AmzDate)`.  Live paths leave the field empty; `FormatAmzDateNow()` fallback unchanged.  Co-locates the timestamp with the rest of the test inputs (fixture body, http_status, headers) so the test is declarative. |
+| KAT signature — locked value vs computed per-run? | **Locked value, bootstrap-then-lock pattern** per `feedback_crypto_test_bootstrap_pattern`.  First run printed `got_signature: 1a6d660...07ae021`; copied into the test constant; second run passes deterministically.  Pairs with `awsSigV4.cpp::RunSelfTest #2` (signing-key derivation against AWS-published `kSigning` vector at engine startup) as the independent reference required by the pattern's "never use bootstrap as the SOLE crypto test" constraint. |
+| Fail-closed vs warn-and-continue on signer error in MockTransport? | **Fail-closed on the gated path (SigV4 + credential populated).**  Skipping the dispatch with a clear error surfaces the upstream wiring issue immediately.  Warn-and-continue with unsigned headers would let the fixture replay produce a "success" that masks the bug. |
+
+### Architecture notes for next-session-Claude
+
+- **`QueryData::m_AwsCredential` is the canonical typed-credential surface for multi-secret signers.**  Future signers that need multi-field credentials (a hypothetical Snowflake JWT signer, an extended OAuth flow) should follow the same pattern: a forward-declared typed credential class, a `shared_ptr<T const>` field on `QueryData`, a `ResolveXxxSnapshot()` helper in the call site (or `AiRequestPool`) that takes the snapshot under KeyManager's lock.  Do NOT add another stringy reinjection path through `m_Params` — `m_Params` is now strictly non-secret (`service` field is the only consumer today).
+- **`engine/keys.md`'s "Snapshot pattern for deferred dispatch" section is the canonical reference** for `WithCredential` → deep-copy → `shared_ptr<T const>`.  Any new caller that needs the credential to outlive `WithCredential`'s synchronous scope follows that pattern.
+- **MockTransport now invokes the signer for SigV4-plus-credential paths.**  The static `GetRecentCapturedSignatures()` getter is the only legitimate way to read captured headers.  Any future signature KAT for a different style should: (1) gate the signer invocation on the appropriate `AuthStyle` combination, (2) capture into the existing ring buffer (or a new ring per style if needed — keep the names parallel), (3) add a fixture `.meta.json` field for any time/nonce override the new style needs, (4) lock the KAT signature in via the bootstrap pattern.
+- **`/api/debug/signals::last_mock_signatures` is debug-build only.**  Release builds compile the whole `HandleDebugSignalsGet` block out per `feedback_debug_signals`.  Tests that depend on the endpoint MUST launch j9t with `./jarvisagent.sh --debug` — the launcher defaults to Release.  `test_bedrock_sigv4.py` checks for HTTP 404 and emits a clear "this test requires a DEBUG build" message.
+- **`awsSigV4.cpp::RunSelfTest` runs at engine startup in DEBUG builds** with 4 sub-tests; #2 is the AWS-published `kSigning` derivation vector that pairs with the new bootstrap-locked KAT (#4 in the C++ self-test, `test_bedrock_sigv4` at the integration level).  This is the "independent reference vector" requirement of `feedback_crypto_test_bootstrap_pattern`.
+- **The `ResolveProviderParams` helper is now a thin wrapper that just copies the credential's non-secret `m_Params`.**  Kept for call-site stability; could be inlined when a future sweep touches the same area.
+- **`AiRequestPool::Submit` and `TestInterface` both populate `m_AwsCredential`.**  Both call `ResolveAwsCredentialSnapshot(*api)` gated on `authStyle == CurlWrapper::AuthStyle::AwsSigV4` so non-Bedrock providers don't pay an extra KeyManager lookup.  The pattern is `.m_AwsCredential = (authStyle == AuthStyle::AwsSigV4) ? ResolveAwsCredentialSnapshot(*api) : std::shared_ptr<AwsCredential const>{}`.
+
+### Open items / next-session candidates
+
+Per `pre-1_0_follow-ups.md` ordering, next is **Sitting 7 — API-shape sweep (`bool + std::string&` → `std::expected<T, Error>`)**.  Large sitting (~1 day mechanical) per the plan: 22 public methods + 50–80 caller-side updates.  Typed `ConnectorError` / `ParserError` / `RegistryError` enums (one per subsystem), `[[nodiscard]] std::expected<T, SubsystemError>` returns, compiler-enforced caller updates.  See plan doc for the file list and acceptance.
+
+**Out of scope but worth flagging:**
+
+- **Editor's API call sites now use `authFetch` uniformly** (post Part A's sweep).  The `j9t-auth-required` event listener is active and will trigger `setNeedsAuth(true)` on any future 401/403 — same session-expiry-mid-session UX as the dashboard.  No follow-up needed.
+- **`m_AwsCredential` could carry the `service` field too.**  Today `service` defaults to `"bedrock"` and can be overridden via `m_Params`.  No live caller overrides it.  If a non-Bedrock AWS service ever needs SigV4 dispatch, promote `service` to a typed `AwsCredential::m_Service` field then.  Not urgent.
+- **`SigV4Signer::Apply` still materialises `SecretAccessKey` and `SessionToken` into `std::string` for the brief HMAC compute window.**  That's bounded to the signing call — pre-Sitting-6 they lived as plain `std::string` for the whole dispatch duration (queueing + retry-queue holds).  Tightening the HMAC compute itself to consume `std::string_view` from the `SecureString` is Sitting 8 (SecureString-only path through HTTP layer) — the broader sweep.
+
+### Doc sweep (same sitting)
+
+Touched 8 tracked docs reflecting both Part A and Part B:
+
+| Doc | Change |
+|---|---|
+| `engine/curlWrapper/curlWrapper.md` | `QueryData` block: added `m_AwsCredential` (shared_ptr to AwsCredential snapshot) and `m_AmzDateOverride` fields with comments.  Stale comment about "SigV4 reads `secret_access_key` from m_Params" replaced.  Validation paragraph updated to read from typed credential.  Section 6 (Query Execution Flow) signer-rejection line updated.  MockTransport section gained a bullet for the SigV4 signer-capture + `x_amz_date_override` + the `m_AwsCredential != nullptr` gate. |
+| `engine/keys.md` | New "Snapshot pattern for deferred dispatch" sub-section under section 6.  Canonical `WithCredential` → deep-copy → `shared_ptr<T const>` pattern with `AiRequestPool::ResolveAwsCredentialSnapshot` reference impl.  Calls out the `SecureString::Set(Get())` non-copyable workaround and the "snapshot outlives `WithCredential`'s scope" semantic. |
+| `doc/architecture.md` | Key Design Decisions table: new row for typed-credential snapshot threading (3 pre-fix failure modes — plaintext heap residue, parallel-construction discipline-rule trigger, zero integration-level KAT — and how the snapshot + KAT close each).  Updated the existing WS-reconnect row to document `forceReconnect()` on auth-state transition (catches Part A's LED-stays-red bug). |
+| `doc/api-endpoints.md` | `/api/debug/signals` row mentions the new `last_mock_signatures` array (FIFO ring cap 32; entries `{cancel_key, quota_key, headers}`; consumed by `test_bedrock_sigv4.py`). |
+| `doc/cyber security.md` | IAuthSigner Security: SigV4's three required fields now sourced from typed `m_AwsCredential` (with null-credential fail-closed backstop documented).  MockTransport Security: new bullet for the auth-signer capture mechanism — process-global FIFO ring, `x_amz_date_override` plumbing, secret stays in `SecureString` except for HMAC compute window, captured Authorization carries access_key_id (public) + signature hex (non-invertible).  SigV4 Signing Security: new bullet for the typed-credential threading, the dropped reinjection, and the bootstrap-locked KAT pairing with sub-test #2. |
+| `test/dispatch/README.md` | New "SigV4 signature KAT (pre-1.0 Sitting 6, 2026-05-19)" section walking through `test_bedrock_sigv4.py` — bootstrap pattern, fixture-inputs overlap with self-test #3/#4, DEBUG-build requirement, locked signature value. |
+| `application/workflow/README.md` | `aiRequestPool.h/cpp` row mentions the typed snapshot threading for SigV4 paths and points at `engine/keys.md` "Snapshot pattern for deferred dispatch". |
+| `doc/jarvisagent.md` | `fixture_path` user-config docstring mentions the new `x_amz_date_override` meta field with format `"YYYYMMDDTHHMMSSZ"`. |
+
+**Skipped by design:**
+- `doc/combinedDocumentation.md` / `combinedCyberSecAudit.md` / `combinedSafetyAudit.md` — JCWF-generated per `feedback_combined_doc_generated`; resolved on next regen run.
+- Predecessor plan docs (`AI dispatch refactor.md`, `cybersec-hardening-dev-plan.md`, etc.) — historical work-product, not active references per `feedback_no_legacy`.
+- Per-domain session notes (`doc/misc/S1-D2-session-note.md`) — historical snapshots, not live state.
+- `engine/json/json.md` (line 41 InterfaceType listing accurate as-is), `engine/README.md` (line 240 one-liner accurate as-is), `application/cloud/README.md` (its SigV4 refs are the separate `application/cloud/sigV4Signer.cpp` for S3, different layer).
+
+### Memory entries added this sitting
+
+Three new feedback memories captured from the cross-cutting patterns:
+
+| Memory | Distilled rule |
+|---|---|
+| `feedback_authfetch_everywhere.md` | All browser-side API calls go through `@shared/api/auth::authFetch`, never plain `fetch()`. SameSite=Strict cookies don't always flow without explicit credentials in all browsers. |
+| `feedback_gate_main_content_on_auth.md` | React apps must NOT mount auth-required views while needsAuth or keysSealed. Overlays alone don't prevent useEffect fetches firing 401 underneath; stuck-401 errors result. |
+| `feedback_ws_reset_backoff_on_auth.md` | WebSocket reconnect-backoff hooks must expose `forceReconnect()` called from `handleAuthenticated`; otherwise exponential backoff leaves the "Disconnected" LED red up to 30 s post-login. |
+
+### Gotchas next-session-Claude should know
+
+- **Working tree now includes Sittings 1+2+3+4+5+5-follow-ups+6 + the doc sweep.**  Substantial — JC handles commits per `feedback_git_commits`.  Natural commit splits if JC wants them: (a) Sitting 5 follow-ups (UI fetch sweep + forceReconnect + main-content gating) as one frontend commit, (b) Sitting 6 backend (curlWrapper.h + aiRequestPool.cpp + awsSigV4.cpp + mockTransport.{h,cpp} + webServer.cpp) as one C++ commit, (c) Sitting 6 test surface (fixture + new test) as a separate commit, (d) doc sweep as one commit.  Or all-in-one — JC's call.
+- **j9t Studio Debug was running at session end** (relaunched mid-sitting for the SigV4 KAT live test; keystore unlocked, admin session active).  Per `feedback_shutdown_via_rest`, use `POST /api/shutdown` not `kill`.  Build matrix for Sitting 6 verified all 4 configs; Studio Debug is the active edition.
+- **The crypto-test bootstrap pattern is now exercised twice in the dispatch test suite** — once at engine startup (`awsSigV4.cpp::RunSelfTest #4`, locked by an earlier sitting) and once at integration (`test_bedrock_sigv4.py`, locked this sitting).  Any future regression in canonical-request assembly, body composition, URL resolution, or HMAC chaining breaks BOTH simultaneously — a regression in one but not the other indicates a wire-up vs. primitive bug.
+- **Pre-launching j9t for SigV4 KAT tests requires `./jarvisagent.sh --debug`** (the default is Release; the `/api/debug/signals` endpoint is `#ifdef DEBUG`-gated).  `test_bedrock_sigv4.py` returns a clear error if it hits a 404 instead of silently passing.
+- **The signer's null-`m_AwsCredential` check is hard-required on the SigV4 path** — if some future caller routes a request through `AuthStyle::AwsSigV4` without populating the typed credential, the dispatch fails with `"SigV4: QueryData::m_AwsCredential is null"`.  The corresponding MockTransport path is doubly-gated: SigV4 AND credential-populated → run the signer; otherwise skip entirely (parser-only tests still work).
+- **Test fixture inputs are deliberately pinned to `AKIDEXAMPLE` + AWS-published example secret + us-east-1 + 20240101T120000Z** so the signing-key derivation chain overlaps with `awsSigV4.cpp::RunSelfTest #3+#4`.  Different request body though (the JCWF path runs the real `BedrockRequestBuilder`, whereas self-test #4 hand-rolls the body) → different signature hex.  Both still exercise the full HMAC chain.
+
+---
+
+## 2026-05-19 (Sitting 5 — Editor MCP login parity: dialogs + auth helpers lifted to shared-ui) → next session
+
+Pure-frontend sitting per `pre-1_0_follow-ups.md` Sitting 5.  Editor reaches login-flow parity with dashboard.  `AdminLoginDialog` and `MasterPasswordDialog` (dashboard's richer variant — bootstrap + admin-key issuance) lifted into `shared-ui/components/`; auth helpers (`authFetch` / `whoami` / `serverLogout` + the `j9t-auth-required` event) lifted into `shared-ui/api/auth.ts`.  Both apps now import from `@shared/...`; in-app duplicates deleted per `feedback_no_legacy`.  Editor `App.tsx` gains mount-time whoami probe, WS-reconnect re-probe, j9t-auth-required listener, AdminLoginDialog mount, and a "Sign out" button in the top nav.  Both UI bundles build clean; live API flow (unlock → login → whoami → auth-gated `/api/workflows`) green.  Working tree at session end: 9 modified files + 3 new files (the lifted shared-ui assets); not yet committed.
+
+### What landed
+
+| Theme | Files | Why |
+|---|---|---|
+| **Auth helpers lifted to shared-ui** | `shared-ui/api/auth.ts` (new) | `authFetch`, `whoami`, `serverLogout`, `WhoamiResponse` plus the `j9t-auth-required` event — one source of truth for the cookie-based auth funnel.  Tightened `WhoamiResponse.role` from `string` to the discriminated union `"admin" \| "operator" \| "viewer"` (the editor's old dead `api/auth.ts` already typed it this way; matched up). |
+| **AdminLoginDialog lifted to shared-ui** | `shared-ui/components/AdminLoginDialog.tsx` (new) | Verbatim copy of the dashboard component (only React deps, fully isolated).  Editor mounts it without `onOpenActivation` so the "Activate an enrollment token" affordance stays dashboard-only per Sitting 5's scope decision. |
+| **MasterPasswordDialog lifted to shared-ui (richer variant wins)** | `shared-ui/components/MasterPasswordDialog.tsx` (new) | Lifted dashboard's MPD (handles `no_keys_file` bootstrap + admin-key issuance second screen).  Editor's older simpler MPD deleted.  Imports `unlockKeys` + `IssuedAdminKey` from `@shared/api/keys`. |
+| **Shared `KeysUnlockResponse` extended** | `shared-ui/api/keys.ts` | Added `bootstrapped?`, `mcp_keys_loaded?`, `admin_key?: IssuedAdminKey` (new exported interface) — matches the dashboard's richer wire shape so the shared MPD can read `result.admin_key`. |
+| **Dashboard switchover** | `dashboard/ui/src/App.tsx`, `dashboard/ui/src/api.ts`, `dashboard/ui/src/types.ts` (-25 lines) | Imports switched to `@shared/components/{AdminLoginDialog,MasterPasswordDialog}` + `@shared/api/auth` + `@shared/api/keys`.  Deleted local `dashboard/ui/src/auth.ts`, `components/AdminLoginDialog.tsx`, `components/MasterPasswordDialog.tsx`, and the duplicate `KeysStatusResponse`/`KeysUnlockResponse` defs in `types.ts`. |
+| **Editor wiring** | `workflow-editor/ui/src/App.tsx` (+76 lines net), `workflow-editor/ui/src/app.css` (+~95 lines of `.mpd-*` rules) | Imports switched to `@shared/components/*` + `@shared/api/auth`.  New state: `needsAuth` / `authUser` / `authRole`.  Effects: (a) mount-time whoami probe, (b) WS-reconnect whoami re-probe (covers j9t restart issuing a new session cookie), (c) `j9t-auth-required` event listener, (d) mount-time unconditional keys-status probe (closes the Engine /ws-auth-gated deadlock — same fix dashboard already has).  Render: `<AdminLoginDialog>` mounted when `keysStatus?.status === "ok" && needsAuth`; MPD reason extended to also handle `no_keys_file`; "Sign out" button added to nav (renders only when `authUser` is set). |
+| **Editor MPD CSS** | `workflow-editor/ui/src/app.css` | Copied `.mpd-overlay` / `.mpd-dialog` / `.mpd-header` / `.mpd-body` / `.mpd-description` / `.mpd-input-wrap` / `.mpd-input` / `.mpd-eye-btn` / `.mpd-error` / `.mpd-footer` rules verbatim from dashboard's `App.css`.  The MPD JSX uses these class names; without them in the editor's CSS the dialog would render unstyled.  `.btn-editor` is not defined anywhere in either app (silently a no-op selector) — left as-is for now; `.btn` styling alone suffices. |
+| **Dead code removed** | `workflow-editor/ui/src/api/auth.ts` (deleted), `workflow-editor/ui/src/components/MasterPasswordDialog.tsx` (deleted) | The editor's `api/auth.ts::whoami()` was defined but never imported anywhere — pure dead code, now superseded by `@shared/api/auth`.  The editor's local MPD is replaced by the shared one. |
+| **Plan doc Sitting 5 marked closed** | `doc/misc/pre-1_0_follow-ups.md` | `**closed 2026-05-19**` tag + updated total ("9 sittings remain"). |
+
+### What's verified
+
+| Check | Result |
+|---|---|
+| Dashboard UI build (`dashboard/ui && npm run build`) | Clean, no TS errors, 260.86 kB bundle / 73.89 kB gzip |
+| Editor UI build (`workflow-editor/ui && npm run build`) | Clean, no TS errors, 812.61 kB bundle (the pre-existing chunk-size warning is unchanged) |
+| **API flow — unlock (cookie-less)** | `POST /api/settings/keys/unlock` with `JARVIS_MASTER_PASSWORD` → `{ok:true, bootstrapped:false, status:"ok", mcp_keys_loaded:true}` — exactly the shape the shared MPD expects; no `admin_key` field → MPD calls `onUnlocked()` directly without the "exactly once" second screen.  Correct. |
+| **API flow — whoami without cookie** | HTTP 401 + `{ok:false, role:"", user:"", error:"missing"}` → editor's whoami probe will set `needsAuth=true`.  Correct. |
+| **API flow — login with `J9T_TOKEN`** | `POST /api/auth/login` → HTTP 200 + `{ok:true, user:"admin", role:"admin"}` + session cookie issued.  AdminLoginDialog's `fetch /api/auth/login` will see `res.ok=true` → `onAuthenticated()` fires. |
+| **API flow — whoami with cookie** | HTTP 200 + `{ok:true, user:"admin", role:"admin"}` → editor's `handleAuthenticated` re-probe will populate `authUser`/`authRole`. |
+| **API flow — auth-gated `/api/workflows` with cookie** | Returns workflow list — confirms `authFetch` from `@shared/api/auth` delivers the cookie correctly across the lift. |
+| **Bundle inspection — editor `index-BhSUPgQ4.js`** | Contains `Paste your MCP API key`, `mcp_...`, `Verifying...`, `Activate an enrollment token`, `j9t-auth-required`, `Sign out` — confirms the lifted components landed in the editor bundle. |
+| **Bundle inspection — dashboard `index-DLP9DJ3h.js`** | Contains `Paste your MCP API key`, `mcp_...`, `Verifying...`, `Activate an enrollment token`, `j9t-auth-required`, `Set Master Password` — confirms the shared MPD (with bootstrap path) replaces the local one. |
+| Working dirs touched | 12 files + 3 new files |
+| Active edition at session end | `studio` (per `.build-edition`) |
+
+### Design decisions settled this sitting
+
+| Q | Answer |
+|---|---|
+| Which MPD variant becomes the shared baseline — editor's simpler or dashboard's richer (bootstrap + admin-key)? | **Dashboard's richer one.**  It's a strict superset; the editor's older variant was missing two real capabilities (bootstrap of a fresh j9t instance, admin-key display).  Now editor gains both for free. |
+| Lift `ActivationDialog` too? | **No — dashboard-only.**  `AdminLoginDialog`'s `onOpenActivation` prop is optional; editor mounts AdminLoginDialog without it, so the "Activate an enrollment token" affordance is hidden in the editor.  First-key activation remains a dashboard surface.  ~250 LOC saved + the editor doesn't need the enrollment-state machinery. |
+| Wrap editor's existing fetch calls in `authFetch` so `j9t-auth-required` fires on 401? | **Deferred.**  The plan's acceptance criteria are met by mount + WS-reconnect whoami re-probes alone.  The j9t-auth-required listener I wired IS active — it just sits dormant until some other code dispatches the event.  Wrapping the editor's ~15 fetch call sites in `authFetch` for session-expiry mid-session UX is a bigger diff, tracked as a follow-up. |
+| Where to put the logout button in editor's nav? | **Rightmost in the navButtons row, renders only when `authUser` is non-null.**  Mirrors dashboard's StatusBar-mounted logout but uses a plain `.btn` since the editor doesn't have a StatusBar with identity affordances.  Title tooltip shows `user / role`. |
+| Keep dashboard's `api.ts::unlockKeys` and `fetchKeysStatus` wrappers (authFetch-flavored versions of the shared functions)? | **Yes — keep them.**  They're not duplicates of the shared functions; they're thin authFetch wrappers used by dashboard-internal call sites.  Equivalent semantics for these public endpoints, but they fold into dashboard's `authFetch`-event-emitting pattern for non-auth-required endpoints elsewhere in `api.ts`.  Deleting them would force every call site to either reimport from `@shared/api/keys` or grow direct `authFetch` calls — not a net win. |
+| What to do with `KeysStatusResponse` / `KeysUnlockResponse` in `dashboard/ui/src/types.ts`? | **Delete — switch importer to `@shared/api/keys`.**  Tightened `KeysStatusResponse.status` from plain `string` to the discriminated union `"ok" \| "no_password" \| "wrong_password" \| "no_keys_file"`; all dashboard call sites already validated against exactly these four values before assigning to state, so the narrower type is a free improvement with no caller breakage. |
+
+### Architecture notes for next-session-Claude
+
+- **`@shared/components/AdminLoginDialog` and `@shared/components/MasterPasswordDialog` are the canonical login + master-password dialogs.**  Any new UI app (e.g. a hypothetical embedded mcp-config tool) imports from `@shared/components/...`.  Don't fork either component into a new app's local `components/` dir.
+- **`@shared/api/auth` is the canonical auth-helper module.**  Exports `authFetch`, `whoami`, `serverLogout`, `WhoamiResponse`, and fires the `j9t-auth-required` event on 401/403 responses from any wrapped fetch.  Both apps already import from here.  If a third UI surface lands, wire it through this module rather than rolling a local `fetch` wrapper.
+- **`@shared/api/keys::KeysUnlockResponse` now includes optional `admin_key`/`bootstrapped`/`mcp_keys_loaded`.**  These are populated by the server on first-time bootstrap (fresh j9t instance, no `mcp_keys.json.enc` yet) — the shared MPD reads `result.admin_key` to show the issued admin key exactly once.  If a future test or CLI tool calls `/api/settings/keys/unlock`, the typed response correctly surfaces these fields without needing app-local type duplication.
+- **Editor's `handleAuthenticated` does a follow-up `whoami` call** to populate `authUser` + `authRole` after AdminLoginDialog reports success.  That's the canonical pattern post-login — login response itself returns `{ok, user, role}` but the editor's pattern is consistent with dashboard's (single source of identity is `/api/auth/whoami`).
+- **Editor's WS reconnect drives auth re-probe.**  `useStatusWebSocket` doesn't surface `keys_unlocked`, so the cross-check dashboard does (`status?.keys_unlocked === false && keysStatus === "ok"` → refetch) isn't ported.  In the editor, the re-probe path is: WS disconnects → reconnects → whoami runs → if 401 → `needsAuth=true` → AdminLoginDialog renders.  Slight window where the editor still thinks the user is signed in after a restart but before WS reconnects (5-20s) is acceptable; the WS reconnect closes it.
+- **`.mpd-*` CSS lives in each app's CSS** (`dashboard/ui/src/App.css` + `workflow-editor/ui/src/app.css`).  The shared MPD references the class names; each app provides the rules.  Same pattern as `.btn`.  If a new UI app uses the shared MPD, copy the `.mpd-*` block into its CSS file.
+- **`.btn-editor` class is referenced in the shared MPD but not defined in either app's CSS** — silently a no-op selector.  Left as-is for now; the MPD button styles via `.btn` alone.  If a future visual-polish pass wants to differentiate the primary action, define `.btn-editor` in both apps.
+
+### Open items / next-session candidates
+
+Per `pre-1_0_follow-ups.md` ordering, next is **Sitting 6 — SigV4 clean design + MockTransport capture + Bedrock fixture**.  Large sitting (~1.5–2 days).  See plan doc.
+
+**Out of scope but worth flagging:**
+
+- **Editor's API call sites don't go through `authFetch` yet.**  The plan's acceptance for Sitting 5 is met by whoami + WS-reconnect probes alone, but the `j9t-auth-required` event listener I wired only fires when something dispatches that event — dashboard's broader `authFetch`-everywhere pattern doesn't yet apply on the editor side.  Wrapping editor's ~15 fetch call sites is a focused follow-up: change `getKeysStatus()` / `listAiInterfaces()` / workflow-fetch / save / etc. to route through `authFetch`.  Compiler doesn't enforce — needs a careful sweep.  ~half-day.
+- **Editor still lacks a `keys_unlocked` cross-check on `/api/status`** (the dashboard's belt-and-suspenders against "WS is still connected via cache but backend resealed").  Requires extending `useStatusWebSocket` to expose `keys_unlocked` from the `status` WS frames.  Small (~hour), not blocking.
+- **Editor's `whoami` re-probe runs on EVERY WS reconnect** (not just first connect → reconnect transitions).  Dashboard does the same.  Cheap call, no concern.
+- **`.btn-editor`** is referenced but undefined.  Either define it for visual polish, or strip it from the shared MPD's `className`.  Cosmetic.
+
+### Doc sweep
+
+Touched only the plan doc + this hand-off this sitting.  No other tracked docs reference `AdminLoginDialog` or the dashboard-local `MasterPasswordDialog` (the dashboard's deleted files weren't named in any markdown).  `doc/cyber security.md` already documents the cookie-based auth funnel + `j9t-auth-required` pattern in terms of behaviour, not file paths — no churn needed.  `doc/architecture.md` Key Design Decisions table doesn't have a row for shared-ui structure — also no churn.
+
+### Gotchas next-session-Claude should know
+
+- **Working tree contains the Sitting 1+2+3+4 carry-over PLUS Sitting 5 changes.**  `git status --short` will show:
+    ```
+     M application/web/aiJcwfService.cpp                          # Sitting 4
+     M application/web/aiJcwfService.h                            # Sitting 4
+     M application/web/webServer.cpp                              # Sittings 3+4
+     M application/web/webServer.h                                # Sitting 4
+     M application/web/webServer_studio.cpp                       # Sitting 4
+     M application/workflow/aiRequestPool.cpp                     # Sitting 4
+     M application/workflow/aiRequestPool.h                       # Sitting 4
+     M application/workflow/workflowRegistry.cpp                  # Sitting 3
+     M application/workflow/workflowRegistry.h                    # Sitting 3
+     M dashboard/ui/src/App.tsx                                   # Sitting 5
+     M dashboard/ui/src/api.ts                                    # Sitting 5
+     M dashboard/ui/src/types.ts                                  # Sitting 5
+     M doc/api-endpoints.md                                       # Sitting 4 doc sweep
+     M doc/architecture.md                                        # Sitting 4 doc sweep
+     M doc/cyber security.md                                      # Sitting 4 doc sweep
+     M doc/misc/engine-studio-capability-review.md                # Sitting 4 doc sweep
+     M doc/misc/hand-off.md                                       # Sittings 3+4+5
+     M doc/misc/pre-1_0_follow-ups.md                             # Sittings 3+4+5 closed tags
+     M premake5.lua                                               # Sitting 4
+     M shared-ui/api/keys.ts                                      # Sitting 5
+     M workflow-editor/ui/src/App.tsx                             # Sitting 5
+     M workflow-editor/ui/src/app.css                             # Sitting 5
+    ?? application/web/webServer_engine.cpp                       # Sitting 4
+    ?? shared-ui/api/auth.ts                                      # Sitting 5
+    ?? shared-ui/components/                                      # Sitting 5 (AdminLoginDialog + MasterPasswordDialog)
+    ```
+    Plus three deletions (dashboard's `auth.ts`, `components/AdminLoginDialog.tsx`, `components/MasterPasswordDialog.tsx`) and two more (`workflow-editor/ui/src/api/auth.ts`, `workflow-editor/ui/src/components/MasterPasswordDialog.tsx`).  Per `feedback_git_commits`, JC handles commits.  Natural splits if JC wants them: (a) Sitting 3 fixes, (b) Sitting 4 §5i extraction (code + premake + Engine file), (c) Sitting 4 doc sweep, (d) Sitting 5 lift (UI + shared-ui).
+- **j9t Studio is running at session end** (relaunched mid-sitting for the live API flow verifications; keystore unlocked via `JARVIS_MASTER_PASSWORD`, admin session active via `J9T_TOKEN`).  Shut down via `POST /api/shutdown` per `feedback_shutdown_via_rest` before any build that touches shared headers.
+- **No C++ rebuilds this sitting** — pure frontend work.  Sitting 4's build matrix verification still stands for the C++ side; nothing in this sitting could affect it.
+- **`shared-ui/` now has a `components/` subdirectory.**  Pre-Sitting-5 structure was just `api/` + `views/`.  New tsconfig/vite alias setup isn't required (both apps already had `@shared/*` mapped to `../../shared-ui/*`), but next-session-Claude should be aware the dir exists and is the canonical home for new cross-app React components.
+
+---
+
+## 2026-05-18 (Sitting 4 — Studio/Engine §5i tail: handler move + WS extraction) → next session
+
+Third sitting of the same day, paired §5i.1 + §5i.2 closeout per `pre-1_0_follow-ups.md`.  Engine admins now get the AI-interface Test button at `/api/settings/ai-interfaces/test`; the 172-line WS assistant-dispatch sprawl in `webServer.cpp` is extracted into a single edition-routed method.  `#ifdef J9T_STUDIO` count in `webServer.cpp` drops from 8 to 5, hitting the plan's "post-extraction target ~5" exactly.  All 4 binary configs build clean; live tests pass on both editions.  Working tree at session end: 12 modified files + 1 new file (`webServer_engine.cpp`); not yet committed.
+
+### What landed
+
+| Theme | Files | Why |
+|---|---|---|
+| **§5i.1 — `TestInterface` lifted to `AiRequestPool`** | `application/workflow/aiRequestPool.{h,cpp}` (new method), `application/web/aiJcwfService.{h,cpp}` (removed), `application/web/webServer.cpp` (call-site refactor) | Synchronous "Say hello" connectivity probe moved from `AiJcwfService::TestAiInterface` (Studio-only) to `AiRequestPool::TestInterface` (both editions).  Engine admins gain the operational Test button without needing to bring in the assistant module surface.  `HandleAiInterfaceTestPost` (the `/api/settings/ai-interfaces/test` route handler) now routes through `App::g_App.load()->GetAiRequestPool()->TestInterface(...)` — same pattern already used by `/api/status` for `GetDirectDispatchInflight`.  The `#ifdef J9T_STUDIO ... #else ... ai_test_not_available_in_engine ... #endif` block is gone.  `AiJcwfService::TestAiInterface` deleted per `feedback_no_legacy` — no remaining callers, no shim. |
+| **§5i.2 — WS assistant dispatch extracted to edition-routed method** | `application/web/webServer.h` (new method declarations + `simdjson/simdjson.h` include), `application/web/webServer_studio.cpp` (Studio impl + new `InitEditionSpecific`), `application/web/webServer_engine.cpp` (new file — Engine stubs), `application/web/webServer.cpp` (call-site collapse) | 172-line `#ifdef J9T_STUDIO` block in the `/ws .onmessage` lambda dispatching `ai-explain-jcwf` / `ai-generate-jcwf` / `ai-write-scripts` / `ai-fix-failed-script` collapsed to one line: `else if (HandleAssistantWebSocketMessage(conn, doc, type)) { ... }`.  Studio impl returns `true` on dispatch; Engine impl returns `false` so the caller falls through to the existing "unknown type" arm.  Lines 142-151 (the `RegisterAssistantWebSocket()` + `m_AiJcwfService.SetBroadcastFn(...)` setup) also folded into a new `InitEditionSpecific()` method with Studio + Engine impls — drops one more ifdef.  `auto doc = parser.iterate(json)` at line 3711 changed to explicit-type `simdjson::ondemand::document doc = ...` so it's passable as a non-const reference (the simdjson_result wrapper isn't directly bindable to `document&`). |
+| **File-level edition isolation: new `webServer_engine.cpp`** | `application/web/webServer_engine.cpp` (new), `premake5.lua` (Studio else-branch `removefiles`) | Mirror of `webServer_studio.cpp`'s edition-isolation pattern: Engine impl lives in its own file, wrapped in `#ifndef J9T_STUDIO` as a defence-in-depth backstop on top of the premake `removefiles` gate.  premake5 now drops `webServer_engine.cpp` from Studio builds AND drops `webServer_studio.cpp` from Engine builds — symmetric file isolation per `feedback_premake5_removefiles_order`.  License preamble per `feedback_license_preamble` (full GPL-3.0 + permissive). |
+| **Plan doc Sitting 4 marked closed** | `doc/misc/pre-1_0_follow-ups.md:68` | `**closed 2026-05-18**` tag matching Sittings 1+2+3 convention from earlier today. |
+
+### What's verified
+
+| Check | Result |
+|---|---|
+| Studio Debug build | Clean, zero warnings |
+| Studio Release build | Clean, zero warnings |
+| Engine Debug build | Clean, zero warnings |
+| Engine Release build | Clean, zero warnings |
+| `#ifdef J9T_STUDIO` count in `webServer.cpp` | **8 → 5** (plan target was "drops by ≥3"; hit exactly).  Remaining 5 are at: 151 (`m_AiJcwfService.Shutdown` field reference), 190 (`SetWorkflowRegistry` controller setter), 913 (`RegisterStudioRoutes`), 1731 (status capabilities reporting), 3959 (shutdown of `m_AiJcwfService` + `m_AssistantController`).  All 5 are "code that references a Studio-only field directly" — collapsing them needs additional edition-hook methods, out of scope for this sitting. |
+| **Live test — Studio Test button (Anthropic haiku)** | `{"response_preview":"Hello! 👋 How can I help you today?","latency_ms":746,"ok":true}` |
+| **Live test — Studio assistant 28 non-AI regression suite** | 28/28 pass in 2.1s.  Confirms the WS dispatch extraction didn't break protocol/session/command surface. |
+| **Live test — Engine Test button (Anthropic haiku)** | `{"response_preview":"Hello! 👋 How can I help you today?","latency_ms":2039,"ok":true}` — Engine cold-start latency is the difference vs Studio.  Closes the §5i.1 user-facing goal. |
+| **Live test — Engine Test button (OpenAI gpt-4.1-mini)** | `{"response_preview":"Hello! How can I assist you today?","latency_ms":1468,"ok":true}` |
+| **Live test — Engine Test negative path (index=999)** | `{"error":"Interface index 999 out of range (have 12)","ok":false}` HTTP 200 with `ok:false` — matches existing contract. |
+| Log line format | `[AiRequestPool] TestInterface: index={} name='{}' OK latency={}ms responseLen={}` (was `[AiJcwfService] TestAiInterface: ...`) |
+| Active edition at session end | `studio` (per `.build-edition`) |
+| Premake regeneration | Triggered twice (Studio→Engine→Studio) per `feedback_premake_regen_for_new_cpp` — new `webServer_engine.cpp` requires gmake refresh |
+
+### Design decisions settled this sitting
+
+| Q | Answer |
+|---|---|
+| Keep `AiJcwfService::TestAiInterface` as a thin wrapper or delete? | **Delete.**  Plan said "Studio retains it for assistant-side test paths" but the grep shows zero remaining callers anywhere in the tree.  Per `feedback_no_legacy` ("when a refactor supersedes old code/docs, delete the old; no gates, compat shims"), removed entirely.  If a future feature wants an assistant-side test wrapper, it can call `AiRequestPool::TestInterface` directly. |
+| Where does the Engine no-op for `HandleAssistantWebSocketMessage` live? | **New `webServer_engine.cpp` file, dropped from Studio builds via premake `removefiles`.**  Considered alternatives: (a) inline empty body in `webServer.h` under `#ifndef J9T_STUDIO` (would add 1 ifdef in header, net zero on count goal), (b) `#ifndef J9T_STUDIO` stub in `webServer.cpp` itself (also adds 1 ifdef).  File-level isolation is the clean answer — mirrors the existing `webServer_studio.cpp` pattern and removes any edition ifdef from the shared `webServer.cpp` call site. |
+| Symmetric premake `removefiles` for Studio? | **Yes — added.**  Without dropping `webServer_engine.cpp` from Studio builds, both Studio and Engine impls of `InitEditionSpecific` / `HandleAssistantWebSocketMessage` would link into Studio and the no-op Engine version could shadow the real one (link-order dependent).  Same security argument as the existing Engine `removefiles` per `feedback_premake5_removefiles_order`. |
+| Forward-declare `simdjson::ondemand::document` in `webServer.h`? | **No, full include.**  simdjson is templated and forward-declaring `simdjson::ondemand::document` is non-trivial; full `#include "simdjson/simdjson.h"` in `webServer.h` is consistent with how the rest of the codebase pulls simdjson in (most consumers include the full header). |
+| Pass parsed `document&` vs raw JSON string vs simdjson_result? | **Real `document&`.**  Re-parsing inside `HandleAssistantWebSocketMessage` would mean two parse passes (caller already needs `type`); passing `simdjson_result<document>` requires the caller to know it's wrapped and adds verbosity.  Made the caller use explicit-type `simdjson::ondemand::document doc = parser.iterate(json);` (implicit conversion from `simdjson_result`, throws on parse error — already caught by the try/catch around the WS body). |
+
+### Architecture notes for next-session-Claude
+
+- **`AiRequestPool::TestInterface` is the canonical "is this AI interface reachable" probe.**  Synchronous, uses `CurlManager::GetThreadCurl()` (not the async dispatcher), 30s timeout, returns parsed `responsePreview` + `latencyMs` + `error`.  Don't add another sync-probe surface; if a new caller needs connectivity testing, route through this.  Available in both editions.
+- **`webServer_engine.cpp` is the mirror of `webServer_studio.cpp`** for edition-specific WebServer stubs.  Any future Studio-only WebServer method that needs a "do nothing in Engine" counterpart goes there.  Same `#ifndef J9T_STUDIO` defence-in-depth wrap.  Methods declared in `webServer.h` with NO `#ifdef` so the symbol is required in both editions; resolution happens at link time via the edition-filtered file.
+- **`InitEditionSpecific()` is the canonical place for "WebServer ctor needs to register Studio-only routes / callbacks."**  Today it does `RegisterAssistantWebSocket()` + `m_AiJcwfService.SetBroadcastFn(...)`.  If a future Studio-only init step lands, add it inside `InitEditionSpecific()` (Studio impl) rather than adding a new `#ifdef J9T_STUDIO` block in `webServer.cpp`.
+- **The `else if (HandleAssistantWebSocketMessage(...))` pattern** is the canonical way to add new edition-specific WS message types.  Studio impl extends the if-chain inside `HandleAssistantWebSocketMessage`; Engine stub stays as `return false`.  No `#ifdef` in the lambda.
+- **Remaining 5 ifdefs in `webServer.cpp`** are all "code referencing a Studio-only WebServer field directly" (`m_AiJcwfService` / `m_AssistantController`).  Collapsing them would require either: (a) making the fields edition-agnostic (heavy — those types pull in significant deps), or (b) extracting each into an edition hook method (cheap per-hook, but adds 3+ new methods).  Worth doing as a future tail-cleanup sitting if/when the ifdef proliferation pattern bites again.
+
+### Open items / next-session candidates
+
+Per `pre-1_0_follow-ups.md` ordering, next is **Sitting 5 — Editor MCP login parity (AdminLoginDialog lift to shared-ui)**.  See plan doc for scope.
+
+**Out of scope but worth flagging:**
+
+- **Lines 190 + 3959 in webServer.cpp** are similar shape to the lines this sitting collapsed (Studio-only field accesses).  Extractable into `OnWorkflowRegistrySet(...)` + `ShutdownEditionSpecific()` hooks for another -2 ifdefs.  Tail cleanup, not urgent.
+- **`m_AiJcwfService` is now only referenced from `webServer.cpp:3959` and `webServer_studio.cpp`.**  Engine genuinely doesn't see the field.  If the line 3959 shutdown call moves into `ShutdownEditionSpecific()` (Studio impl), the field reference disappears from the shared source entirely.
+- **`AiJcwfService` itself is now a thinner class.**  The deleted `TestAiInterface` was its only sync-probe method; remaining surface is the async assistant generation pipeline (`ExplainAsync`, `GenerateAsync`, `FixFailedScriptAsync`).  No structural simplification needed today, but worth noting that the class purpose is now strictly "Studio assistant generation" — clean boundary.
+
+### Doc sweep (same sitting)
+
+After landing the code changes, swept tracked docs for stale references and gaps surfaced by Sittings 3+4:
+
+| Doc | Change |
+|---|---|
+| `doc/api-endpoints.md` line 712 / 789 | "10s timeout" → "30s timeout" (the code has always been `kTestTimeoutMs = 30000`, doc was wrong); appended `AiRequestPool::TestInterface` provenance + "Both editions" callout. |
+| `doc/api-endpoints.md` Workflows section | Added the three version endpoints (`GET /api/workflows/<id>/versions`, `GET .../versions/<ts>`, `POST .../versions/<ts>/restore`) — they were registered in code but absent from the doc table.  Full request/response shapes for each, including the new zip-magic-check failure path from Sitting 3. |
+| `doc/api-endpoints.md` `/ws` section | Removed the stale `chat` row (chat lives on `/ws/assistant`, not `/ws`); added the four assistant message types (`ai-explain-jcwf`, `ai-generate-jcwf`, `ai-write-scripts`, `ai-fix-failed-script`) with edition + admin-role columns; cross-reference to the new `HandleAssistantWebSocketMessage` routing pattern. |
+| `doc/cyber security.md` line 131 | Updated the `removefiles` description to call out the symmetric Studio-side removal of `webServer_engine.cpp` — each side drops its counterpart's edition file. |
+| `doc/architecture.md` Key Design Decisions table | New row documenting the edition-routing pattern (`InitEditionSpecific` / `HandleAssistantWebSocketMessage` paired across `webServer_studio.cpp` and `webServer_engine.cpp`, with `AiRequestPool::TestInterface` as the alternate "promote into a both-editions class" path).  Sits next to the existing atomic-write-helper + EventQueue-cap rows from Sittings 1+2. |
+| `doc/misc/engine-studio-capability-review.md` "Open items / follow-ups" | Marked the §5i.1, §5i.2, and `HandleAiInterfaceTestPost`-location items as closed (✅ Landed in Sitting 4 of `pre-1_0_follow-ups.md`).  Sub-workflow tree route item still open (out of scope). |
+| `application/web/webServer.cpp:2185-2196` (small code fix surfaced by the doc work) | `HandleWorkflowVersionGetGet` had the same binary-mode read + `Content-Type: application/json`-on-binary-zip bug that Sitting 3 fixed for the restore handler.  Two-line fix: `std::ios::binary` + `Content-Type: application/octet-stream`.  Same class as the Sitting 3 fix, surfaced because writing the endpoint's doc made the inconsistency visible. |
+
+**Skipped by design:**
+
+- `doc/combinedDocumentation.md` + `doc/combinedSafetyAudit.md` have stale `AiJcwfService::TestAiInterface` refs.  Per `feedback_combined_doc_generated` these are JCWF-generated and per `feedback_audit_republish_end_of_domain` only republished at domain close-out.  Will resolve on next regen run.
+- `README.md` is unaffected — Test-button availability is an internal API detail, not a top-level surface.
+- `doc/jarvisagent.md` (user manual) doesn't mention the Test button.  No churn needed.
+- `/ws/assistant` protocol (separate WS route handled by `AssistantController`) is undocumented in `api-endpoints.md`.  That's a real doc gap but a non-trivial new section — out of scope for this sweep; tracked as a follow-up.
+
+### Gotchas next-session-Claude should know
+
+- **Working tree contains 16 modified files + 1 new file** (Sittings 3+4 code + doc sweep).  `git status --short` gives the full list:
+    ```
+     M application/web/aiJcwfService.cpp                          # §5i.1 — deleted TestAiInterface
+     M application/web/aiJcwfService.h                            # §5i.1 — deleted TestAiInterface decl
+     M application/web/webServer.cpp                              # §5i.1 + §5i.2 call sites; Sitting 3 restore + version-GET binary-mode fix
+     M application/web/webServer.h                                # §5i.2 — new method decls + simdjson include
+     M application/web/webServer_studio.cpp                       # §5i.2 — InitEditionSpecific + HandleAssistantWebSocketMessage
+     M application/workflow/aiRequestPool.cpp                     # §5i.1 — TestInterface impl + curlManager.h include
+     M application/workflow/aiRequestPool.h                       # §5i.1 — TestInterface decl
+     M application/workflow/workflowRegistry.{h,cpp}              # Sitting 3 — UpsertJcwfFromZipBytes
+     M doc/api-endpoints.md                                       # doc sweep — timeout fix + version endpoints + /ws assistant msg types
+     M doc/architecture.md                                        # doc sweep — Key Design Decisions row for edition routing
+     M doc/cyber security.md                                      # doc sweep — symmetric removefiles
+     M doc/misc/engine-studio-capability-review.md                # doc sweep — closed §5i items
+     M doc/misc/hand-off.md                                       # this entry + Sitting 3 entry
+     M doc/misc/pre-1_0_follow-ups.md                             # Sittings 3+4 closed tags
+     M premake5.lua                                               # §5i.2 — Studio-side removefiles
+    ?? application/web/webServer_engine.cpp                       # §5i.2 — new Engine stubs
+    ```
+    Sittings 1+2 were committed as `aae8448` earlier today; Sittings 3+4 + doc sweep are in working tree.  Per `feedback_git_commits`, JC handles commits.  Natural commit splits if JC wants them: (a) Sitting 3 restore fix + version-GET binary-mode fix as one commit, (b) §5i.1 TestInterface move + (c) §5i.2 WS extraction as separate commits, (d) doc sweep as one commit, or all-in-one — JC's call.
+- **`webServer_engine.cpp` is new — premake5 needs regeneration when switching editions.**  Without a fresh `premake5 gmake [--engine]`, the Makefile won't know about the new file.  Per `feedback_premake_regen_for_new_cpp`, premake's globs resolve at gmake time.  Done at session end; both editions verified building.
+- **`j9t Studio` is running at session end** (relaunched after Engine test, keystore unlocked).  Used for the verification matrix.  Shut down via `POST /api/shutdown` per `feedback_shutdown_via_rest` before any build that touches a shared header.
+- **`.build-edition` is `studio` at session end.**  Engine builds were verified mid-session and the switch back to Studio is done.
+
+---
+
+## 2026-05-18 (Sitting 3 — restore broken `HandleWorkflowVersionRestorePost`) → next session
+
+Short, surgical sitting on top of the morning's Sittings 1+2 work.  Closes the version-restore bug per the plan's Sitting 3.  New public method on `WorkflowRegistry`, handler swapped, build matrix + live test green.  Working tree at session end: 3 files modified (`webServer.cpp`, `workflowRegistry.h`, `workflowRegistry.cpp`) + the plan doc + this hand-off entry; not yet committed.
+
+### What landed
+
+| Theme | Files | Why |
+|---|---|---|
+| **New `WorkflowRegistry::UpsertJcwfFromZipBytes` method** | `application/workflow/workflowRegistry.h` (decl), `application/workflow/workflowRegistry.cpp` (impl) | The container-aware write path the restore handler always needed.  Signature: `[[nodiscard]] bool UpsertJcwfFromZipBytes(std::string const& zipBytes, std::filesystem::path const& workflowFilePathAbsolute, std::string& errorMessage);`.  Validates zip magic (`PK\x03\x04`) before touching disk, path-confines target via `ConfineUnderProjectRoot`, evicts any registry entries whose `m_ContainerPath` matches the canonical target (covers root + all sub-workflows in case the restored snapshot has fewer subs than the current version), atomic-writes the bytes via `EngineCore::AtomicWriteFile`, wipes the stale extracted dir via `std::filesystem::remove_all`, then re-extracts + re-registers via the existing private `LoadContainer`. |
+| **`HandleWorkflowVersionRestorePost` switched to the new method** | `application/web/webServer.cpp:2207-2295` | The fix the plan called for: stop feeding zip bytes to `SaveOrUpdateWorkflowFromJson` (which expects plain JSON and was failing on every restore with `UNCLOSED_STRING`).  One-line call-site change. |
+| **Binary-mode read fix** | `application/web/webServer.cpp:2240` | Same handler had a latent Windows bug: `std::ifstream ifs(versionPath);` opened in text mode would silently CRLF-translate the zip blob.  Now `std::ios::binary`. |
+| **Plan doc Sitting 3 marked closed** | `doc/misc/pre-1_0_follow-ups.md:52` | `**closed 2026-05-18**` tag matching the morning's Sittings 1+2 convention. |
+
+### What's verified
+
+| Check | Result |
+|---|---|
+| Studio Debug build | Clean, zero warnings, only `workflowRegistry.cpp` + `webServer.cpp` recompiled, link succeeds |
+| Studio Release build | Clean, zero warnings |
+| Engine builds | Not re-run this sitting (Sitting 3 changes are Studio + shared `workflowRegistry.{h,cpp}` — Engine touches the same files so should be unaffected; defer to next sitting's matrix run rather than burning the edition-switch cost here) |
+| **Positive live test** — restore `exampleMakefile4` to version `20260421T050112` | 200 OK, on-disk md5 matches version's md5, `GET /api/workflows/exampleMakefile4` parses cleanly, run end-to-end via `POST /api/workflows/exampleMakefile4/run` → all 4 tasks (ai_call, ai_call_2, shell, shell_2) succeeded |
+| **Negative live test** — plant non-zip bytes (`{"id":"...","tasks":{}}`) at `.history/.../20990101T000000.jcwf`, attempt restore | 500 + `restore_failed` + error message `Provided bytes are not a valid .jcwf zip (missing PK\x03\x04 magic)`.  On-disk file md5 unchanged.  Log line at ERROR level with run-relevant path + size — picked up by dashboard run analyzer per `feedback_log_failures`. |
+| Restored back to pre-test state | md5 matches pre-test capture |
+| `test/dispatch/test_mock_dispatch_hermetic.py` | OK |
+| `test/dispatch/test_envelope_empty_body_rejected.py` | OK |
+| Active edition at session end | `studio` (per `.build-edition`) |
+
+### Design decisions settled this sitting
+
+| Q | Answer |
+|---|---|
+| New public method vs. internal sniff | Option (a) per the plan — new `UpsertJcwfFromZipBytes` method.  Cleaner public-API boundary than overloading `SaveOrUpdateWorkflowFromJson` with magic-byte dispatch; the two paths have genuinely different contracts (JSON canvas vs. complete zip blob) and the editor's PUT path doesn't need the zip path. |
+| Method signature shape | Match `SaveOrUpdateWorkflowFromJson`'s `(bytes, targetPath, errorMessage)` shape; skip a redundant `expectedWorkflowId` arg.  The handler already gates via URL-`workflowId` → target-path-stem at the caller; double-checking inside the registry would mean re-parsing the zip's `global.json` before the LoadContainer pass.  Not worth the complexity. |
+| Stale-sub-workflow eviction | Eviction loop matches every `m_Workflows` entry whose `m_ContainerPath == weakly_canonical(targetPath)` (root + every sub-workflow shares this).  Required for restore correctness: an older version with fewer sub-workflows would otherwise leave dropped subs lingering in the registry.  `SaveOrUpdateWorkflowFromJson` doesn't do this — it's a different code path (editor PUT) where the zip stays consistent across edits; not in scope for this sitting. |
+| Stale extracted-dir cleanup | `std::filesystem::remove_all(extractedDir)` before `LoadContainer`.  `JcwfContainer::Extract` overwrites existing files but doesn't remove entries absent from the new zip — without this, a restore that drops a sub-workflow would leave stale subfolders that `LoadContainerSubWorkflows` would then load as if they belonged to the restored snapshot.  remove_all is best-effort + WARN-logged on failure; `LoadContainer` still attempts extraction afterward. |
+| Auto-revert on `LoadContainer` failure | No.  The pre-restore auto-backup made by the handler at `.history/<new ts>.jcwf` is the recovery path; the user can re-restore that snapshot.  In-handler auto-revert would mean staging the prior bytes in memory, adding complexity for a failure mode that's already covered by the explicit version history. |
+
+### Architecture notes for next-session-Claude
+
+- **`WorkflowRegistry::UpsertJcwfFromZipBytes` is the single legitimate path for "I have a complete .jcwf blob; install it".**  Any future feature that takes a zip blob from an external source (import-from-URL, upload, etc.) should funnel through this method, not roll its own extract+register sequence.  The path-confinement gate + zip-magic check + eviction loop + stale-extracted-dir cleanup are exactly what those features need.
+- **Zip magic check is at the API boundary, not inside `JcwfContainer::Extract`.**  Reason: Extract gets called from trusted paths (`LoadDirectory` over a workflow tree) where the bytes are already on disk and assumed valid (a corrupted on-disk JCWF surfaces as a broken-workflow entry in the registry, which is a different UX from "your restore failed").  External-bytes paths gate before any disk I/O so a malicious caller can't even cause a `<path>.tmp.<n>` to land on disk.
+- **`std::ifstream` for `.jcwf` files needs `std::ios::binary`.**  POSIX is a silent no-op so the bug doesn't surface here; Windows CRLF-translates and silently corrupts the zip.  The version-restore handler is now the canonical example — any other reader of on-disk `.jcwf` bytes should match (`workflowRegistry.cpp` uses `JcwfContainer::Extract` which routes through miniz directly, no `std::ifstream` involvement, so safe).
+- **The handler's pre-restore auto-backup is per-call, not per-day.**  Every successful restore creates a new `.history/<id>/<utc ts>.jcwf` entry of the state right before the restore.  This means undoing a restore is "restore the immediately-previous timestamp" — covered the test cycle in this sitting cleanly.
+
+### Open items / next-session candidates
+
+Per `pre-1_0_follow-ups.md` ordering, next is **Sitting 4 — Studio/Engine §5i tail (handler move + WS extraction)**.  See plan doc for scope.
+
+**Out of scope but worth flagging:**
+
+- **`SaveOrUpdateWorkflowFromJson` doesn't evict stale sub-workflows on PUT** either — same shape as the bug this sitting fixed for restore, but on the editor's save path.  In practice the editor PUTs a full canvas with the same sub-workflows present, so the stale-sub case is unlikely.  But it's the same class of bug; tracked as a follow-up if any sub-workflow-deleting flow ever surfaces in the editor.
+- **Engine config build not re-run this sitting.**  Files touched are shared between Studio and Engine (`workflowRegistry.{h,cpp}` are not edition-gated, `webServer.cpp` is shared between both editions per the conventional split with `webServer_studio.cpp`).  Sitting 4 will pick up the Engine matrix run.
+
+### Gotchas next-session-Claude should know
+
+- **Working tree contains 3 modified files + the plan doc + this hand-off.**  `git status --short` gives the list: `application/web/webServer.cpp`, `application/workflow/workflowRegistry.cpp`, `application/workflow/workflowRegistry.h`, `doc/misc/hand-off.md`, `doc/misc/pre-1_0_follow-ups.md`.  Per `feedback_git_commits`, JC handles commits.
+- **j9t Studio is running at session end** (relaunched this session; keystore unlocked via `POST /api/settings/keys/unlock`).  Used for the restore tests.  Shut down via `POST /api/shutdown` per `feedback_shutdown_via_rest` before any build that touches shared headers.
+- **Version-restore audit trail in `workflows/.history/exampleMakefile4/`** now has two new auto-backup entries from this sitting's tests (`20260519T040649.jcwf` and `20260519T040906.jcwf`).  Both are legitimate version-history entries — the handler made them as pre-restore safety snapshots.  No cleanup needed; they're indistinguishable from real PUT-time backups and the `GET /api/workflows/<id>/versions` listing includes them.
+- **The plan's "Effort: Small (~half day)" estimate held** — actual time was ~hour including investigation, design, implementation, build matrix, and full positive+negative live test cycle.
+
+---
+
 ## 2026-05-18 (Sittings 1+2 — writer atomicity sweep + EventQueue fail-fast cap) → next session
 
 Two adjacent sittings of the `pre-1_0_follow-ups.md` plan closed in one continuous session, plus a doc sweep.  **Sitting 1** added the `AtomicWriteFile` helper and migrated ~30 writer sites across 21 files; 7 streaming/recoverable writer sites across 4 files got the exception-safety pattern.  **Sitting 2** added the 1000-event hard cap on `EventQueue` with `ProducerId`-tagged Push API, per-producer breakdown on cap-hit, synchronous log flush, and emergency `std::exit(EXIT_FAILURE)`.  **Doc sweep** updated 9 tracked markdown files to reflect the helper consolidation + EventQueue cap; the plan doc itself now marks Sittings 1+2 as closed.  All 4 binary configs (Studio Debug+Release, Engine Debug+Release) build clean with zero warnings under `-Wall -Wextra -Wpedantic`.  Hermetic mock dispatch + empty-body rejection pass as regression checks after each sitting.  All in working tree, not yet committed.

@@ -87,6 +87,24 @@ export function useWebSocket() {
     capChangedCallbackRef.current = cb;
   }, []);
 
+  const connectRef = useRef<(() => void) | null>(null);
+
+  // Called by App.tsx after a successful login.  Without this, the user sees a
+  // "Disconnected" LED for up to 30s post-login: pre-auth WS upgrade attempts
+  // bump the backoff (2 → 4 → 8 → 16 → 30s), and the next attempt is still
+  // scheduled at the grown delay even though the cookie is now valid.  Force a
+  // reset + immediate retry so the LED flips to green within a frame.
+  const forceReconnect = useCallback(() => {
+    if (reconnectTimer.current !== null) {
+      clearTimeout(reconnectTimer.current);
+      reconnectTimer.current = null;
+    }
+    reconnectDelayMs.current = kBaseReconnectMs;
+    if (!wsRef.current) {
+      connectRef.current?.();
+    }
+  }, []);
+
   const connect = useCallback(() => {
     if (wsRef.current) return;
 
@@ -210,6 +228,10 @@ export function useWebSocket() {
     };
   }, []);
 
+  // Bridge for forceReconnect (declared above connect to keep hook ordering
+  // simple; resolve the cycle via a ref).
+  connectRef.current = connect;
+
   useEffect(() => {
     connect();
     return () => {
@@ -223,5 +245,5 @@ export function useWebSocket() {
     };
   }, [connect]);
 
-  return { ...state, registerLogCallback, dismissProviderAlert, registerCapChangedCallback };
+  return { ...state, registerLogCallback, dismissProviderAlert, registerCapChangedCallback, forceReconnect };
 }

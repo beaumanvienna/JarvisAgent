@@ -81,6 +81,7 @@
 #include "keys/oauthTokenManager.h"
 #include "curlWrapper/curlWrapper.h"
 #include "curlWrapper/curlMultiDispatcher.h"
+#include "curlWrapper/mockTransport.h"
 #include "curlWrapper/rateLimitController.h"
 #include "curlWrapper/rateLimitObservation.h"
 #include "curlWrapper/rateLimitStrategy.h"
@@ -139,16 +140,7 @@ namespace AIAssistant
         m_Server.loglevel(crow::LogLevel::Warning);
         RegisterRoutes();
         RegisterWebSocket();
-#ifdef J9T_STUDIO
-        RegisterAssistantWebSocket();
-
-        m_AiJcwfService.SetBroadcastFn(
-            [this](std::string const& jsonString)
-            {
-                std::lock_guard<std::mutex> lock(m_Mutex);
-                m_PendingBroadcasts.push_back(jsonString);
-            });
-#endif
+        InitEditionSpecific();
     }
 
     WebServer::~WebServer() { Stop(); }
@@ -2190,8 +2182,10 @@ namespace AIAssistant
         // version file can be deleted between the existence check and the open.
         // The is_open() check below covers both "file gone" and "permission
         // denied"; for this read-only endpoint, conflating both into 404 is
-        // fine (the caller can't act on the distinction).
-        std::ifstream ifs(versionPath);
+        // fine (the caller can't act on the distinction).  Binary mode is
+        // mandatory — the snapshot is a zip blob, not text; text-mode read
+        // would apply CRLF translation on Windows and silently corrupt it.
+        std::ifstream ifs(versionPath, std::ios::binary);
         if (!ifs.is_open())
         {
             return MakeWorkflowJsonError(404, "version_not_found", "Version not found: " + timestamp,
@@ -2200,7 +2194,7 @@ namespace AIAssistant
 
         std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
         crow::response resp(200, content);
-        resp.set_header("Content-Type", "application/json");
+        resp.set_header("Content-Type", "application/octet-stream");
         return resp;
     }
 
@@ -2236,8 +2230,10 @@ namespace AIAssistant
         // Read the version content directly.  Dropping the fs::exists() precheck
         // closes a TOCTOU window where the version file could be deleted between
         // the check and the open; the is_open() failure below covers both
-        // "file gone" and "permission denied".
-        std::ifstream ifs(versionPath);
+        // "file gone" and "permission denied".  Binary mode is mandatory — the
+        // .history snapshot is a zip blob, not text; the default text-mode read
+        // would apply CRLF translation on Windows and silently corrupt the zip.
+        std::ifstream ifs(versionPath, std::ios::binary);
         if (!ifs.is_open())
         {
             return MakeWorkflowJsonError(404, "version_not_found", "Version not found: " + timestamp,
@@ -2273,13 +2269,16 @@ namespace AIAssistant
             }
         }
 
-        // Write the restored version via registry (handles zip container).
+        // Install the restored zip blob via the container-aware registry path.
+        // `.jcwf` is always a zip (per `feedback_no_legacy_jcwf`); the previous
+        // call to SaveOrUpdateWorkflowFromJson here treated the bytes as JSON
+        // and failed-closed with UNCLOSED_STRING on every restore attempt.
         {
             std::scoped_lock<std::mutex> const lock(m_Mutex);
             if (m_WorkflowRegistry != nullptr)
             {
                 std::string upsertErrorMessage;
-                if (!m_WorkflowRegistry->SaveOrUpdateWorkflowFromJson(versionContent, targetPath, upsertErrorMessage))
+                if (!m_WorkflowRegistry->UpsertJcwfFromZipBytes(versionContent, targetPath, upsertErrorMessage))
                 {
                     return MakeWorkflowJsonError(500, "restore_failed", upsertErrorMessage,
                                                  "POST /api/workflows/{id}/versions/{ts}/restore", workflowId);
@@ -3703,7 +3702,7 @@ namespace AIAssistant
                     {
                         simdjson::ondemand::parser parser;
                         simdjson::padded_string json(data);
-                        auto doc = parser.iterate(json);
+                        simdjson::ondemand::document doc = parser.iterate(json);
 
                         std::string type = std::string(doc["type"].get_string().value());
 
@@ -3777,180 +3776,13 @@ namespace AIAssistant
                                 m_PendingBroadcasts.push_back(msg.dump());
                             }
                         }
-#ifdef J9T_STUDIO
-                        else if (type == "ai-explain-jcwf")
+                        else if (HandleAssistantWebSocketMessage(conn, doc, type))
                         {
-                            std::string jcwfJson = std::string(doc["jcwf"].get_string().value());
-                            m_AiJcwfService.ExplainAsync(jcwfJson);
+                            // Dispatched by the edition-specific assistant handler
+                            // (Studio: ai-explain-jcwf / ai-generate-jcwf /
+                            // ai-write-scripts / ai-fix-failed-script).  Engine
+                            // always returns false here.
                         }
-
-                        else if (type == "ai-generate-jcwf")
-                        {
-                            std::string prompt = std::string(doc["prompt"].get_string().value());
-                            std::string currentJcwf;
-                            auto currentResult = doc["currentJcwf"].get_string();
-                            if (currentResult.error() == simdjson::SUCCESS)
-                            {
-                                currentJcwf = std::string(currentResult.value());
-                            }
-                            m_AiJcwfService.GenerateAsync(prompt, currentJcwf);
-                        }
-
-                        else if (type == "ai-write-scripts")
-                        {
-                            // ai-write-scripts mutates disk state (writes files
-                            // under scripts/, sets +x on .sh) so it requires
-                            // admin role.  Without this gate, any operator/viewer
-                            // who held a valid /ws upgrade could plant scripts
-                            // that would then run on the next workflow trigger.
-                            std::string role;
-                            {
-                                std::lock_guard<std::mutex> lock(m_Mutex);
-                                auto it = m_WsClientRoles.find(&conn);
-                                if (it != m_WsClientRoles.end())
-                                {
-                                    role = it->second;
-                                }
-                            }
-                            if (role != "admin")
-                            {
-                                LOG_SECURITY_WARN(
-                                    "[security] ai_write_scripts_role_denied role='{}' ip={}",
-                                    role, conn.get_remote_ip());
-                                crow::json::wvalue err;
-                                err["type"] = "ai-write-scripts-result";
-                                err["ok"] = false;
-                                err["error"] = "forbidden";
-                                err["message"] = "ai-write-scripts requires admin role";
-                                conn.send_text(err.dump());
-                                return;
-                            }
-
-                            crow::json::wvalue result;
-                            result["type"] = "ai-write-scripts-result";
-                            crow::json::wvalue::list writtenList;
-                            crow::json::wvalue::list errorsList;
-
-                            auto scriptsArr = doc["scripts"].get_array();
-                            if (scriptsArr.error() == simdjson::SUCCESS)
-                            {
-                                for (auto scriptEl : scriptsArr.value())
-                                {
-                                    simdjson::ondemand::object scriptObj;
-                                    if (scriptEl.get_object().get(scriptObj) != simdjson::SUCCESS)
-                                    {
-                                        continue;
-                                    }
-
-                                    std::string_view pathView;
-                                    if (scriptObj["path"].get_string().get(pathView) != simdjson::SUCCESS)
-                                    {
-                                        continue;
-                                    }
-                                    std::string scriptPath(pathView);
-
-                                    std::string_view contentView;
-                                    if (scriptObj["content"].get_string().get(contentView) != simdjson::SUCCESS)
-                                    {
-                                        continue;
-                                    }
-                                    std::string content(contentView);
-
-                                    bool executable = false;
-                                    [[maybe_unused]] auto execErr = scriptObj["executable"].get_bool().get(executable);
-
-                                    // Security: must start with "scripts/" and not escape
-                                    if (scriptPath.rfind("scripts/", 0) != 0)
-                                    {
-                                        crow::json::wvalue err;
-                                        err["path"] = scriptPath;
-                                        err["error"] = "Path must start with 'scripts/'";
-                                        errorsList.push_back(std::move(err));
-                                        continue;
-                                    }
-
-                                    fs::path normalized = fs::path(scriptPath).lexically_normal();
-                                    if (normalized.string().rfind("scripts/", 0) != 0)
-                                    {
-                                        crow::json::wvalue err;
-                                        err["path"] = scriptPath;
-                                        err["error"] = "Path escapes scripts/ directory";
-                                        errorsList.push_back(std::move(err));
-                                        continue;
-                                    }
-
-                                    // Atomic write through the shared helper (creates parent
-                                    // directories internally).
-                                    std::string scriptWriteError;
-                                    if (!EngineCore::AtomicWriteFile(normalized, content, scriptWriteError))
-                                    {
-                                        crow::json::wvalue err;
-                                        err["path"] = scriptPath;
-                                        err["error"] = scriptWriteError;
-                                        errorsList.push_back(std::move(err));
-                                        continue;
-                                    }
-
-                                    // Set executable permission for shell scripts
-                                    std::error_code ec;
-                                    if (executable || scriptPath.ends_with(".sh"))
-                                    {
-                                        fs::permissions(normalized,
-                                                        fs::perms::owner_exec | fs::perms::group_exec |
-                                                            fs::perms::others_exec,
-                                                        fs::perm_options::add, ec);
-                                    }
-
-                                    writtenList.push_back(scriptPath);
-                                    LOG_APP_INFO("[ai-write-scripts] Wrote script: {}", normalized.string());
-                                }
-                            }
-
-                            result["ok"] = errorsList.empty();
-                            result["written"] = std::move(writtenList);
-                            result["errors"] = std::move(errorsList);
-
-                            {
-                                std::lock_guard<std::mutex> lock(m_Mutex);
-                                m_PendingBroadcasts.push_back(result.dump());
-                            }
-                        }
-
-                        else if (type == "ai-fix-failed-script")
-                        {
-                            std::string scriptPath;
-                            std::string stderrContent;
-                            std::string taskType;
-
-                            {
-                                std::string_view sv;
-                                if (doc["scriptPath"].get_string().get(sv) == simdjson::SUCCESS)
-                                {
-                                    scriptPath = std::string(sv);
-                                }
-                                if (doc["stderr"].get_string().get(sv) == simdjson::SUCCESS)
-                                {
-                                    stderrContent = std::string(sv);
-                                }
-                                if (doc["taskType"].get_string().get(sv) == simdjson::SUCCESS)
-                                {
-                                    taskType = std::string(sv);
-                                }
-                            }
-
-                            if (scriptPath.empty())
-                            {
-                                std::lock_guard<std::mutex> lock(m_Mutex);
-                                m_PendingBroadcasts.push_back(
-                                    R"({"type":"ai-fix-script-result","ok":false,"error":"Missing scriptPath"})");
-                            }
-                            else
-                            {
-                                m_AiJcwfService.FixFailedScriptAsync(scriptPath, stderrContent, taskType);
-                            }
-                        }
-#endif // J9T_STUDIO
-
                         else
                         {
                             std::lock_guard<std::mutex> lock(m_Mutex);
@@ -5437,16 +5269,18 @@ namespace AIAssistant
         std::string error;
         int64_t latencyMs = 0;
 
-#ifdef J9T_STUDIO
-        bool const ok = m_AiJcwfService.TestAiInterface(static_cast<size_t>(index), responsePreview, error, latencyMs);
-#else
-        // Engine has no AiJcwfService (the AI test path is part of the Studio
-        // generation pipeline and requires the full assistant module surface).
-        // The settings UI in Engine still surfaces the interface list for admins
-        // to inspect; live-test must be done from a Studio install.
-        bool const ok = false;
-        error = "ai_test_not_available_in_engine";
-#endif
+        // Test path lives on AiRequestPool — available in both editions.  Engine
+        // admins use it via the dashboard's Test button for operational
+        // verification of provider config; Studio uses it via the same route
+        // plus the assistant-side generation pipeline.
+        JarvisAgent* app = App::g_App.load(std::memory_order_acquire);
+        AiRequestPool* pool = (app != nullptr) ? app->GetAiRequestPool() : nullptr;
+        bool const ok = (pool != nullptr) &&
+                        pool->TestInterface(static_cast<size_t>(index), responsePreview, error, latencyMs);
+        if (pool == nullptr)
+        {
+            error = "ai_request_pool_unavailable";
+        }
 
         auto const& config = Core::g_Core->GetConfig();
         std::string interfaceName;
@@ -8921,6 +8755,32 @@ namespace AIAssistant
             signals["adhoc_runs_active"] = static_cast<int64_t>(m_AdhocManager->GetActiveRunCount());
             signals["adhoc_disk_usage_bytes"] =
                 static_cast<int64_t>(m_AdhocManager->GetTotalDiskUsageBytes());
+        }
+
+        // ---- MockTransport signing captures ----
+        // Most-recent signing outputs from mock dispatches.  Surfaces the
+        // Authorization (and any sibling auth headers) the signer emitted for
+        // each request routed through MockTransport — consumed by hermetic
+        // signature KAT tests like test/dispatch/test_bedrock_sigv4.py.
+        // Snapshot semantics: oldest first, capped at
+        // MockTransport::kMaxCapturedSignatures (FIFO evicted past that).
+        {
+            crow::json::wvalue::list captures;
+            for (auto const& cap : MockTransport::GetRecentCapturedSignatures())
+            {
+                crow::json::wvalue entry;
+                entry["cancel_key"] = cap.m_CancelKey;
+                entry["quota_key"]  = cap.m_QuotaKey;
+                crow::json::wvalue::list headers;
+                headers.reserve(cap.m_Headers.size());
+                for (auto const& h : cap.m_Headers)
+                {
+                    headers.push_back(crow::json::wvalue(h));
+                }
+                entry["headers"] = std::move(headers);
+                captures.push_back(std::move(entry));
+            }
+            signals["last_mock_signatures"] = std::move(captures);
         }
 
         body["signals"] = std::move(signals);

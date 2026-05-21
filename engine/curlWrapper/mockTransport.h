@@ -29,6 +29,22 @@
 
 namespace AIAssistant
 {
+    // Captured signing output from a mock dispatch — the Authorization header
+    // (and any sibling auth headers the signer emits) for the most-recent
+    // requests routed through MockTransport.  Surfaced via /api/debug/signals
+    // for test_bedrock_sigv4 and similar hermetic signature KAT tests.  The
+    // shape is intentionally minimal: cancelKey + quotaKey identify which
+    // request, m_Headers holds the auth signer's verbatim header lines.
+    struct MockSignatureCapture
+    {
+        std::string m_CancelKey;
+        std::string m_QuotaKey;
+        std::vector<std::string> m_Headers;
+    };
+} // namespace AIAssistant
+
+namespace AIAssistant
+{
     // MockTransport — fixture-driven IInterfaceTransport for hermetic dispatch
     // tests, demo-JCWF replay, and CI without provider credit burn.  The
     // dispatcher's full code path above the transport (queueing, AIMD admission
@@ -85,6 +101,18 @@ namespace AIAssistant
         void Wakeup() override;
         size_t ActiveCount() const override;
 
+        // Snapshot the most-recent signing outputs captured during mock dispatch.
+        // Returns at most kMaxCapturedSignatures entries, oldest first.  Backing
+        // store is process-global + mutex-guarded; safe to call from the web-server
+        // thread while the dispatcher's I/O thread is producing.  Test surface only:
+        // consumed by /api/debug/signals (debug builds).
+        static std::vector<MockSignatureCapture> GetRecentCapturedSignatures();
+
+        // Bound on the captured-signatures ring buffer.  32 is plenty for any
+        // realistic hermetic test (typical KAT tests dispatch 1–3 requests);
+        // older entries are evicted FIFO once the cap is reached.
+        static constexpr size_t kMaxCapturedSignatures = 32;
+
     private:
         struct PendingCompletion
         {
@@ -112,12 +140,17 @@ namespace AIAssistant
         // file is fine (defaults to status=200, no headers).  Malformed JSON,
         // out-of-allowlist http_status, or invalid types → ERROR + failure.
         // Non-allowlisted header keys are dropped with WARN but the rest of
-        // the parse continues.
+        // the parse continues.  `outAmzDateOverride` carries the optional
+        // `x_amz_date_override` field (format "YYYYMMDDTHHMMSSZ") — empty when
+        // unset — which Submit threads into QueryData::m_AmzDateOverride so
+        // the SigV4 signer produces a deterministic Authorization header for
+        // signature KAT tests.
         [[nodiscard]] bool LoadFixtureMeta(std::string const& fixturePath,
                                            std::string const& cancelKey,
                                            std::string const& quotaKey,
                                            long& outHttpStatus,
                                            std::string& outRawHeaders,
+                                           std::string& outAmzDateOverride,
                                            std::string& outErrorMessage);
 
         // Operator-transparency log: emit one INFO line per `(interfaceName,

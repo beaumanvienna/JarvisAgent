@@ -98,3 +98,100 @@
   word-break: break-word;
   overflow-wrap: anywhere;
 }
+
+/* ---- Master Password Dialog ----
+   Shared with the dashboard's @shared/components/MasterPasswordDialog.
+   Matches AdminLoginDialog visual treatment: strong backdrop with blur,
+   solid dialog surface so the editor behind is fully occluded. */
+.mpd-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.75);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+}
+
+.mpd-dialog {
+  background: #1e1e1e;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  width: 420px;
+  max-width: 90vw;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+}
+
+.mpd-header {
+  padding: 16px 20px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.mpd-header h2 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.mpd-body {
+  padding: 16px 20px;
+}
+
+.mpd-description {
+  margin: 0 0 14px 0;
+  font-size: 0.8rem;
+  opacity: 0.55;
+  line-height: 1.5;
+}
+
+.mpd-input-wrap {
+  position: relative;
+}
+
+.mpd-input {
+  width: 100%;
+  padding: 8px 36px 8px 12px;
+  font-family: inherit;
+  font-size: 0.85rem;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.04);
+  color: inherit;
+  box-sizing: border-box;
+  outline: none;
+}
+
+.mpd-input:focus {
+  border-color: rgba(120, 180, 255, 0.55);
+}
+
+.mpd-eye-btn {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: #666;
+  font-size: 16px;
+  padding: 0;
+  line-height: 1;
+}
+
+.mpd-error {
+  margin-top: 8px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  background: #2a1010;
+  border: 1px solid #4a1a1a;
+  color: #ef4444;
+  font-size: 0.78rem;
+}
+
+.mpd-footer {
+  padding: 12px 20px;
+  display: flex;
+  justify-content: flex-end;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}

@@ -44,10 +44,29 @@ newoption {
     description = "Build the Engine edition (lean production server, no editor/AI tooling)."
 }
 
+-- Opt-in clang toolchain on Linux.  CI uses gcc by default (matches Ubuntu/Rocky/Arch/Docker
+-- behaviour); this flag is for local dev when JC wants clang instead.  Pairs with
+-- libc++-18-dev (clang 18's libstdc++ headers can't see <expected> due to a known
+-- __cpp_concepts version mismatch — clang 18 reports 201907L, libstdc++ requires 202002L —
+-- so we route through libc++ which ships its own <expected>).  Remove this option when
+-- clang ≥19 lands in Ubuntu LTS.
+newoption {
+    trigger = "clang",
+    description = "Use clang + libc++ instead of gcc/libstdc++ (Linux only)."
+}
+
 project "jarvisAgent"
     kind "ConsoleApp"
     language "C++"
-    cppdialect "C++20"
+    cppdialect "C++23"
+
+    -- Local clang toolchain override (Linux only).  CXX must also be exported in
+    -- the env so the generated Makefile picks up clang++ (premake's `toolset "clang"`
+    -- writes `CXX = clang++` into the Makefile).
+    if _OPTIONS["clang"] then
+        toolset "clang"
+        print(">>> Toolchain: clang + libc++  (opt-in via --clang)")
+    end
 
     targetdir "bin/%{cfg.buildcfg}"
 
@@ -115,6 +134,14 @@ project "jarvisAgent"
             "application/web/aiJcwfService.h",
             "application/web/aiJcwfService.cpp",
             "application/web/webServer_studio.cpp",
+        }
+    else
+        -- Studio edition: drop the Engine-only stubs.  Same security argument as
+        -- above for the symmetry — without this, both Studio and Engine impls of
+        -- InitEditionSpecific / HandleAssistantWebSocketMessage would link into
+        -- Studio and the no-op Engine version could shadow the real one.
+        removefiles {
+            "application/web/webServer_engine.cpp",
         }
     end
 
@@ -458,6 +485,16 @@ print(sysconfig.get_config_var('PYTHONFRAMEWORKPREFIX') or '')"]])
 
     filter { "action:gmake*", "configurations:Release" }
         buildoptions { "-Wall -Wextra -Wpedantic -Wshadow -Wno-unused-parameter -Wno-reorder -Wno-expansion-to-defined" }
+
+    -- Clang opt-in (Linux dev): route through libc++ instead of libstdc++ so
+    -- <expected> resolves cleanly under clang 18.  Applies to both build and link
+    -- phases — the driver pulls in libc++abi + libunwind automatically.
+    if _OPTIONS["clang"] then
+        filter { "action:gmake*" }
+            buildoptions { "-stdlib=libc++" }
+            linkoptions  { "-stdlib=libc++" }
+    end
+    filter {}
 
     filter "system:windows"
         systemversion "latest"

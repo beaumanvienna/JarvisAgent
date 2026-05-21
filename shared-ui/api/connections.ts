@@ -1,3 +1,5 @@
+import { authFetch } from "@shared/api/auth";
+
 export type ConnectionEntry = {
   name: string;
   type: string;
@@ -43,7 +45,7 @@ function ensureOk(response: Response): void
 
 export async function listConnections(): Promise<ConnectionsListResponse>
 {
-  const response = await fetch("/api/connections");
+  const response = await authFetch("/api/connections");
   ensureOk(response);
   return (await response.json()) as ConnectionsListResponse;
 }
@@ -59,7 +61,7 @@ export type ConnectionCreateInput = {
 
 export async function createConnection(input: ConnectionCreateInput): Promise<ConnectionMutationResponse>
 {
-  const response = await fetch("/api/connections", {
+  const response = await authFetch("/api/connections", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),
@@ -77,7 +79,7 @@ export type ConnectionUpdateInput = {
 
 export async function updateConnection(name: string, input: ConnectionUpdateInput): Promise<ConnectionMutationResponse>
 {
-  const response = await fetch(`/api/connections/${encodeURIComponent(name)}`, {
+  const response = await authFetch(`/api/connections/${encodeURIComponent(name)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),
@@ -87,7 +89,7 @@ export async function updateConnection(name: string, input: ConnectionUpdateInpu
 
 export async function deleteConnection(name: string): Promise<ConnectionMutationResponse>
 {
-  const response = await fetch(`/api/connections/${encodeURIComponent(name)}`, {
+  const response = await authFetch(`/api/connections/${encodeURIComponent(name)}`, {
     method: "DELETE",
   });
   return (await response.json()) as ConnectionMutationResponse;
@@ -95,7 +97,7 @@ export async function deleteConnection(name: string): Promise<ConnectionMutation
 
 export async function testConnection(name: string): Promise<ConnectionTestResponse>
 {
-  const response = await fetch(`/api/connections/${encodeURIComponent(name)}/test`, {
+  const response = await authFetch(`/api/connections/${encodeURIComponent(name)}/test`, {
     method: "POST",
   });
   return (await response.json()) as ConnectionTestResponse;
@@ -103,7 +105,7 @@ export async function testConnection(name: string): Promise<ConnectionTestRespon
 
 export async function saveConnections(): Promise<ConnectionSaveResponse>
 {
-  const response = await fetch("/api/connections/save", {
+  const response = await authFetch("/api/connections/save", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
   });
@@ -119,6 +121,6 @@ export type OAuthAuthorizeResponse = {
 
 export async function authorizeConnection(name: string): Promise<OAuthAuthorizeResponse>
 {
-  const response = await fetch(`/api/connections/${encodeURIComponent(name)}/oauth/authorize`);
+  const response = await authFetch(`/api/connections/${encodeURIComponent(name)}/oauth/authorize`);
   return (await response.json()) as OAuthAuthorizeResponse;
 }

@@ -220,6 +220,18 @@ namespace AIAssistant
         using ReplyCallback = std::function<void(AiReply const&)>;
         [[nodiscard]] bool Submit(AiInvocation const& envelope, ReplyCallback onReply);
 
+        // Synchronous "Say hello" connectivity probe for a configured AI
+        // interface.  Used by the dashboard Test button + Engine's
+        // /api/ai/interfaces/<n>/test route.  Resolves the credential through
+        // KeyManager, builds the request body via the per-provider
+        // IRequestBuilder, and posts directly through CurlManager (NOT the
+        // async dispatcher — this is a one-shot operational verification, not
+        // a workflow ai_call).  Returns true on HTTP success; populates
+        // `outResponsePreview` with up to 200 chars of parsed content,
+        // `outError` on failure, and `outLatencyMs` for both paths.
+        [[nodiscard]] bool TestInterface(size_t interfaceIndex, std::string& outResponsePreview, std::string& outError,
+                                          int64_t& outLatencyMs);
+
         // Count of envelope-based dispatches currently in flight.  Consumed by the TUI/dashboard
         // "queries in flight" LED and the `/api/status` endpoint.
         size_t GetDirectDispatchInflight() const { return m_DirectDispatchInflight.load(); }

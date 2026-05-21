@@ -7,7 +7,7 @@ Closeout plan for the three tail-end groups tracked in `todo.md` before the alph
 - **Loose follow-ups** — 14 items (todo.md said 11; recount confirmed 14)
 - **KeyManager hardening tail** (carry-over from prior hand-off, never propagated into `todo.md`) — 4 items
 
-Total entering this plan: **22 items**. Closed at intake: **1** (§5i.3 — already fixed in code, todo.md was stale). Net actionable: **21 items**, organised into **14 sittings** ordered safety-first → cleanup → verification → tooling → post-1.0 tail.  **Sittings 1+2 closed 2026-05-18** — see `doc/misc/hand-off.md` for the migration record.  **12 sittings remain** as of 2026-05-18.
+Total entering this plan: **22 items**. Closed at intake: **1** (§5i.3 — already fixed in code, todo.md was stale). Net actionable: **21 items**, organised into **14 sittings** ordered safety-first → cleanup → verification → tooling → post-1.0 tail.  **Sittings 1+2 closed 2026-05-18**; **Sittings 3+4 closed 2026-05-18**; **Sitting 5 closed 2026-05-19**; **Sitting 6 closed 2026-05-19**; **Sitting 7a closed 2026-05-19** (with 7b + 7c carved out as follow-ups for the connector + parser sweeps) — see `doc/misc/hand-off.md` for the migration records.  **9 sittings remain** as of 2026-05-19 (Sittings 7b + 7c + 8 + 9 + 10 + 11 + 12 + 13 + 14).
 
 Predecessor plans (context, not dependencies):
 - `cybersec-hardening-dev-plan.md` — §18 four-domain hardening (S1–S4, complete)
@@ -49,7 +49,7 @@ Shared `EngineCore::AtomicWriteFile` helper landed in `engine/auxiliary/file.{h,
 
 ---
 
-### Sitting 3 — Restore broken `HandleWorkflowVersionRestorePost`
+### Sitting 3 — Restore broken `HandleWorkflowVersionRestorePost` — **closed 2026-05-18**
 
 **Problem.** `webServer.cpp:2206-2294` reads `.jcwf` version file as raw bytes via `std::ifstream` (line 2239) and passes those bytes to `WorkflowRegistry::SaveOrUpdateWorkflowFromJson` (line 2281), which expects plain JSON. Since `.jcwf` is always a zip container (per `feedback_no_legacy_jcwf`), restore fails immediately with `restore_failed: UNCLOSED_STRING`. Auth check, path validation, TOCTOU-safe read, and best-effort backup all run correctly — only the final write step is wrong.
 
@@ -65,7 +65,7 @@ Decision deferred to implementation time; (a) is the safer default unless regist
 
 ---
 
-### Sitting 4 — Studio/Engine §5i tail (handler move + WS extraction)
+### Sitting 4 — Studio/Engine §5i tail (handler move + WS extraction) — **closed 2026-05-18**
 
 Two §5i items, paired because both touch `webServer.cpp` and both reduce `#ifdef J9T_STUDIO` count.
 
@@ -79,48 +79,47 @@ Two §5i items, paired because both touch `webServer.cpp` and both reduce `#ifde
 
 ---
 
-### Sitting 5 — Editor MCP login parity (AdminLoginDialog lift to shared-ui)
+### Sitting 5 — Editor MCP login parity (AdminLoginDialog lift to shared-ui) — **closed 2026-05-19**
 
-**Problem (scope-corrected).** Editor already has `MasterPasswordDialog.tsx` (`workflow-editor/ui/src/components/MasterPasswordDialog.tsx`, wired through `App.tsx:290`) — master-password unlock is **done**. Real gap: editor has **no** `AdminLoginDialog` equivalent and never calls `POST /api/auth/login`. After a j9t restart that issued a new session cookie, the editor either silently fails on auth-required endpoints or shows a broken state.
-
-**Fix.** Lift `dashboard/ui/src/components/AdminLoginDialog.tsx` into `shared-ui/components/AdminLoginDialog.tsx`. Mount in `workflow-editor/ui/src/App.tsx` alongside the existing `MasterPasswordDialog` (same auth-gating spot). While here, also lift `MasterPasswordDialog` into `shared-ui/` (currently duplicated across dashboard + editor — already a drift target per `feedback_doc_routing`-style reasoning).
-
-**Acceptance.** Restart j9t → open editor → presented with login affordance + master-password prompt with identical UX to dashboard; error states (`no_password` / `wrong_password` / `no_keys_file` / gateway-injected identity headers) handled identically.
-
-**Effort.** Small (~half day). Pure frontend.
+`AdminLoginDialog` + `MasterPasswordDialog` (dashboard's richer version with bootstrap + admin-key issuance) + auth helpers (`authFetch`/`whoami`/`serverLogout` + `j9t-auth-required` event) lifted to `shared-ui/{components,api}/`.  Both dashboard and editor import from `@shared/...` now; in-app duplicates deleted per `feedback_no_legacy`.  Editor App.tsx gained mount-time whoami probe, WS-reconnect re-probe, j9t-auth-required listener, AdminLoginDialog mount, and a "Sign out" button in the top nav.  Shared `KeysUnlockResponse` extended with `admin_key`/`bootstrapped`/`mcp_keys_loaded` (matched dashboard shape); the duplicate `KeysStatusResponse`/`KeysUnlockResponse` in `dashboard/ui/src/types.ts` deleted.  See `doc/misc/hand-off.md` 2026-05-19 entry.
 
 ---
 
-### Sitting 6 — SigV4 clean design + MockTransport capture + Bedrock fixture
+### Sitting 6 — SigV4 clean design + MockTransport capture + Bedrock fixture — **closed 2026-05-19**
 
-**Problem.** SigV4 signer (`engine/curlWrapper/awsSigV4.cpp:438-446`) reads `secret_access_key` / `session_token` / `region` from `QueryData::m_Params` (a `std::map<std::string, std::string>`). `aiRequestPool::ResolveProviderParams:1041-1070` re-injects those fields from the typed `AwsCredential` into `m_Params` before dispatch. Vestigial: credential starts typed, gets untyped, gets re-typed at signing. Also materialises AWS secret as plain `std::string` (no `SecureString` zero-on-destruct) for the dispatch duration — heap residue.
-
-No real Bedrock provider configured today. Path is exercised only in `s3Connector.cpp:55` (outside AI dispatch). First real Bedrock customer would be the first integration test of the AI-dispatch path — unacceptable for SigV4's byte-level sensitivity.
-
-**Fix.** Three coupled changes in one sitting:
-1. **Thread typed credential through `QueryData`.** Add `std::shared_ptr<AwsCredential const> m_AwsCredential` to `QueryData` (and similar typed references for OAuth/ApiKey if the shape extends naturally). Drop the reinjection in `ResolveProviderParams`.
-2. **SigV4 signer reads from typed credential.** `awsSigV4.cpp::Apply()` switches from `m_Params.find("secret_access_key")` to `q.m_AwsCredential->m_SecretAccessKey.Get()` (still materialises briefly into the HMAC compute buffer, but bounded to signing call — paves for Sitting 10's broader SecureString-HTTP work).
-3. **MockTransport SigV4 capture+verify.** Extend MockTransport with a "captured Authorization headers" inspection API. Add Bedrock dispatch fixture under `test/dispatch/fixtures/` with a recorded request/response pair + signature verification against a known-good signature derived from fixed test credentials.
-
-**Acceptance.** `test/dispatch/test_bedrock_sigv4.py` runs end-to-end against MockTransport: signed Authorization header structure matches RFC 4231 + AWS Signature Version 4 expectations (canonical request, signed headers list order, signature hex match against test-credential-derived ground truth). Reinjection in `aiRequestPool.cpp` is gone. Build succeeds with all 5 targets (Studio Linux/Windows, Engine Linux/Windows, debug).
-
-**Effort.** Large (~1.5–2 days). Bulk is the MockTransport capability + fixture, not the refactor.
+Typed-credential pipeline landed end-to-end.  `QueryData::m_AwsCredential` (shared_ptr to a deep-copy snapshot taken under KeyManager's lock) replaces the `m_Params` stringy reinjection in `aiRequestPool::ResolveProviderParams`.  `awsSigV4.cpp::Apply()` reads from the typed credential and fail-closes if null on the SigV4 path.  MockTransport invokes the signer for SigV4-when-credential-populated and captures the resulting Authorization header into a process-global ring buffer (cap 32); `/api/debug/signals` exposes `last_mock_signatures` (debug-build only).  `QueryData::m_AmzDateOverride` threads an optional fixture-meta-driven timestamp into the signer so the KAT signature is byte-deterministic.  New `test/dispatch/test_bedrock_sigv4.py` follows the bootstrap-then-lock crypto-KAT pattern; locked signature is `1a6d6607ae8458641685888fa012825e591fb38ca4db178eab28d9a9b07ae021`.  All 4 binary configs (Studio Debug+Release, Engine Debug+Release) build clean; all 6 per-API mock-fault suites stayed green (6/6 each).  See `doc/misc/hand-off.md` 2026-05-19 Sitting 6 entry for the migration record.
 
 ---
 
-### Sitting 7 — API-shape sweep (`bool + std::string&` → `std::expected<T, Error>`)
+### Sitting 7a — C++23 toolchain bringup + typed error scaffolds (RegistryError pilot) — **closed 2026-05-19**
 
-**Problem.** 22 public methods across D1+D2 boundary use `bool DoX(..., std::string& errorMessage)`. Distribution: 12 cloud `TestConnection` overrides, 6 JSON parsers, 4 utilities (`RemoveWorkflow`, `ValidatePublicHttpEndpoint`, `ValidatePostgresParams`, adhoc). Caller-side: easy to forget the `if (!ok)` check, compiler can't enforce, error string is fundamentally for human display (substring-matching for programmatic dispatch is anti-pattern).
+`premake5.lua` bumped to `cppdialect "C++23"`; new `--clang` opt-in route through libc++ for local dev on clang ≤18 (libstdc++ `<expected>` requires `__cpp_concepts >= 202002L` but clang 18 reports 201907L — fixed in clang 19+; libc++ has its own `<expected>` without the guard).  `linux-workflow.yml::package-rpm` swapped to `gcc-toolset-13` + `scl enable` wrap (Rocky 9's system gcc 11.5 predates libstdc++'s `<expected>`).  All other CI targets (Linux/macOS/Windows/Arch/Flatpak/Docker amd64+arm64) ship `<expected>` natively at their current default compiler versions — verified empirically via Docker probes + GitHub runner-images repo (see `doc/misc/hand-off.md` 2026-05-19 Sitting 7a entry for the full matrix).
 
-**Fix.** Single sweep:
-1. Define `ConnectorError` / `ParserError` / `RegistryError` enums (one per subsystem; not a single mega-enum) with a `std::string m_Details` field for human messages.
-2. Convert each of the 22 methods to `std::expected<T, SubsystemError>` with `[[nodiscard]]`.
-3. Update all 50–80 caller sites. Compiler-enforced — any missed site fails to build.
-4. Add `feedback_*` memory entry: new error-returning APIs use `std::expected` from intake; the existing 22 are the last legacy tail.
+Three subsystem-scoped typed error scaffolds landed under their owning directories: `application/cloud/connectorError.{h,cpp}`, `application/workflow/parserError.{h,cpp}`, `application/workflow/registryError.{h,cpp}`.  Each has `enum class XxxErrorCode { ... UnknownError }` (no `default:` arm — `-Wswitch` catches missing variants), `struct XxxError { Code; std::string m_Details; static Make(...) }`, and `Describe(Code) -> std::string_view`.
 
-**Acceptance.** Build all 5 targets clean (no `bool + string&` pattern remaining in the named files); `assistant`, `dispatch`, and `auth` test suites all pass; representative negative paths (wrong credential type, malformed JSON, validation failure) emit the typed `Error` and the caller logs `error.m_Details` at ERROR level with run/workflow context.
+Pilot conversion: `WorkflowRegistry::RemoveWorkflow` (the smallest surface — 1 method, 1 caller in `webServer_studio.cpp`) flipped from `bool + std::string& errorMessage` to `[[nodiscard]] std::expected<void, RegistryError>` with `NotFound` / `PathRefused` / `IoError` codes.  Caller logs `Describe(err.m_Code)` + `err.m_Details` at WARN — typed category + human message.
 
-**Effort.** Large (~1 day). Mechanical but the caller-side fanout is the high-touch part.
+All 4 binary configs build clean.  Regression tests green: `test_mock_dispatch_hermetic`, `test_bedrock_sigv4` (SigV4 KAT signature unchanged), `test_api5_mock_errors` 6/6.
+
+### Sitting 7b — Connector subsystem sweep (deferred from 7)
+
+**Scope.** Convert `ICloudConnector::TestConnection` base virtual + 13 concrete overrides + `ConnectorHttp::ValidatePublicHttpEndpoint` + `PostgresConnector::ValidatePostgresParams` to `std::expected<void, ConnectorError>`.  ~190 return sites across the 13 connector `.cpp` files + the single caller in `webServer.cpp` + ~17 intra-connector callers of ValidatePublicHttpEndpoint.
+
+**Per-site work.**  Each `errorMessage = "X"; return false;` becomes `return std::unexpected(ConnectorError::Make(Code::Y, "X"));`.  Code selection per site requires reading context (InvalidConfig / CredentialMissing / CredentialInvalid / InvalidEndpoint / NetworkError / AuthFailure / HttpError / OAuthError / UnknownError — see `application/cloud/connectorError.h`).
+
+**Acceptance.** Build all 5 targets clean; the single REST caller in `webServer.cpp::HandleTestConnection` records typed `ConnectorErrorCode` on the circuit breaker (currently records only the boolean) and echoes `Describe(code)` + `m_Details` to the JSON response.
+
+**Effort.** Medium-large (~half-day to a day). Mechanical sweep; the typing-per-site is the careful part.
+
+### Sitting 7c — Workflow JSON parser sweep (deferred from 7)
+
+**Scope.** Convert the ~15 chained parser methods in `workflowJsonParser.{h,cpp}` + `workflowJsonParserDetails.{h,cpp}` (`ParseTask`, `ParseTaskInputs`, `ParseTaskOutputs`, `ParseTaskQueueBinding`, `ParseTaskEnvironment`, `ParseFilter`, `ParseFilterSource`, `ParseFilters`, `ParseTrigger`, `ParseTriggers`, `ParseDataflow`, `ParseSingleDataflow`, `ParseRetries`, `ParseDefaults`, `ParseControlNodes`, plus `RequireObject` / `RequireArray` shape helpers) to `std::expected<void, ParserError>`.
+
+**Why all-or-nothing.** Inter-method calling: `ParseTasks` calls `ParseTask` calls `ParseTaskInputs` etc.  Converting only some leaves awkward mixed-signature internal calls.  Single subsystem sweep.
+
+**Acceptance.** Build clean; JCWF parse rejections emit typed `ParserErrorCode` + the JSON-path-bearing `m_Details`; the existing 36-case fault batteries stay green (parsers don't surface in the parser-fault suite directly, but JCWF-shape regressions surface as the validator can't load a workflow).
+
+**Effort.** Medium (~half-day). Bulk is the 15-method sweep + ~20 intra-file caller updates.
 
 ---
 

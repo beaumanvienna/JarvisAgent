@@ -124,7 +124,7 @@ Creates an `ISSUE_<id>.txt` file in the queue directory under the given subsyste
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/debug/signals` | Live engine introspection — AI dispatcher, controllers, workflow runs, websocket, python pool, uptime, plus cloud-surface security counters (`cloud_dns_resolved_ip_rejections`, `cloud_endpoint_ssrf_rejections`, `cloud_credential_crlf_rejections`, `cloud_input_validation_rejections`, `cloud_postgres_invalid_sslmode_rejections`, `cloud_postgres_forbidden_param_rejections`).  Returns 404 on Release builds. |
+| GET | `/api/debug/signals` | Live engine introspection — AI dispatcher, controllers, workflow runs, websocket, python pool, uptime, plus cloud-surface security counters (`cloud_dns_resolved_ip_rejections`, `cloud_endpoint_ssrf_rejections`, `cloud_credential_crlf_rejections`, `cloud_input_validation_rejections`, `cloud_postgres_invalid_sslmode_rejections`, `cloud_postgres_forbidden_param_rejections`) and a `last_mock_signatures` array surfacing recent MockTransport auth-signer captures (FIFO ring, cap 32; each entry `{cancel_key, quota_key, headers}` — consumed by `test/dispatch/test_bedrock_sigv4.py` for the hermetic SigV4 KAT).  Returns 404 on Release builds. |
 | POST | `/api/debug/parse-rate-limit-headers` | Hermetic-test entry point. Body: `{interface_type, model, header_buffer, body, http_status}`. Calls `IRateLimitStrategy::Parse(...)` and returns the parsed `RateLimitObservation` plus `quota_key` + `initial_concurrency_probe`. Lets `test/dispatch/test_rate_limit_observation_parse.py` exercise every provider strategy without a live HTTP round-trip. Returns 404 on Release builds. |
 
 **Selected fields (rate-limit refactor):**
@@ -199,6 +199,9 @@ Healthy values during an active workflow: drains keep up with pings (one drain p
 | GET | `/api/workflows/<id>` | Both | Get the raw JCWF JSON for a specific workflow. |
 | PUT | `/api/workflows/<id>` | Studio | Update (overwrite) a workflow's JCWF file. |
 | DELETE | `/api/workflows/<id>` | Studio | Delete a workflow's JCWF file from disk. |
+| GET | `/api/workflows/<id>/versions` | Both | List version-history snapshots for a workflow (admin). |
+| GET | `/api/workflows/<id>/versions/<ts>` | Both | Read the raw bytes of a specific historical snapshot (admin). |
+| POST | `/api/workflows/<id>/versions/<ts>/restore` | Both | Restore a historical snapshot as the current workflow (admin). |
 
 ### GET /api/workflows
 **Response (200):**
@@ -274,6 +277,33 @@ Returns the cross-workflow sub-workflow dependency graph.
 ```json
 { "ok": true, "edges": [{ "parent": "parentId", "child": "childId" }] }
 ```
+
+### GET /api/workflows/\<id\>/versions
+Lists the on-disk snapshots under `workflows/.history/<id>/`.  Each PUT against a workflow auto-backs up the prior `.jcwf` zip into this directory with a UTC `YYYYMMDDTHHMMSS` timestamp filename; the same path is created on every successful restore (the pre-restore current state is preserved so a restore can itself be undone).
+**Response (200):**
+```json
+{
+  "ok": true,
+  "workflowId": "exampleMakefile4",
+  "count": 4,
+  "versions": [
+    { "timestamp": "20260519T040649", "sizeBytes": 1175 },
+    { "timestamp": "20260501T032250", "sizeBytes": 1175 }
+  ]
+}
+```
+Sorted newest first.  `sizeBytes` is the on-disk size of the `.jcwf` zip.
+
+### GET /api/workflows/\<id\>/versions/\<ts\>
+Streams the raw `.jcwf` zip bytes for a single snapshot.  The dashboard's "Restore" preview uses this to inspect a snapshot before committing.
+**Response (200):** Raw `.jcwf` content (Content-Type: application/octet-stream — the body is binary zip data).
+**Response (404):** `{ "ok": false, "error": "version_not_found", "message": "Version not found: 20990101T000000" }`
+
+### POST /api/workflows/\<id\>/versions/\<ts\>/restore
+Installs a historical snapshot as the current workflow.  Auto-backs up the existing `.jcwf` (timestamped with the current UTC time) before the install, so the restore is itself reversible via another restore call.  Validates the snapshot is a valid zip container (`PK\x03\x04` magic) before any disk write — a non-zip snapshot is rejected with 500 + `restore_failed` and the on-disk workflow is left unchanged.
+**Response (200):** `{ "ok": true, "workflowId": "exampleMakefile4", "restoredVersion": "20260421T050112" }`
+**Response (404):** Snapshot not found (same shape as version-GET).
+**Response (500):** Snapshot existed but the install failed (corrupt zip, path containment violation, etc.) — body carries `error: "restore_failed"` + `message`.
 
 ---
 
@@ -709,7 +739,7 @@ Manage the `"API interfaces"` array in `config.json` (in-memory + persist to dis
 | PUT | `/api/settings/ai-interfaces/<name>` | Update an existing AI interface (by name, URL-encoded). |
 | DELETE | `/api/settings/ai-interfaces/<name>` | Delete an AI interface (by name). |
 | POST | `/api/settings/ai-interfaces/save` | Persist in-memory AI interfaces to `config.json` on disk. |
-| POST | `/api/settings/ai-interfaces/test` | Ping-test a specific AI interface (direct curl, 10s timeout). |
+| POST | `/api/settings/ai-interfaces/test` | Ping-test a specific AI interface (direct curl, 30s timeout). Both editions. |
 | GET | `/api/settings/config` | Read current scalar config values + platform. |
 | PUT | `/api/settings/config` | Update scalar config fields and persist to `config.json`. |
 | POST | `/api/settings/config/reload` | Reload `config.json` from disk into memory. |
@@ -786,7 +816,7 @@ Writes the in-memory interfaces back to the `config.json` file by replacing the 
 ```
 
 ### POST /api/settings/ai-interfaces/test
-Sends a minimal prompt ("Say hello") directly to the specified AI interface via curl with a **10-second timeout** — a lightweight connectivity and authentication check.
+Sends a minimal prompt ("Say hello") directly to the specified AI interface via curl with a **30-second timeout** — a lightweight connectivity and authentication check.  Available in both editions: Engine admins use it for operational verification of provider config (no Studio install required).  Backed by `AiRequestPool::TestInterface` (a synchronous probe distinct from the async dispatcher path used by `ai_call` tasks).
 
 **Request body:**
 ```json
@@ -1250,15 +1280,22 @@ Deploy behind an API gateway on a private subnet. See `doc/cyber security.md` fo
 
 ## WebSocket — `/ws` — Both editions (core messages); Studio only (AI messages)
 
-A persistent WebSocket connection for real-time communication.
+A persistent WebSocket connection for real-time communication.  Auth is enforced at the upgrade handshake (`.onaccept`): an unauthenticated upgrade is rejected with `ws_upgrade_rejected` and the connection never reaches `.onmessage`.  The connection's role (admin / operator / viewer) is pinned at upgrade time and re-checked inside admin-only message handlers (`ai-write-scripts`).
+
+The Studio assistant chat surface lives on a separate route, `/ws/assistant`, handled by `AssistantController` — not documented here.
 
 ### Client → Server Messages
 
-| Type | Fields | Description |
-|------|--------|-------------|
-| `chat` | `subsystem`, `message` | Submit a chat message (same as POST /api/chat but via WS). Creates a `PROB_<id>_<ts>.txt` file. |
-| `workflow-runs-request` | — | Request the current workflow runs snapshot. Sent once on connect; server pushes updates automatically thereafter. |
-| `ping` | — | Heartbeat. The server's `DrainPendingBroadcasts` fires only inside the `onmessage` handler, so passive clients receive nothing.  A periodic `{"type":"ping"}` (the dashboard sends one every ~300 ms) flushes the broadcast queue.  Server returns no payload for `ping` itself. |
+| Type | Fields | Edition | Description |
+|------|--------|---------|-------------|
+| `ping` | — | Both | Heartbeat. The server's `DrainPendingBroadcasts` fires only inside the `onmessage` handler, so passive clients receive nothing.  A periodic `{"type":"ping"}` (the dashboard sends one every ~300 ms) flushes the broadcast queue.  Server returns no payload for `ping` itself. |
+| `workflow-runs-request` | — | Both | Request the current workflow runs snapshot. Sent once on connect; server pushes updates automatically thereafter. |
+| `ai-explain-jcwf` | `jcwf` | Studio | Ask the AI assistant to explain a JCWF JSON body.  Response streams back as broadcast messages from `AiJcwfService::ExplainAsync`. |
+| `ai-generate-jcwf` | `prompt`, `currentJcwf` (optional) | Studio | Drive the AI JCWF generation pipeline (decompose → generate → review).  Response streams back as broadcast messages from `AiJcwfService::GenerateAsync`. |
+| `ai-write-scripts` | `scripts[]` (each: `path`, `content`, `executable`) | Studio (admin only) | Write a batch of generated scripts under `scripts/` via the atomic-write helper.  Role re-checked inside the handler — operator/viewer connections are rejected with `forbidden`.  Paths must start with `scripts/` and stay inside it after `lexically_normal()`. |
+| `ai-fix-failed-script` | `scriptPath`, `stderr`, `taskType` | Studio | Ask the AI assistant to propose a fix for a script that failed at runtime.  Response streams back as `ai-fix-script-progress` / `ai-fix-script-result` broadcasts. |
+
+The Studio AI message types route through `WebServer::HandleAssistantWebSocketMessage` (declared in `webServer.h`, implemented in `webServer_studio.cpp`; Engine impl in `webServer_engine.cpp` returns `false` so the dispatch falls through to the "unknown type" arm).  Studio-only field references in the routed code stay confined to the edition-specific source files; the shared `webServer.cpp` has no `#ifdef J9T_STUDIO` around the dispatch site.
 
 ### Server → Client Messages
 
