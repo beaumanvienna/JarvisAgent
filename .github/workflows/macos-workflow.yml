@@ -44,9 +44,13 @@ jobs:
           echo "PKG_CONFIG_PATH=$(brew --prefix libpq)/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> $GITHUB_ENV
 
       - name: Install Premake5
-        uses: abel0b/setup-premake@v2
-        with:
-          version: "5.0.0-beta8"
+        run: |
+          cd /tmp
+          curl -sL -o premake.tar.gz https://github.com/premake/premake-core/releases/download/v5.0.0-beta8/premake-5.0.0-beta8-macosx.tar.gz
+          tar -xzf premake.tar.gz
+          sudo mv premake5 /usr/local/bin/
+          sudo chmod +x /usr/local/bin/premake5
+          premake5 --version
 
       - name: Extract version
         id: version

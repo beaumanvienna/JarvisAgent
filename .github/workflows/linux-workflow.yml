@@ -50,9 +50,13 @@ jobs:
         run: pipx install "markitdown[all]"
 
       - name: Install Premake5
-        uses: abel0b/setup-premake@v2
-        with:
-          version: "5.0.0-beta8"
+        run: |
+          cd /tmp
+          wget -q https://github.com/premake/premake-core/releases/download/v5.0.0-beta8/premake-5.0.0-beta8-linux.tar.gz
+          tar -xzf premake-5.0.0-beta8-linux.tar.gz
+          sudo mv premake5 /usr/local/bin/
+          sudo chmod +x /usr/local/bin/premake5
+          premake5 --version
 
       - name: Set parallel build flags
         run: echo "MAKEFLAGS=-j$(nproc)" >> $GITHUB_ENV
@@ -193,13 +197,15 @@ jobs:
           dnf module enable -y nodejs:20
           dnf install -y nodejs npm
 
-      - name: Install Premake5
+      - name: Install Premake5 (build from source — Rocky 9's glibc 2.34 can't run the upstream binary built against glibc 2.38)
         run: |
           cd /tmp
-          wget -q https://github.com/premake/premake-core/releases/download/v5.0.0-beta8/premake-5.0.0-beta8-linux.tar.gz
-          tar -xzf premake-5.0.0-beta8-linux.tar.gz
-          mv premake5 /usr/local/bin/
+          git clone --depth 1 --branch v5.0.0-beta8 https://github.com/premake/premake-core.git
+          cd premake-core
+          make -f Bootstrap.mak linux
+          mv bin/release/premake5 /usr/local/bin/
           chmod +x /usr/local/bin/premake5
+          premake5 --version
 
       - name: Checkout repository
         uses: actions/checkout@v4
