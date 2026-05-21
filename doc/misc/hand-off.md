@@ -15,6 +15,89 @@ Keep entries self-contained — a fresh-context Claude should be able to read ju
 
 ---
 
+## 2026-05-20 (Sittings 3–7a regression triage + CI bringup + doc audit + JCWF template-prereq bug) → next session
+
+Three-act session.  Act 1: ran the full test matrix on Studio Release + Studio Debug against the Sittings 3+4+5+5fu+6+7a working tree and closed out the 10 dispatch failures Sitting 7a flagged for triage — **zero real C++ regressions**, all explained as test-harness issues.  Act 2: JC committed Sittings 3-7a + this-session follow-ups (one big commit), CI lit up red across every target on the C++23 cppdialect bump; bumped premake5 in CI from `v5.0.0-beta2` to `v5.0.0-beta8` (the minimum tag that accepts `cppdialect "C++23"`), then resolved two follow-on CI breakages from beta8 quirks (exec-bit missing in tarball + Rocky 9's glibc 2.34 vs beta8's glibc-2.38 binary).  Act 3: doc audit fixed three drift items in user-facing docs; bug surfaced in `WorkflowDefinition::m_RequiredAiProviders` (template-unaware) and worked around at the JCWF layer.
+
+Three pushes landed today.  CI was re-running at end of session.
+
+### What landed (committed across 3 pushes)
+
+| Theme | Files | Why |
+|---|---|---|
+| **Sittings 3–7a bundle (push 1)** | Sittings 3+4+5+5fu+6+7a code + doc sweeps as a single commit | See `2026-05-19 (Sitting 7a)` entry below for the full breakdown.  Verified clean across the full local test matrix before push.  Test-config + run_tests.py follow-ups from this session were rolled into the same commit. |
+| **CI premake5 bump (push 2)** | `.github/workflows/{linux,macos,windows}-workflow.yml`, `Dockerfile` (5 sites total) | All 6 CI targets failed with `invalid value 'C++23' for cppdialect` because they pinned `premake5 v5.0.0-beta2` which maxes at C++20.  Bumped every site to `v5.0.0-beta8` (Jan 2026 — first stable tag accepting `"C++23"`).  Verified locally: beta8 emits `-std=c++23` for `cppdialect "C++23"`. |
+| **CI beta8-quirks fixes (push 3)** | `.github/workflows/linux-workflow.yml` (build-linux + package-rpm), `.github/workflows/macos-workflow.yml` (build-macos) | Beta8 introduced two regressions vs beta2: (a) tarballs ship without the exec bit (`-rw-rw-rw-`), so `abel0b/setup-premake@v2` action fails with `Permission denied`; (b) upstream Linux binary is built against glibc 2.38, Rocky 9 ships 2.34.  Fix (a): replaced the action with direct `wget + tar + sudo chmod +x` on build-linux + build-macos.  Fix (b): package-rpm now builds premake5 from source via `git clone --branch v5.0.0-beta8 + Bootstrap.mak linux`, same pattern Dockerfile already uses.  Every step ends with `premake5 --version` so future regressions surface earlier. |
+| **Test-config glob updates** | `test/test_config.json` (5 globs) | Structured-output default flip means `aiCarMaintenancePipeline/01_classifyQuestion` and `goKartComplianceCheck/01_assessRequirement` now write `*.output.json`, not `*.output.txt`; and `vehicleTroubleshootingGuide` writes `code{244,250,301}.output.json` not `.output.md`.  Re-run on the live server: all three workflows now PASS. |
+| **test/run_tests.py auth wiring** | `test/run_tests.py:89-99` (3 lines added) | The script's `requests.Session()` had no auth wiring; every mutating endpoint hit 401 (post-§5i auth tightening).  Added `os.environ.get("J9T_TOKEN")` pickup that sets `Authorization: Bearer ...` on the session. |
+| **JCWF vehicleTroubleshootingGuide fix** | `workflows/vehicleTroubleshootingGuide/vehicleTroubleshootingGuide.json`, `workflows/vehicleTroubleshootingGuide.jcwf`, `example/workflows/vehicleTroubleshootingGuide.jcwf` | Removed `"provider": "{{defaults.ai.provider}}"` + `"model": "{{defaults.ai.model}}"` overrides from each ai_call task's `params` block (kept `"mode": "one_shot"`).  Tasks now fall back to `global.json::defaults.ai` (`api.openai.com/gpt-4.1-mini/API1` / `gpt-4.1-mini`).  Repacked both the runtime + upstream JCWF zips. |
+| **Doc audit (3 drift items)** | `doc/jarvisagent.md` (Editions table + cross-ref), `DEVELOPMENT.md` (premake5 clone pin) | (1) Editions table's "Authentication: None / RBAC: N/A / Rate limiting: None / Audit logging: None / Request body limit: None" Studio column was stale post-§5i — replaced with a "Shared security posture (both editions)" paragraph + cross-refs; the Studio↔Engine deltas are now the 4 surface rows (Workflow CRUD / AI assistant / JCWF gen / Attack surface).  (2) "see README.md and packaging/packaging.md" cross-ref rerouted to `INSTALL.md` (pre-built) + `DEVELOPMENT.md` (from source).  (3) DEVELOPMENT.md's `git clone https://github.com/premake/premake-core` pinned to `--depth 1 --branch v5.0.0-beta8` with a "Why pinned" callout. |
+| **README.md C++23 mention** | `README.md` line 18 (one word: "native C++" → "native C++23") | One-word addition surfacing the C++ standard at the project intro level.  Smallest possible addition. |
+| **`feedback_temp_folders` memory update** | `~/.claude/projects/.../memory/feedback_temp_folders.md` (+ MEMORY.md index line) | Pinned exactly two scratch roots: `log/` (in-repo, gitignored) and `/tmp/claude/`.  JC corrected me mid-session after I created `test/_runs/` — "use log as temp dir or /tmp/claude".  No more improvising ad-hoc paths. |
+
+### What's verified
+
+| Check | Result |
+|---|---|
+| **Studio Release dispatch suite (31 tests)** | 19 PASS / 12 FAIL.  All 12 failures are 404s from debug-only endpoints (`/api/debug/{signals,mock-ai-response,parse-rate-limit-headers,reset-dispatcher-state,recent-submissions}`) — by design.  Zero unexpected failures. |
+| **Studio Debug dispatch suite (31 tests, clean boot)** | 29 PASS / 1 FAIL / 1 TIMEOUT.  `test_tui_stress_malformed_utf8` TIMEOUT at 360s wrapper (internal 180s deadline insufficient on Debug for 98×7 dispatches under AIMD throttling); its leftover in-flight runs cascaded into `test_ws_ai_call_failed_payload` 244s/0-of-8 (state leakage from preceding timeout, not code).  **Re-ran both on a fresh Debug boot in isolation: stress_heavy 21s PASS, malformed_utf8 11s PASS, ws_ai_call_failed_payload 20s 8/8 PASS.**  Confirms isolation/calibration, not code. |
+| **Studio Release extras** | test_edition_contract 49/49 PASS, test_auth_mcp 100/100 PASS (no --with-ai); test_assistant_with_ai 60/70 (10 AI-wording flakes, not regressions); test_run_tests.py 10/10 PASS after the glob + provider-override fixes. |
+| **Studio Debug extras** | test_edition_contract 49/49 PASS, test_auth_mcp 104/104 PASS (--with-ai dispatch case added); test_assistant_with_ai 66/70 (4 AI-wording flakes); test_run_tests.py 10/10 PASS. |
+| **Bedrock SigV4 KAT signature** | `1a6d660…07ae021` — unchanged across both binaries.  Sittings 6+7a typed-credential threading is intact. |
+| **CI status at session end** | Pushes 1 + 2 + 3 in flight; results visible ~30 min after session close.  Push 3 changes should resolve build-linux + build-macos + package-rpm; Windows + Docker + package-arch should already be fine (each handles premake5 install in a way the beta8 quirks don't break). |
+
+### Triage of the 10 Sitting 7a Debug failures
+
+Sitting 7a's hand-off ranked 4 hypotheses for what caused the 10 dispatch failures.  This session's clean-boot re-run validates the top two and rules out the bottom two:
+
+- ✅ **Hypothesis #1 (Debug perf cliff):** explains the 9 ReadTimeout/124 failures.  Sitting 7a's outer `timeout 60` wrapper was too tight; the per-API mock-error batteries take 15–18s on **both** Release and Debug with a 240s wrapper.  Six tests went from "60s exit=124" to "16s PASS".
+- ✅ **Hypothesis #2 (state leakage from earlier `pkill`):** explains the one real assertion failure (`test_curlopt_timeout_fires` → `timeout_ms=101950 expected=1000`).  Clean Debug boot shows the rate_limit override is applied correctly (`timeout_ms=1000 quota_key='localhost|gpt-4o'` → 3s PASS).
+- ❌ **Hypothesis #3 (Sitting 7a code regression):** **ruled out**.  C++23 + clang + libc++ + typed-credential SigV4 + `RemoveWorkflow` `std::expected` conversion is clean across the full matrix.
+- ❌ **Hypothesis #4 (latent `test_curlopt_timeout_fires` bug):** **ruled out** — was state leakage, not a latent bug.
+
+Full per-test breakdown lives at `/tmp/claude/jarvis-tests/REPORT.md`.  Per-test logs at `/tmp/claude/jarvis-tests/{release,debug}/test_*.log`.
+
+### Bug surfaced (not fixed): `WorkflowDefinition::m_RequiredAiProviders` is template-unaware
+
+Diagnosed mid-session.  `vehicleTroubleshootingGuide` was returning HTTP 500 `ai_prereq_missing` on every run with this exact ERROR line:
+
+```
+Blocked workflow run 'vehicleTroubleshootingGuide': ai_call task requires
+provider '{{defaults.ai.provider}}' (key '{{defaults.ai.provider}}') which is not configured
+```
+
+The interface name `{{defaults.ai.provider}}` is the **raw template string** — the prereq check records `params.provider` at workflow-load time without expanding `{{defaults.ai.X}}` references.  The on-disk JCWF had `"provider": "{{defaults.ai.provider}}"` + `"model": "{{defaults.ai.model}}"` in each ai_call task's `params`, intending to redirect to `global.json::defaults.ai`'s values (`api.openai.com/gpt-4.1-mini/API1`).  The runtime expansion DOES happen at dispatch time (so the AI call itself would succeed) but the upstream **prereq check** sees the raw template and fails to match any real interface.
+
+`GET /api/workflows` confirms it: the registry record reads `"interface_names": ["{{defaults.ai.provider}}"]` (one entry — the raw template).
+
+**Workaround applied this session:** removed the provider/model overrides from every ai_call task in vehicleTroubleshootingGuide.jcwf so they fall back to `defaults.ai` cleanly.  `interface_names` after reload reads `[""]` (single empty string = "task didn't pin a provider, uses system default") and the prereq check passes.
+
+**Proper fix (deferred to next session, fits as a Sitting 7b-adjacent task):** in `WorkflowDefinition.cpp` (or wherever `m_RequiredAiProviders` is populated from the parsed JCWF), either (a) expand `{{defaults.X}}` template variables against `global.json::defaults` at load time, OR (b) skip the prereq check for any provider string containing `{{...}}` (let dispatch-time expansion handle it).  Option (b) is the lower-risk single-call-site change; option (a) is structurally cleaner but touches more.  Either way, the C++ test for this is straightforward (a JCWF using `{{defaults.ai.provider}}` should run cleanly without 500).
+
+### Open items / next-session candidates
+
+1. **Watch the CI run from push 3.**  3 failing jobs (build-linux + build-macos + package-rpm) should go green.  If anything fails, look at the trailing `premake5 --version` line in each Install Premake5 step.
+2. **Fix the `m_RequiredAiProviders` template-unaware bug** (see above).  Single-file C++ change; ~30 minutes; adds a guard for `params.provider` containing `{{` before adding it to the required-providers set.
+3. **Sitting 7b — connector subsystem `std::expected` sweep.**  ~190 return sites across 13 cloud-connector `TestConnection` overrides + `ValidatePublicHttpEndpoint` + `ValidatePostgresParams`.  Mechanical sweep, scaffold ready in `application/cloud/connectorError.h`.  See `pre-1_0_follow-ups.md`.
+4. **Sitting 7c — workflow JSON parser sweep** (after 7b).  ~15 chained methods.
+5. **AI-wording flakiness in `test_assistant_with_ai`** (10/70 Release, 4/70 Debug).  Wording / tool-choice variance, not behavioural — but worth tightening the assertion contracts at some point.
+6. **`test_tui_stress_malformed_utf8` Debug calibration.**  Internal 180s deadline insufficient on Debug for 98×7 dispatches; doesn't clean up on timeout → cascades.  Either Debug-aware multiplier on the internal deadline, or `POST /api/debug/reset-dispatcher-state` at start, or both.
+
+### Gotchas next-session-Claude should know
+
+- **CI is now pinned to premake5 v5.0.0-beta8 everywhere.**  beta8 is the minimum that accepts `cppdialect "C++23"`; beta2 (which most distro packages ship) errors with `invalid value 'C++23' for cppdialect`.  Distro premake5 binaries are also likely too old — if you're debugging a fresh-clone build, check `premake5 --version` first.
+- **The upstream beta8 Linux + macOS tarballs ship without the executable bit** (`-rw-rw-rw-`).  Every CI Install-Premake5 step on these platforms does explicit `chmod +x` after extraction.  The `abel0b/setup-premake@v2` action does NOT chmod and silently produces `Permission denied` at the first invocation — we replaced the action with direct `wget/curl + tar + chmod` everywhere.
+- **The upstream beta8 Linux binary requires glibc 2.38.**  Rocky 9 ships glibc 2.34, so package-rpm builds premake5 from source via `git clone --branch v5.0.0-beta8 + Bootstrap.mak linux`.  Same pattern Dockerfile already used (covers arm64 too).  If a future CI target adds a Linux distro older than Ubuntu 24.04 / Fedora 39, expect the same glibc trap.
+- **JCWFs that use `{{defaults.ai.provider}}` in `params.provider` will fail with `ai_prereq_missing` until the C++ bug is fixed.**  Workaround at the JCWF layer: remove the override and let `global.json::defaults.ai` apply.  Already done for `vehicleTroubleshootingGuide`; check any new JCWFs for the same pattern before they hit the prereq gate.
+- **`test/run_tests.py` now reads `$J9T_TOKEN`.**  Every mutating endpoint requires auth post-§5i; the script was 401'ing on every call before the patch.  If you write a new CLI test against the j9t REST API, follow the same pattern (`session.headers["Authorization"] = f"Bearer {os.environ.get('J9T_TOKEN','')}"`).
+- **`test/test_config.json` expected_artifacts globs need to track structured-output flips.**  Five workflows now write `*.output.json` not `*.output.txt`; same trap applies to any workflow that flips from free-text to structured output post-1.0.  Watch for `artifacts_failed` after a `params.mode` change.
+- **Two scratch roots only: `log/` (gitignored, in-repo) and `/tmp/claude/`.**  No ad-hoc `/tmp/<name>/` paths.  Per `feedback_temp_folders` (tightened this session).
+- **`example/workflows/vehicleTroubleshootingGuide.jcwf` was repacked**.  If JC wants to revert the provider-override removal (e.g. to test the in-progress C++ fix), the previous JCWF is recoverable from git history (`git show HEAD~N -- example/workflows/vehicleTroubleshootingGuide.jcwf > old.jcwf`).
+- **Working tree at session end:** one uncommitted change — `README.md` line 18 ("native C++" → "native C++23").  Single-word doc tweak; not yet committed.
+- **j9t status at session end:** Studio Debug was running (JC started it manually for the post-fix stress-test rerun); should be shut down via `POST /api/shutdown` before any next-session build that touches a shared header.
+
+---
+
 ## 2026-05-19 (Sitting 7a — C++23 toolchain bringup + typed error scaffolds + `RemoveWorkflow` pilot) → next session
 
 Project moved to C++23 (`cppdialect "C++23"` in premake5.lua) with native `std::expected` support across the entire build matrix.  Three subsystem-scoped typed error scaffolds landed (`ConnectorError`, `ParserError`, `RegistryError`) following the new "API shape" pattern from `pre-1_0_follow-ups.md` Sitting 7.  Pilot conversion: `WorkflowRegistry::RemoveWorkflow` flipped from `bool + std::string& errorMessage` to `[[nodiscard]] std::expected<void, RegistryError>` — 1 method + 1 caller updated, builds clean, regression tests stay green.  The bigger surfaces (13 cloud-connector `TestConnection` overrides at ~190 return sites, ~15 chained workflow JSON parsers) carved out as **Sitting 7b** + **Sitting 7c** in the plan doc — the all-or-nothing mechanics of each subsystem sweep didn't fit a same-day continuation.

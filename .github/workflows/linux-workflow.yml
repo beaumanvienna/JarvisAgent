@@ -188,11 +188,15 @@ jobs:
           # libstdc++.so.6 at runtime with a small libstdc++_nonshared.a
           # embedded for the new symbols, so the resulting RPM runs on any
           # stock Rocky 9 without needing gcc-toolset installed.
+          # Stock `gcc` is also needed: the premake5 Bootstrap.mak (next
+          # step) invokes `cc`, which gcc-toolset-13 does not provide on
+          # the default PATH (it lives behind `scl enable`).
           dnf install -y --allowerasing --nobest \
+            gcc gcc-c++ \
             gcc-toolset-13-gcc gcc-toolset-13-gcc-c++ \
             make git wget tar \
             python3 python3-devel python3-pip \
-            zlib-devel libpq-devel rpm-build
+            zlib-devel libpq-devel libuuid-devel rpm-build
           dnf module reset -y nodejs
           dnf module enable -y nodejs:20
           dnf install -y nodejs npm

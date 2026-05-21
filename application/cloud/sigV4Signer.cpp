@@ -30,6 +30,8 @@
 #include <ctime>
 #include <iomanip>
 #include <sstream>
+#include <utility>
+#include <vector>
 
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
