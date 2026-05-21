@@ -65,18 +65,15 @@ JarvisAgent builds as two distinct binaries selected at build time (see [Install
 | **Binary** | `jarvisAgent-studio` | `jarvisAgent-engine` |
 | **Purpose** | Developer workstation | Production server |
 | **Network exposure** | Localhost only | LAN / internet |
-| **Authentication** | None | Bearer token (admin), HMAC-SHA256 (webhooks) |
-| **RBAC** | N/A | 3 roles: admin, operator, viewer |
-| **Rate limiting** | None | Per-IP token bucket (100 req/min, burst 20) |
-| **Audit logging** | None | `log/security.txt` (rotating, 10 MB x 5) |
-| **Request body limit** | None | Configurable (default 10 MB) |
 | **Workflow CRUD** | Full | Not available (compile-time removed) |
 | **AI assistant** | Full | Not available (compile-time removed) |
 | **AI JCWF generation** | Full | Not available (compile-time removed) |
 | **Attack surface** | Full feature set | Minimal — runtime + monitoring only |
 
+**Shared security posture (both editions):** MCP API key + session-cookie + optional gateway-header auth funnel; 3-role RBAC (`admin`/`operator`/`viewer`); per-IP rate limiting (100 req/min, burst 20); failed-auth lockout (10 → 15-min IP ban); audit log at `log/security.txt` (rotating, 10 MB × 5); configurable request body cap (default 10 MB); CSP / X-Frame-Options / HSTS response headers. The anonymous-localhost bypass that Studio used pre-§5i was removed in 2026-05; every endpoint now goes through the same auth gate regardless of edition. See [Security](#security) and [doc/api-endpoints.md](api-endpoints.md) Authentication.
+
 Studio is designed for single-developer use on a local machine. Engine is designed for
-production deployments behind an API gateway. See [Security](#security) for details.
+production deployments behind an API gateway. The auth/RBAC/audit machinery is the same — Engine just drops the editing surface so the attack surface is smaller. See [Security](#security) for details.
 
 ## OPTIONS
 
@@ -104,8 +101,9 @@ JarvisAgent is available as pre-built packages for all major platforms:
 | **Windows** | MSI installer, portable ZIP |
 | **Docker** | `ghcr.io/beaumanvienna/jarvisagent` |
 
-For building from source and detailed install/uninstall instructions for each package format,
-see the project **README.md** and **packaging/packaging.md**.
+For detailed install/uninstall instructions for each package format, see **[INSTALL.md](../INSTALL.md)**.
+To build from source, see **[DEVELOPMENT.md](../DEVELOPMENT.md)**. Packaging internals live in
+**[packaging/packaging.md](../packaging/packaging.md)**.
 
 ### Shell completions
 

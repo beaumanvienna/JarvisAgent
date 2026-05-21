@@ -54,16 +54,18 @@ sudo apt install -y build-essential pkg-config \
                     zlib1g-dev libpq-dev nodejs npm
 ```
 
-Premake5 — clone, bootstrap, install:
+Premake5 — clone the `v5.0.0-beta8` tag, bootstrap, install:
 
 ```bash
-git clone https://github.com/premake/premake-core
+git clone --depth 1 --branch v5.0.0-beta8 https://github.com/premake/premake-core
 cd premake-core
 make -f Bootstrap.mak linux
 sudo cp bin/release/premake5 /usr/bin/
 ```
 
-Other distros (Fedora / RHEL / Arch / …): install the equivalent packages from the list above, then build premake5 the same way (Fedora needs `libuuid-devel` for the Bootstrap compile).
+> **Why pinned:** `v5.0.0-beta8` is the first stable tag that accepts `cppdialect "C++23"`. Older tags (incl. `v5.0.0-beta2` and most Linux distro packages) error out with `invalid value 'C++23' for cppdialect`. CI is pinned to the same tag across Linux / macOS / Windows / Docker.
+
+Other distros (Fedora / RHEL / Arch / …): install the equivalent packages from the list above, then build premake5 the same way from the same tag (Fedora needs `libuuid-devel` for the Bootstrap compile).
 
 ### C++23 toolchain notes
 

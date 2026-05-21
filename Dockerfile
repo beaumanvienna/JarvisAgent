@@ -37,8 +37,8 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # premake5 — built from source so the same recipe works on both linux/amd64
-# and linux/arm64 (no official arm64 prebuilt in the v5.0.0-beta2 release).
-RUN git clone --depth 1 --branch v5.0.0-beta2 https://github.com/premake/premake-core.git /tmp/premake-core && \
+# and linux/arm64 (no official arm64 prebuilt in the v5.0.0-beta8 release).
+RUN git clone --depth 1 --branch v5.0.0-beta8 https://github.com/premake/premake-core.git /tmp/premake-core && \
     cd /tmp/premake-core && \
     make -f Bootstrap.mak linux && \
     cp bin/release/premake5 /usr/local/bin/ && \

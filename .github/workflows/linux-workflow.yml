@@ -52,7 +52,7 @@ jobs:
       - name: Install Premake5
         uses: abel0b/setup-premake@v2
         with:
-          version: "5.0.0-beta2"
+          version: "5.0.0-beta8"
 
       - name: Set parallel build flags
         run: echo "MAKEFLAGS=-j$(nproc)" >> $GITHUB_ENV
@@ -196,8 +196,8 @@ jobs:
       - name: Install Premake5
         run: |
           cd /tmp
-          wget -q https://github.com/premake/premake-core/releases/download/v5.0.0-beta2/premake-5.0.0-beta2-linux.tar.gz
-          tar -xzf premake-5.0.0-beta2-linux.tar.gz
+          wget -q https://github.com/premake/premake-core/releases/download/v5.0.0-beta8/premake-5.0.0-beta8-linux.tar.gz
+          tar -xzf premake-5.0.0-beta8-linux.tar.gz
           mv premake5 /usr/local/bin/
           chmod +x /usr/local/bin/premake5
 
@@ -240,8 +240,8 @@ jobs:
       - name: Install Premake5
         run: |
           cd /tmp
-          wget -q https://github.com/premake/premake-core/releases/download/v5.0.0-beta2/premake-5.0.0-beta2-linux.tar.gz
-          tar -xzf premake-5.0.0-beta2-linux.tar.gz
+          wget -q https://github.com/premake/premake-core/releases/download/v5.0.0-beta8/premake-5.0.0-beta8-linux.tar.gz
+          tar -xzf premake-5.0.0-beta8-linux.tar.gz
           mv premake5 /usr/local/bin/
           chmod +x /usr/local/bin/premake5
 
