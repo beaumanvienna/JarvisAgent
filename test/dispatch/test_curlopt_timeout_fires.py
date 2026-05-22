@@ -38,10 +38,12 @@ PROVIDER_NAME  = "tier_b_timeout_provider"
 INTERFACE_NAME = "tier_b_timeout_iface"
 
 # Tight budget so curl aborts before the mock's 5s delay.
-# Formula: ((est_in/1000)*0 + (4096/1000)*0 + 0.5) * 2.0 = 1.0s, clamped to [1, 5] = 1.0s.
+# Formula: ((est_in/1000)*0 + (4096/1000)*0 + 0.5) * 1 * 2.0 = 1.0s, clamped to [1, 5] = 1.0s.
+# max_concurrency=1 keeps the formula's queue-depth multiplier from inflating the
+# budget — this test deliberately exercises the tight-timeout corner.
 RATE_LIMIT = {
-    "initial_concurrency_probe": 4,
-    "max_concurrency": 16,
+    "initial_concurrency_probe": 1,
+    "max_concurrency": 1,
     "max_retries_429": 0,
     "max_retries_transient": 0,
     "base_retry_ms": 100,
@@ -55,7 +57,7 @@ RATE_LIMIT = {
     },
 }
 
-EXPECTED_TIMEOUT_MS = 1000  # 0.5 * 2.0 = 1.0s; min/max clamp accepts as-is.
+EXPECTED_TIMEOUT_MS = 1000  # 0.5 * 1 (cap) * 2.0 = 1.0s; min/max clamp accepts as-is.
 MOCK_DELAY_MS       = 5000  # 5x longer than the budget — guaranteed to trip.
 
 

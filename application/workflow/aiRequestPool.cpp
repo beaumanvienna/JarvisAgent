@@ -1385,12 +1385,24 @@ namespace AIAssistant
             double seconds = (static_cast<double>(estimatedInputTokens) / 1000.0) * budget.m_Per1kInputTokenSeconds
                            + (static_cast<double>(maxOutTokens)        / 1000.0) * budget.m_Per1kOutputTokenSeconds
                            + budget.m_FixedOverheadSeconds;
+            // Scale by the interface's configured concurrency ceiling — covers
+            // worst-case queue depth on serializing backends (ollama / local
+            // LLMs) where N inflight requests take ~N× single-stream time per
+            // task.  Harmless over-allocation on truly-parallel backends
+            // (OpenAI / Anthropic / etc.) — the only side effect there is
+            // slower detection of genuinely hung requests, which is rare and
+            // worth trading for never-timeouts-from-contention reliability.
+            // Removes the user-visible knob "safety_margin_factor doesn't
+            // scale with concurrency" that previously required manual tuning.
+            int const concurrencyFactor = std::max(1, api->m_RateLimit.m_MaxConcurrency);
+            seconds *= static_cast<double>(concurrencyFactor);
             seconds *= budget.m_SafetyMarginFactor;
             seconds = std::clamp(seconds, budget.m_MinSeconds, budget.m_MaxSeconds);
             timeoutMs = static_cast<long>(seconds * 1000.0);
             LOG_APP_INFO("AiRequestPool::Submit: budget run='{}' workflow='{}' task='{}' inTok={} outTok={} "
-                         "timeoutMs={}",
-                         runIdForLog, workflowIdForLog, taskIdForLog, estimatedInputTokens, maxOutTokens, timeoutMs);
+                         "concurrencyFactor={} timeoutMs={}",
+                         runIdForLog, workflowIdForLog, taskIdForLog, estimatedInputTokens, maxOutTokens,
+                         concurrencyFactor, timeoutMs);
         }
 
         CurlWrapper::QueryData queryData{.m_Url = queryUrl, .m_Data = requestBody, .m_ApiKey = apiKey,
@@ -1779,16 +1791,13 @@ namespace AIAssistant
                     CurlMultiDispatcher* disp = (japp != nullptr) ? japp->GetCurlMultiDispatcher() : nullptr;
                     if (disp != nullptr)
                     {
-                        auto const dispSnap = disp->GetDebugSnapshot();
-                        int currentCap = -1;
-                        for (auto const& ctrl : dispSnap.m_Controllers)
-                        {
-                            if (ctrl.m_QuotaKey == quotaKeyForHealth)
-                            {
-                                currentCap = ctrl.m_CurrentConcurrencyCap;
-                                break;
-                            }
-                        }
+                        // Lightweight cap getter — locks ONLY m_DebugMutex (recursive),
+                        // never m_InboxMutex.  This call runs inside OnTransportComplete
+                        // which already holds m_DebugMutex on this thread; routing through
+                        // GetDebugSnapshot would acquire m_InboxMutex while holding
+                        // m_DebugMutex, opening an AB-BA deadlock with any other
+                        // GetDebugSnapshot caller (web thread, /api/debug/signals).
+                        int const currentCap = disp->GetCurrentConcurrencyCap(quotaKeyForHealth);
                         // Floor is hard-coded to 1 in RateLimitController
                         // (the AIMD halve-on-429 / floor-at-1 contract).
                         constexpr int kFloor = 1;

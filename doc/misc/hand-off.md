@@ -15,6 +15,103 @@ Keep entries self-contained — a fresh-context Claude should be able to read ju
 
 ---
 
+## 2026-05-21 (cancel-deadlock fix + `defaults.ai.*` fallback + cap-scaled budget + Sitting 15 plan) → next session
+
+Long session that started as a quick repro for a cancellation hang JC noticed yesterday running jarvisCppDocu on qwen-7b — and turned into three orthogonal fixes plus a follow-up plan for the cyber-sec gap the day exposed.  **Sitting 7 series remains fully complete** (7a + 7b + 7c per 2026-05-20); none of today's work overlapped with the API-shape sweep.  **Sitting 8 (SecureString-only HTTP) is still the next pre-1.0 follow-up** — was already the recommended next stop in the 2026-05-20 evening hand-off, and today's tangent didn't change that ordering.
+
+### What landed (working tree — JC handles commits)
+
+Three thematically separate code fixes + one new sitting drafted.  Net diff: 13 files, +307 / -90 lines.
+
+1. **AB-BA deadlock in `CurlMultiDispatcher` cancel + completion paths.**  Reproduced JC's symptom (jarvisCppDocu cancel left 144 inflight, `/api/debug/signals` hung, shutdown watchdog-killed).  Root cause: `OnTransportComplete` and `DrainPendingCancellations` held `m_DebugMutex` while invoking user callbacks; the cap-pin tracking inside `AiRequestPool`'s curlCallback then called `disp->GetDebugSnapshot()` which acquires `m_InboxMutex` first then `m_DebugMutex` — exact AB-BA against any concurrent `GetDebugSnapshot` (web thread on `/api/debug/signals`).
+    - Added `CurlMultiDispatcher::GetCurrentConcurrencyCap(quotaKey)` (`curlMultiDispatcher.{h,cpp}`) — locks ONLY `m_DebugMutex`, never `m_InboxMutex`.  Used by the AiRequestPool curlCallback in place of the heavyweight `GetDebugSnapshot`.
+    - Refactored `DrainPendingCancellations`: phase 1 collects matching callbacks under the dispatcher locks (also partitions the inbox O(N) once via a dedup `unordered_set` instead of O(N×C) per-key); phase 2 transport-side silent cleanup; phase 3 fires every collected callback OUTSIDE every dispatcher lock.
+    - Refactored `OnTransportComplete` similarly — stages `callbackToFire` + payloads inside the locked region via inner block scope, releases `m_DebugMutex`, then fires the callback.
+    - Verified end-to-end: 125 inflight cancelled cleanly, `ai_calls_inflight: 0` within 2 s, `/api/debug/signals` HTTP 200 in 53 ms throughout, `POST /api/shutdown` completed in 51 ms with zero `shutdown watchdog` lines.
+2. **`defaults.ai.*` now acts as a real fallback** in `aiCallTaskExecutor.cpp` and `workflowRegistry.cpp::ExtractProviderFromParams`.  Before today: `defaults.ai.provider` was ONLY a template-expansion source — tasks without an explicit `provider` field fell through to the global config `api_index`.  Behaviour now matches `doc/JC_Workflow_Specification.md` § provider resolution (which already documented this) — the code was the divergent piece.  Three call sites: the PROV-sidecar resolver, the envelope `m_InterfaceName` resolver, and the load-time `m_RequiredAiProviders` prereq computation — all three look up `defaults.ai.provider` / `defaults.ai.model` from the workflow's `m_DefaultsJson` when the task params don't carry their own.
+3. **Cap-scaled size-aware request budget.**  `AiRequestPool::Submit` now multiplies the single-stream estimate by `api->m_RateLimit.m_MaxConcurrency` before the `safety_margin_factor`.  Rationale: on serializing backends (ollama / llama.cpp / vLLM on a single GPU) a request at position N in the backend's queue takes N × single-stream wall-clock; under cap=N the prior formula gave roughly 1/N of the budget actually needed.  On parallel cloud backends (OpenAI / Anthropic) the multiplier over-allocates timeout harmlessly — the only side effect is slower detection of genuinely hung requests, rare and worth trading for never-times-out-from-contention reliability.  Default `max_seconds: 600 → 1800` to accommodate the larger budgets.  No user-visible knob added.
+4. **Sitting 15 added to `doc/misc/pre-1_0_follow-ups.md`** — three-part plan (loopback-only `http://` allowlist + credentialed-HTTP refusal + dashboard surface), ~1 day of work.  Drafted in detail (Problem / Fix / Acceptance / Effort / Doc updates / Out-of-scope).  Header summary, ordering rationale, and Post-1.0 list (Tier 3 TLS sidecar + Tier 4 OS-level egress policy) all updated.  Plan total now **15 sittings**, **8 remain**.
+
+### Doc sweep (same session)
+
+Tracked docs updated to reflect today's behaviour changes:
+
+| Doc | Change |
+|---|---|
+| `CLAUDE.md` | New discipline rule "Never fire user callbacks while holding a fundamental data-structure lock" — companion: lightweight-getter pattern.  Lands right above the `std::expected` rule, ninth bullet in the section. |
+| `doc/architecture.md` | Body formula updated with `× max_concurrency`; Key Design Decisions row updated; Cascade cancellation paragraph rewritten to describe the three-phase collect/cleanup/fire structure. |
+| `doc/jarvisagent.md` | Formula updated; default `max_seconds: 600 → 1800`; new ollama-tuning example; copy revised to mention the cap-scaled budget rationale and absence of a user knob. |
+| `application/workflow/README.md` | `ExtractProviderFromParams` row mentions the defaults fallback + cross-ref to dispatch-side. |
+| `test/dispatch/test_size_aware_budget.py` | Formula assertion includes the cap multiplier; lowered `max_concurrency` to 2 to keep test range below the clamp; passes `MAX_CONCURRENCY` kwarg. |
+| `test/dispatch/test_curlopt_timeout_fires.py` | `max_concurrency: 1` to preserve the tight-timeout corner the test exercises. |
+
+Skipped by design:
+- `doc/jarvisagent.1` / `.html` — pandoc-generated, regen on release.
+- `doc/combined*.md` — JCWF-generated per `feedback_combined_doc_generated`.
+- `doc/JC_Workflow_Specification.md` — spec already promised defaults-as-fallback; today's code aligns implementation with the existing spec, no doc update required.
+- `doc/misc/AI dispatch refactor.md` / `AI call performance optimization.md` — historical design refs per `feedback_no_legacy`.
+
+### What's verified
+
+| Check | Result |
+|---|---|
+| Studio Debug build | clean (only pre-existing asio `-Wshadow`) |
+| Studio Release build | clean |
+| Active edition at session end | `studio` per `.build-edition` |
+| Cancel deadlock fix end-to-end | 125 inflight cancelled cleanly, ai_calls_inflight → 0 within 2 s, /api/debug/signals HTTP 200 throughout, shutdown 51 ms (clean exit, no watchdog) |
+| `defaults.ai.*` fallback end-to-end | jarvisCppDocu with `defaults.ai.provider: localhost/ollama/qwen2.5-coder:7b/API1` routed correctly through qwen-7b — log shows `ReplyParserAPI1::Parse: model='qwen2.5-coder:7b'`, `system_fingerprint: fp_ollama`, throttle key `localhost\|qwen2.5-coder:7b` |
+| Cap-scaled budget end-to-end | budget log line shows `concurrencyFactor=48 timeoutMs=1800000`, zero timeouts under sustained load, full 144-task jarvisCppDocu run with qwen-7b completed cleanly (rich `combineDocumentation.md` produced) |
+| Engine Debug / Release builds | NOT rebuilt this session — last clean as of yesterday's commit `b46a53c`; today's changes are all in shared sources/headers so Engine should rebuild clean too.  JC may want to verify before commit. |
+
+### Architecture notes for next-session-Claude
+
+- **The callback-outside-lock pattern is now codified.**  `DrainPendingCancellations` and `OnTransportComplete` both stage callbacks (`std::vector<Callback>` or single `Callback callbackToFire`) inside the locked region and fire after release.  Any new dispatcher entry point that invokes user callbacks should follow the same pattern; the CLAUDE.md discipline rule is the enforcement.
+- **The lightweight-getter pattern is now codified too.**  `CurlMultiDispatcher::GetCurrentConcurrencyCap` is the reference impl — it acquires ONLY `m_DebugMutex` (not `m_InboxMutex`), which makes it safe to re-enter from any callback that's already on the I/O thread holding `m_DebugMutex` (recursive mutex re-entry).  If a future caller needs another single piece of dispatcher state inside a callback, add another lightweight getter — DON'T route through `GetDebugSnapshot`.
+- **`defaults.ai.*` resolution flow.**  Single source of truth: `templateEngine.h::BuildDefaultsMap(defaultsJson)` produces a flat `{"defaults.ai.provider": "...", "defaults.ai.model": "..."}` map.  All three call sites (workflowRegistry's `ExtractProviderFromParams`, aiCallTaskExecutor's PROV-sidecar resolver, aiCallTaskExecutor's envelope resolver) consume the same map and apply the same fallback logic: per-task value → expand template if present → otherwise `defaults.ai.<key>` direct lookup → otherwise nullopt (system default).  When extending: any new field that should pick up workflow defaults follows this 3-step pattern.
+- **Cap-scaled budget formula.**  `seconds = (raw estimate) × max_concurrency × safety_margin_factor`, clamped `[min_seconds, max_seconds]`.  The `× max_concurrency` factor is a worst-case queue-depth multiplier for serializing backends; cloud backends over-allocate harmlessly.  If a future config-level knob is desired to scale this independently of `max_concurrency`, add a `queue_depth_factor` field (default 1.0); don't decouple from `max_concurrency` silently.
+- **Plain HTTP for AI dispatch is still allowed** until Sitting 15 lands.  qwen-7b on `http://localhost:11434` is the active validated path.  Don't propose adding a generic "block plain HTTP" until Sitting 15 — that would break the legitimate loopback use today.
+
+### Open items / next-session candidates
+
+Per `pre-1_0_follow-ups.md`, **8 sittings remain** (after today): 8, 9, 10, 11, 12, 13, 14, 15.
+
+- **Sitting 8 — SecureString-only path through HTTP layer.**  9 cloud-connector sites still `.Get()` the api_key into `std::string` to build Authorization headers.  Defense in depth — defeats the SecureString mlock + zero-on-destruct invariant for the dispatch duration.  Medium (~1 day).  Was JC's recommended next stop per the 2026-05-20 evening hand-off; today's tangent didn't change the queue order.
+- **Sitting 15 (today's drafted plan) — plain-HTTP loopback policy + credentialed-HTTP refusal.**  Naturally scheduled after Sitting 7's typed-error pattern, which is already done.  Could ship any time JC chooses; doesn't depend on 8 / 9 / 10 / 11 / 12 / 13 / 14.
+
+Other notes:
+- **`workflows/jarvisCppDocu/global.json` carries the qwen-7b `defaults.ai` override** at session end (operator's choice for ongoing tests).  `example/workflows/jarvisCppDocu.jcwf` is canonical-clean (no override) per `feedback_jcwf_canonical_location`.  If qwen-7b proves a permanent test backend, JC can decide whether to repack the runtime JCWF zip + copy to example/workflows.  Not done speculatively.
+- **`workflows/jarvisCppDocu.jcwf` zip mtime is older than the extracted folder mtime** so j9t's `IsExtractedStale` check correctly keeps the extracted folder as the source of truth on reload.  Brittle in theory (relies on the `Edit` tool's atomic-rename bumping the dir mtime); not relied upon for any permanent change.
+
+### Gotchas next-session-Claude should know
+
+- **The C++23 `<expected>` clangd noise is permanent local-dev background.**  Every Edit on a .cpp shows a `no template named 'expected'` diagnostic from clangd's libc++ snapshot.  Per `feedback_cpp23_clang_libcxx`, ignore — the build (clang + libc++ via `--clang`) is fine; the clangd warning is from a different stdlib snapshot.
+- **`max_seconds: 1800` is the new default ceiling.**  Anyone reading old docs / fixture configs may see 600; that's stale.  The 30-min ceiling clamps any single AI request that the cap × estimate would otherwise exceed.  Test fixtures (`test_size_aware_budget.py`, `test_curlopt_timeout_fires.py`) have explicit `max_seconds` set so they don't pick up the new default.
+- **`defaults.ai.*` is now a real fallback.**  Existing JCWFs that have a `defaults.ai` block but no per-task `provider` will START routing through it after this lands — could surface latent misconfigurations where a workflow author thought defaults didn't apply.  The JCWF spec always documented this behaviour; the code was divergent.  Recommend a smoke-run of all 32 shipping JCWFs via `POST /api/workflows/reload` followed by checking `interface_names` on the registry response if JC wants belt-and-braces.
+- **Today's changes intersect three subsystems** (dispatcher, request pool, workflow registry/executor).  Natural commit splits if JC wants them: (a) dispatcher deadlock fix + lock-discipline doc updates, (b) `defaults.ai.*` fallback + spec-alignment notes, (c) cap-scaled budget + budget formula docs, (d) Sitting 15 plan.  Or one bundled commit — JC's call.
+- **`log/git_diff.txt` is stale** — JC ran the diff-capture mid-session, before the doc sweep and Sitting 15 work.  Fresh `git diff --stat` shows 13 files / +307 / -90 (vs. the captured snapshot which is missing the docs + tests + plan + the m_HealthMutex / PushEvent diag-removal edits).  Use live `git diff` for the actual commit.
+
+### Files in working tree at session end
+
+```
+M CLAUDE.md
+M application/workflow/README.md
+M application/workflow/aiCallTaskExecutor.cpp
+M application/workflow/aiRequestPool.cpp
+M application/workflow/workflowRegistry.cpp
+M doc/architecture.md
+M doc/jarvisagent.md
+M doc/misc/pre-1_0_follow-ups.md
+M engine/curlWrapper/curlMultiDispatcher.cpp
+M engine/curlWrapper/curlMultiDispatcher.h
+M engine/json/configParser.h
+M test/dispatch/test_curlopt_timeout_fires.py
+M test/dispatch/test_size_aware_budget.py
+```
+
+No untracked files.
+
+---
+
 ## 2026-05-20 evening (Sittings 7b + 7c + `m_RequiredAiProviders` template-aware fix + doc sweep) → next session
 
 Continuation of the same calendar day as the morning entry below.  After morning CI bringup landed all 11 checks green (verified mid-session by JC's screenshot), turned to the deferred `WorkflowDefinition::m_RequiredAiProviders` template-unaware bug — fixed properly this time, restoring the `{{defaults.ai.provider}}` override in vehicleTroubleshootingGuide.  Then closed out **Sittings 7b** (connector `std::expected` sweep) and **Sitting 7c** (parser `std::expected` sweep) — the API-shape sweep is now structurally complete across all three subsystems (`RegistryError` / `ConnectorError` / `ParserError`) that 7a scaffolded.

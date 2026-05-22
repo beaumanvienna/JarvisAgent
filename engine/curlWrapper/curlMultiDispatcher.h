@@ -134,6 +134,17 @@ namespace AIAssistant
         };
         DebugSnapshot GetDebugSnapshot() const;
 
+        // Lightweight cap probe used by AiRequestPool's curl-completion callback
+        // (cap-pinned-at-floor tracking).  Locks only m_DebugMutex (recursive),
+        // never m_InboxMutex — that distinction matters because the callback
+        // runs inside OnTransportComplete which already holds m_DebugMutex.
+        // Routing through GetDebugSnapshot would acquire m_InboxMutex while
+        // holding m_DebugMutex, opening an AB-BA deadlock against any other
+        // GetDebugSnapshot caller (web thread on /api/debug/signals).
+        // Returns the controller's current cap for the given quotaKey, or -1
+        // if no controller exists yet for that key.
+        int GetCurrentConcurrencyCap(std::string const& quotaKey) const;
+
         // Per-Submit() snapshot used by hermetic size-aware-budget tests to
         // verify the timeout formula without scraping logs.  Captured at the
         // dispatcher boundary so tests see exactly the QueryData the

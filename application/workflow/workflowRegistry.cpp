@@ -70,19 +70,39 @@ namespace
     // Templates referencing `{{defaults.X.Y}}` are expanded against the
     // workflow's `m_DefaultsJson` so the prereq check + dashboard
     // `interface_names` carry the resolved interface name (not the raw
-    // template).  Empty return = "task didn't pin a provider, uses system
-    // default" per the wire contract on `m_RequiredAiProviders`.
+    // template).  When the task has no `provider` field, fall back to the
+    // workflow's `defaults.ai.provider` — symmetric with dispatch-side
+    // resolution in `aiCallTaskExecutor.cpp`.  Empty return = "no per-task
+    // provider AND no defaults.ai.provider, uses system default" per the
+    // wire contract on `m_RequiredAiProviders`.
     std::string ExtractProviderFromParams(std::string const& paramsJson, std::string const& defaultsJson)
     {
-        if (paramsJson.empty()) return {};
-        simdjson::ondemand::parser parser;
-        simdjson::padded_string padded(paramsJson);
-        auto docResult = parser.iterate(padded);
-        if (docResult.error()) return {};
-        simdjson::ondemand::document doc = std::move(docResult.value());
-        std::string_view sv;
-        if (doc["provider"].get_string().get(sv) != simdjson::SUCCESS) return {};
-        std::string const raw(sv);
+        std::string raw;
+        if (!paramsJson.empty())
+        {
+            simdjson::ondemand::parser parser;
+            simdjson::padded_string padded(paramsJson);
+            auto docResult = parser.iterate(padded);
+            if (!docResult.error())
+            {
+                simdjson::ondemand::document doc = std::move(docResult.value());
+                std::string_view sv;
+                if (doc["provider"].get_string().get(sv) == simdjson::SUCCESS)
+                {
+                    raw = std::string(sv);
+                }
+            }
+        }
+        if (raw.empty())
+        {
+            // Fall back to defaults.ai.provider — makes the workflow defaults
+            // block actually act as a fallback for ai_call tasks that don't
+            // pin their own provider.
+            auto const map = AIAssistant::BuildDefaultsMap(defaultsJson);
+            auto const it = map.find("defaults.ai.provider");
+            if (it == map.end() || it->second.empty()) return {};
+            return it->second;
+        }
         if (raw.find("{{") == std::string::npos) return raw;
         return AIAssistant::ExpandWithDefaults(raw, AIAssistant::BuildDefaultsMap(defaultsJson));
     }

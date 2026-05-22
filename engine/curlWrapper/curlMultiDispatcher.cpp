@@ -200,6 +200,21 @@ namespace AIAssistant
         }
     }
 
+    int CurlMultiDispatcher::GetCurrentConcurrencyCap(std::string const& quotaKey) const
+    {
+        if (quotaKey.empty())
+        {
+            return -1;
+        }
+        std::lock_guard<std::recursive_mutex> lock(m_DebugMutex);
+        auto const it = m_Controllers.find(quotaKey);
+        if (it == m_Controllers.end())
+        {
+            return -1;
+        }
+        return it->second.CurrentConcurrencyCap();
+    }
+
     CurlMultiDispatcher::DebugSnapshot CurlMultiDispatcher::GetDebugSnapshot() const
     {
         DebugSnapshot snap;
@@ -633,51 +648,63 @@ namespace AIAssistant
             local.swap(m_PendingCancellations);
         }
 
-        std::lock_guard<std::recursive_mutex> debugLock(m_DebugMutex);
-
-        for (std::string const& cancelKey : local)
+        // Build dedup set once; multiple Submit-then-cancel cycles can push the
+        // same key twice and the iteration would otherwise repeat work.
+        std::unordered_set<std::string> cancelSet;
+        cancelSet.reserve(local.size());
+        for (std::string const& k : local)
         {
-            if (cancelKey.empty())
+            if (!k.empty())
             {
-                continue;
+                cancelSet.insert(k);
             }
+        }
 
-            // 1. Inbox — drop matching, fire callback.
+        // Phase 1 — collect matching callbacks under the relevant locks but DO
+        // NOT fire them while holding any dispatcher mutex.  Firing user
+        // callbacks under m_DebugMutex was the root cause of an AB-BA deadlock
+        // against any other thread calling GetDebugSnapshot (which acquires
+        // m_InboxMutex first, then m_DebugMutex): the curlCallback then
+        // re-entered the dispatcher via the cap-pin GetDebugSnapshot path and
+        // both threads waited on the other's mutex forever.  Snapshot now,
+        // fire after every dispatcher lock is released.
+        std::vector<Callback> callbacksToFire;
+
+        // 1a. Inbox — partition once (O(N), not O(N×C)).
+        {
+            std::lock_guard<std::mutex> inboxLock(m_InboxMutex);
+            std::queue<PendingRequest> kept;
+            while (!m_Inbox.empty())
             {
-                std::lock_guard<std::mutex> inboxLock(m_InboxMutex);
-                std::queue<PendingRequest> kept;
-                while (!m_Inbox.empty())
+                PendingRequest pending = std::move(m_Inbox.front());
+                m_Inbox.pop();
+                if (cancelSet.count(pending.m_QueryData.m_CancelKey) > 0)
                 {
-                    PendingRequest pending = std::move(m_Inbox.front());
-                    m_Inbox.pop();
-                    if (pending.m_QueryData.m_CancelKey == cancelKey)
+                    if (pending.m_Callback)
                     {
-                        if (pending.m_Callback)
-                        {
-                            pending.m_Callback(QueryResult::Fail(static_cast<int>(CURLE_ABORTED_BY_CALLBACK),
-                                                                  "request cancelled (run terminated)"),
-                                               {}, std::nullopt);
-                        }
-                        ++m_TotalCancelled;
+                        callbacksToFire.push_back(std::move(pending.m_Callback));
                     }
-                    else
-                    {
-                        kept.push(std::move(pending));
-                    }
+                    ++m_TotalCancelled;
                 }
-                m_Inbox = std::move(kept);
+                else
+                {
+                    kept.push(std::move(pending));
+                }
             }
+            m_Inbox = std::move(kept);
+        }
 
-            // 2. Retry queue — drop matching, fire callback.
+        // 1b. Retry queue + active set — both under m_DebugMutex.
+        {
+            std::lock_guard<std::recursive_mutex> debugLock(m_DebugMutex);
+
             for (auto it = m_RetryQueue.begin(); it != m_RetryQueue.end();)
             {
-                if (it->m_Request.m_QueryData.m_CancelKey == cancelKey)
+                if (cancelSet.count(it->m_Request.m_QueryData.m_CancelKey) > 0)
                 {
                     if (it->m_Request.m_Callback)
                     {
-                        it->m_Request.m_Callback(QueryResult::Fail(static_cast<int>(CURLE_ABORTED_BY_CALLBACK),
-                                                                    "request cancelled (run terminated)"),
-                                                 {}, std::nullopt);
+                        callbacksToFire.push_back(std::move(it->m_Request.m_Callback));
                     }
                     it = m_RetryQueue.erase(it);
                     ++m_TotalCancelled;
@@ -688,14 +715,10 @@ namespace AIAssistant
                 }
             }
 
-            // 3. Active set — fire user callback synchronously, drop from
-            // m_Active, then ask the transport to abort the in-flight handle
-            // (silent cleanup; no transport-side completion).  Collect matches
-            // first since erasing while iterating m_Active is awkward.
             std::vector<IInterfaceTransport::RequestId> toErase;
             for (auto const& [id, pd] : m_Active)
             {
-                if (pd && pd->m_QueryData.m_CancelKey == cancelKey)
+                if (pd && cancelSet.count(pd->m_QueryData.m_CancelKey) > 0)
                 {
                     toErase.push_back(id);
                 }
@@ -708,18 +731,21 @@ namespace AIAssistant
                     continue;
                 }
                 PendingDispatch& pd = *it->second;
-                Callback callback = std::move(pd.m_Callback);
-                m_Active.erase(it);
-                if (callback)
+                if (pd.m_Callback)
                 {
-                    callback(QueryResult::Fail(static_cast<int>(CURLE_ABORTED_BY_CALLBACK),
-                                                 "request cancelled (run terminated)"),
-                             {}, std::nullopt);
+                    callbacksToFire.push_back(std::move(pd.m_Callback));
                 }
+                m_Active.erase(it);
                 ++m_TotalCancelled;
             }
-            // Fan out to both transports — either could hold a matching
-            // in-flight or pending entry.  Each is a no-op when nothing matches.
+        }
+
+        // Phase 2 — transport-side silent cleanup.  These mutate transport
+        // state (curl easy handles / mock queues), not dispatcher state, so
+        // they sit between the dispatcher lock-release and the callback fire.
+        // Both transports are no-ops when nothing matches.
+        for (std::string const& cancelKey : cancelSet)
+        {
             if (m_LiveTransport)
             {
                 m_LiveTransport->CancelByCancelKey(cancelKey);
@@ -727,6 +753,21 @@ namespace AIAssistant
             if (m_MockTransport)
             {
                 m_MockTransport->CancelByCancelKey(cancelKey);
+            }
+        }
+
+        // Phase 3 — fire user callbacks OUTSIDE every dispatcher lock.  Each
+        // callback is arbitrary user code (file I/O, event push, AiRequestPool
+        // re-entry via GetCurrentConcurrencyCap, eventual workflow-runtime
+        // state transitions).  Holding any dispatcher lock here would re-open
+        // the AB-BA hazard this refactor was written to close.
+        QueryResult const cancelResult = QueryResult::Fail(static_cast<int>(CURLE_ABORTED_BY_CALLBACK),
+                                                            "request cancelled (run terminated)");
+        for (auto& callback : callbacksToFire)
+        {
+            if (callback)
+            {
+                callback(cancelResult, {}, std::nullopt);
             }
         }
     }
@@ -740,6 +781,19 @@ namespace AIAssistant
     {
         static std::atomic<uint32_t> s_QueryCounter{0};
 
+        // Outputs moved out of the locked region so the user callback (which
+        // can re-enter the dispatcher via GetCurrentConcurrencyCap, the
+        // AiRequestPool cap-pin path) fires AFTER m_DebugMutex is released.
+        // Holding m_DebugMutex while invoking the callback was the dispatcher
+        // half of the AB-BA deadlock against any concurrent GetDebugSnapshot
+        // caller (which takes m_InboxMutex first, then m_DebugMutex).
+        Callback callbackToFire;
+        QueryResult resultForCallback;
+        std::string responseBodyForCallback;
+        std::optional<int> retryAfterForCallback;
+        bool shouldFireCallback = false;
+
+        {
         std::lock_guard<std::recursive_mutex> debugLock(m_DebugMutex);
         auto it = m_Active.find(id);
         if (it == m_Active.end())
@@ -928,9 +982,22 @@ namespace AIAssistant
         m_Active.erase(it);
         ++m_TotalCompleted;
 
+        // Stage callback + payloads for firing AFTER the lock is released —
+        // see the rationale at the top of this function (AB-BA hazard with
+        // GetDebugSnapshot if user callback runs under m_DebugMutex).
         if (callback)
         {
-            callback(result, std::move(responseBody), retryAfterSeconds);
+            callbackToFire         = std::move(callback);
+            resultForCallback      = std::move(result);
+            responseBodyForCallback = std::move(responseBody);
+            retryAfterForCallback  = retryAfterSeconds;
+            shouldFireCallback     = true;
+        }
+        } // release m_DebugMutex
+
+        if (shouldFireCallback)
+        {
+            callbackToFire(resultForCallback, std::move(responseBodyForCallback), retryAfterForCallback);
         }
     }
 

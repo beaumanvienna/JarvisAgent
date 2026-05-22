@@ -7,7 +7,7 @@ Closeout plan for the three tail-end groups tracked in `todo.md` before the alph
 - **Loose follow-ups** — 14 items (todo.md said 11; recount confirmed 14)
 - **KeyManager hardening tail** (carry-over from prior hand-off, never propagated into `todo.md`) — 4 items
 
-Total entering this plan: **22 items**. Closed at intake: **1** (§5i.3 — already fixed in code, todo.md was stale). Net actionable: **21 items**, organised into **14 sittings** ordered safety-first → cleanup → verification → tooling → post-1.0 tail.  **Sittings 1+2 closed 2026-05-18**; **Sittings 3+4 closed 2026-05-18**; **Sitting 5 closed 2026-05-19**; **Sitting 6 closed 2026-05-19**; **Sitting 7a closed 2026-05-19** (with 7b + 7c carved out as follow-ups for the connector + parser sweeps); **Sittings 7b + 7c closed 2026-05-20** — the std::expected API-shape sweep is now complete across all three subsystems (registry / connectors / parsers).  See `doc/misc/hand-off.md` for the migration records.  **7 sittings remain** as of 2026-05-20 (Sittings 8 + 9 + 10 + 11 + 12 + 13 + 14).
+Total entering this plan: **22 items**. Closed at intake: **1** (§5i.3 — already fixed in code, todo.md was stale). Net actionable: **21 items + 1 added mid-plan** (Sitting 15 added 2026-05-21 after qwen-7b validated as test AI surfaced the plain-HTTP policy gap), organised into **15 sittings** ordered safety-first → cleanup → verification → tooling → cyber-sec tail.  **Sittings 1+2 closed 2026-05-18**; **Sittings 3+4 closed 2026-05-18**; **Sitting 5 closed 2026-05-19**; **Sitting 6 closed 2026-05-19**; **Sitting 7a closed 2026-05-19** (with 7b + 7c carved out as follow-ups for the connector + parser sweeps); **Sittings 7b + 7c closed 2026-05-20** — the std::expected API-shape sweep is now complete across all three subsystems (registry / connectors / parsers).  See `doc/misc/hand-off.md` for the migration records.  **8 sittings remain** as of 2026-05-21 (Sittings 8 + 9 + 10 + 11 + 12 + 13 + 14 + 15).
 
 Predecessor plans (context, not dependencies):
 - `cybersec-hardening-dev-plan.md` — §18 four-domain hardening (S1–S4, complete)
@@ -217,9 +217,69 @@ Trigger condition: first real "this dispatch worked yesterday, broke today" repo
 
 ---
 
+### Sitting 15 — Plain-HTTP loopback policy + credentialed-HTTP refusal
+
+**Problem.** The existing SSRF gates apply to outbound HTTP from workflow context (`workflowRuntimeManager.cpp::IsCallbackUrlAllowed`, `application/cloud/connectorHttp.cpp::ValidatePublicHttpEndpoint`) — neither gates the AI-dispatch URL set via `config.json::api_interfaces[].url`. A local-LLM interface (`http://localhost:11434/v1/chat/completions` for ollama / llama.cpp / vLLM) dispatches fine, which is the correct outcome for loopback-only test backends (qwen-7b validated as test AI on 2026-05-21). But the same path silently accepts `http://internal-llm.example.com/...` — a LAN-or-public plaintext endpoint that would carry prompts (potentially containing secrets via template substitution + dataflow propagation) over the wire in clear. And nothing currently prevents an interface from carrying a `key_name` whose resolved Bearer token would then go over plain HTTP.
+
+j9t's cyber-security posture rejects plain HTTP everywhere else (callback URLs, cloud connectors). Making the AI-dispatch surface consistent unblocks "use ollama qwen-7b as the default AI" — currently the operator must accept a plain-HTTP default that has no defense-in-depth around what URLs that label can be pointed at, and no protection against a credentialed `http://` footgun.
+
+**Fix (three parts, one sitting).**
+
+**Part A — Loopback-only `http://` allowlist.**
+1. New helper next to existing SSRF gates: `application/network/urlPolicy.{h,cpp}` (new module, low file count) exporting `[[nodiscard]] std::expected<void, UrlPolicyError> ValidateAiInterfaceUrl(std::string const& url)`. Reuses the resolved-address classifier already in `IsCallbackUrlAllowed` — `getaddrinfo` + per-address loopback check (`127.0.0.0/8`, `::1`, with IPv4-mapped-IPv6 unwrap). `https://` URLs pass without further checks; `http://` URLs pass only if EVERY resolved address is loopback; everything else (`ws://`, `file://`, malformed) is rejected.
+2. `UrlPolicyError` is a small typed-error enum following the established pattern (`ConnectorError` / `ParserError` / `RegistryError`): `Code` enum (`SchemeRejected`, `NonLoopbackHttp`, `UnresolvedHost`, `MalformedUrl`) + `m_Details` string. No `default:` arm — `-Wswitch` is the enforcement.
+3. Hook into two enforcement points:
+   - **Config-load time** (`engine/json/configParser.cpp::ParseInterfaces`): validate each interface's URL. On rejection, `LOG_CORE_ERROR("ParseInterfaces: rejected interface '{}' url='{}': {}", name, url, Describe(err.m_Code))` and skip the entry — don't load it into `m_ApiInterfaces` (fail-closed; the system has fewer interfaces, but every loaded one is policy-compliant).
+   - **REST POST/PUT time** (`application/web/webServer.cpp::HandleAiInterfacePost` / `HandleAiInterfacePut`): same validator. On rejection, HTTP 400 with `code: "url_policy_violation"`, `message: "<Describe(code)>: <m_Details>"`. Test handle also rejects (`HandleAiInterfaceTestPost`) so an operator can't probe a forbidden endpoint by misusing the Test button.
+4. Audit log per-dispatch: `AiRequestPool::Submit` emits ONE entry per successfully dispatched plain-HTTP request: `LOG_SECURITY_INFO("ai_dispatch_plaintext_http host='{}' run='{}' workflow='{}' task='{}' interface='{}'", host, runId, workflowId, taskId, interfaceName)`. Goes through the existing `[Security]` channel so it's grep-able in audit reviews. INFO-level — this is "noted-and-allowed", not an error.
+
+**Part B — Reject credentialed plain HTTP.**
+1. In the same `ParseInterfaces` and `HandleAiInterfacePost/Put` validators: if interface URL is `http://` AND `key_name` is non-empty, reject with `UrlPolicyError::Code::CredentialedPlaintextHttp`. Local ollama doesn't require authentication (loopback); the only reason to attach a `key_name` to a plain-HTTP interface is operator confusion — likely copy-pasted from a cloud interface — and that confusion would silently leak the Bearer token in transit on every request.
+2. REST response: HTTP 400 with `code: "credentialed_plaintext_http"`, `message: "interfaces with a key_name require https:// — plain http would expose the credential in transit"`.
+3. Audit log entry at rejection: `LOG_SECURITY_INFO("credentialed_plaintext_http_rejected interface='{}' key_name='{}'", interfaceName, keyName)`. Counter on `/api/debug/signals`: `credentialed_plaintext_http_rejections`.
+
+**Part C — Dashboard surface (small UI touch).**
+1. AI Interfaces panel in `dashboard/ui/src/views/AiInterfacesView.tsx` (or its current home — confirm at start of sitting): yellow "loopback HTTP" pill next to interfaces whose URL is `http://`, similar to the existing "mock" / "default" pills.
+2. AI Health card on the main dashboard: when the configured default (`api_index`) resolves to a plain-HTTP interface, add a one-line yellow banner: "Default AI uses plaintext loopback — fine for local LLMs, never use for remote backends." Not dismissible (security signal, not info popup); occupies one row of the AI Health card so it doesn't push other content around.
+
+**Acceptance.**
+- New `test/security/test_url_policy.py` (`test/security/` may need creation):
+  - POST `http://example.com/v1/chat` → HTTP 400 + `code: "url_policy_violation"` + `dns_resolved_ip_rejections` counter increments.
+  - POST `http://192.168.1.5/v1/chat` → HTTP 400 + `code: "url_policy_violation"`.
+  - POST `http://localhost:11434/v1/chat` (no key_name) → HTTP 201 + interface loaded.
+  - POST `http://localhost:11434/v1/chat` WITH `key_name: "ollama"` → HTTP 400 + `code: "credentialed_plaintext_http"`.
+  - POST `https://api.openai.com/v1/chat/completions` with `key_name: "openai"` → success (existing path unchanged — verify no regression).
+  - POST `http://[::1]:11434/v1/chat` → success (IPv6 loopback).
+  - Malformed URLs (`htp://...`, `ws://...`, empty) → HTTP 400 + `code: "url_policy_violation"`.
+- Config-fixture test: drop a `config.json` carrying `http://192.168.1.5/...` into a test working dir, launch j9t headless, verify (a) ERROR log line at load with the offending host + interface name, (b) interface omitted from `GET /api/settings/ai-interfaces`, (c) j9t alive and accepting requests on other interfaces.
+- `jarvisCppDocu` end-to-end on `http://localhost:11434` qwen-7b interface still completes successfully (regression check — the legitimate loopback path must not break).
+- Build all 5 targets clean.
+- `feedback_no_legacy.md` applies: no "allow non-loopback http" escape hatch (no flag, no env var). The one and only safe `http://` case is loopback.
+
+**Doc updates this sitting closes out.**
+- `doc/cyber security.md` — new subsection "Plain-HTTP policy" describing the loopback-only allowlist + credentialed-HTTP refusal, with the rationale (defense-in-depth, audit posture) and reference impl pointers.
+- `CLAUDE.md` discipline rules — add bullet: "**Plain `http://` is loopback-only and never with `key_name`.** Reference impl: `application/network/urlPolicy.h::ValidateAiInterfaceUrl` + the two enforcement hooks in `configParser.cpp::ParseInterfaces` and `webServer.cpp::HandleAiInterfacePost/Put`. Cross-ref the SSRF gate cluster (`IsCallbackUrlAllowed`, `ValidatePublicHttpEndpoint`) that this completes."
+- `doc/jarvisagent.md` — note in the interface-configuration section that `http://` is loopback-only; cite the example use case (local ollama / llama.cpp).
+- `doc/api-endpoints.md` — document the new `url_policy_violation` and `credentialed_plaintext_http` error codes on `POST /api/settings/ai-interfaces` + `PUT /api/settings/ai-interfaces/<id>` + `POST /api/settings/ai-interfaces/<id>/test`.
+
+**Out of scope (Tier 3 — separate later sitting).**
+- Built-in TLS sidecar that wraps localhost ollama in HTTPS (auto-generated self-signed cert + `CURLOPT_PINNEDPUBLICKEY`) so j9t never has to dispatch plain HTTP at all. Worth doing for 1.0 polish but materially bigger — needs cert lifecycle (regenerate on machine ID change, store under appropriate file perms), a tiny asio TLS terminator (~150 LoC), and an opt-in config knob. Tracked separately in Post-1.0.
+- OS-level network policy (Docker `NET_ADMIN` drop + nftables egress allowlist). High-assurance deployment recipe for `doc/cyber security.md`; no code change required.
+
+**Effort.** Medium (~1 day).
+- Part A: ~3 hours (helper module + UrlPolicyError + 3 enforcement sites + audit log).
+- Part B: ~2 hours (credentialed-HTTP check + error code + counter wiring).
+- Part C: ~2 hours (dashboard pill + banner; React-side, no C++).
+- Tests + verification: ~2 hours.
+- Doc sweep: included in the effort estimate (4 files).
+
+---
+
 ## Post-1.0 / opportunistic
 
 - **`RedactingFormatter::format` per-line allocation** (`engine/log/log.cpp:55-73` + `secretRedactor.cpp:92-110`). Two heap allocs per log line when secrets registered (formatter materialises `std::string(payload)`, then `Redact()` makes another `result = message`). No-secrets fast path is already alloc-free. Pure perf; defer until profiling shows it hot under realistic load. Fix shape: thread-local buffer + early return when no secret matches.
+- **Built-in TLS sidecar for local LLM backends** (Sitting 15 Tier 3, deferred). Tiny asio TLS terminator (~150 LoC) that wraps a localhost HTTP backend (ollama / llama.cpp / vLLM) in HTTPS on a separate port. Auto-generates a self-signed cert at first boot, pins it via `CURLOPT_PINNEDPUBLICKEY`. From j9t's perspective the dispatch is HTTPS-pinned; from the backend's perspective it's a normal localhost HTTP client. Outcome: no plain HTTP ever leaves j9t, even for local LLMs. Worth doing for 1.0 polish but materially bigger than Tier 1+2 (needs cert lifecycle + asio TLS terminator + opt-in config knob).
+- **OS-level network egress policy for high-assurance deployments.** Docker-mode recipe: drop `NET_ADMIN`, set nftables egress rules that whitelist only the configured AI hosts. Catches even a code-level escape from the URL policy. No j9t code change required — documented as a deployment recipe in `doc/cyber security.md`.
 
 ---
 
@@ -232,10 +292,11 @@ Trigger condition: first real "this dispatch worked yesterday, broke today" repo
 5. **Sittings 8–10** are remaining cleanup (SecureString-HTTP, slug collision, ConfigParser refactor) — independent, parallelisable if multiple sittings happen close together.
 6. **Sitting 11** is verification, intentionally last among the substantive work — it tests everything that came before.
 7. **Sittings 12–14** are the small tail (email watermark, replay tool, KeyManager hardening). Sitting 14's four KeyManager items could also fold into Sitting 7's API-shape sweep opportunistically (the typed `Error` return on `SetDefaultProvider` / `ParseProvidersJson` lands naturally then) — keep them grouped if Sitting 7 happens close in time, otherwise ship Sitting 14 as a clean standalone.
+8. **Sitting 15** is the plain-HTTP loopback policy + credentialed-HTTP refusal (Tier 1 + Tier 2 of the local-LLM cyber-sec follow-ups). Added at JC's direction 2026-05-21 after qwen-7b was validated as a test backend over `http://localhost:11434` — codifies "plain HTTP is only safe when it cannot leave the machine" and "never carry a credential over plaintext", which closes the cyber-sec gap that currently blocks "use ollama as the default AI" without weakening the existing posture. Naturally last among Pre-1.0 sittings because it depends on `feedback_expected_error_pattern` (the typed-error discipline from Sitting 7) and reuses the address-classification helper that the SSRF gate already exercises.
 
-Sittings 1, 2, 3, 4, 5, 12, 14 are each half-day to one day and can pair into combined sittings if time permits. Sittings 6, 7, 8, 10 are full sittings on their own.
+Sittings 1, 2, 3, 4, 5, 12, 14 are each half-day to one day and can pair into combined sittings if time permits. Sittings 6, 7, 8, 10, 15 are full sittings on their own.
 
-Total estimated effort: ~11–14 working days across 14 sittings.
+Total estimated effort: ~12–15 working days across 15 sittings.
 
 ---
 

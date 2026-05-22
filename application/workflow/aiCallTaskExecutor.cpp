@@ -1145,12 +1145,26 @@ namespace AIAssistant
             std::optional<std::string> const temperatureOpt =
                 TryExtractStringParam(taskDefinition.m_ParamsJson, "temperature", providerOverrideError);
 
-            // Expand {{defaults.*}} templates in provider/model params.
+            // Expand {{defaults.*}} templates in per-task provider/model
+            // params.  When a task does NOT pin its own provider/model, fall
+            // back to the workflow's `defaults.ai.provider` / `defaults.ai.model`
+            // so the JCWF's defaults block actually defaults — symmetric with
+            // the load-time `ExtractProviderFromParams` fallback in
+            // workflowRegistry.cpp.  Only when defaults.ai is also absent does
+            // the dispatch fall through to global config index.
             auto const defaultsMap = BuildDefaultsMap(workflowDefinition.m_DefaultsJson);
+            auto const defaultsLookup = [&](std::string const& key) -> std::optional<std::string>
+            {
+                auto const it = defaultsMap.find(key);
+                if (it == defaultsMap.end() || it->second.empty()) return std::nullopt;
+                return it->second;
+            };
             std::optional<std::string> const providerOpt =
-                rawProviderOpt ? std::optional(ExpandWithDefaults(*rawProviderOpt, defaultsMap)) : std::nullopt;
+                rawProviderOpt ? std::optional(ExpandWithDefaults(*rawProviderOpt, defaultsMap))
+                               : defaultsLookup("defaults.ai.provider");
             std::optional<std::string> const modelOpt =
-                rawModelOpt ? std::optional(ExpandWithDefaults(*rawModelOpt, defaultsMap)) : std::nullopt;
+                rawModelOpt ? std::optional(ExpandWithDefaults(*rawModelOpt, defaultsMap))
+                            : defaultsLookup("defaults.ai.model");
 
             if (providerOpt.has_value())
             {
@@ -1453,6 +1467,10 @@ namespace AIAssistant
             if (hasNonWhitespace && !probRelativeName.empty())
             {
                 // Resolve per-task api_interface override (JCWF "provider" param), if any.
+                // When the task has no `provider` param, fall back to the workflow's
+                // `defaults.ai.provider` so the JCWF defaults block actually defaults
+                // (symmetric with the PROV-sidecar resolution above and the load-time
+                // `ExtractProviderFromParams` fallback in workflowRegistry.cpp).
                 std::string interfaceOverrideError;
                 std::optional<std::string> const rawProviderOpt =
                     TryExtractStringParam(taskDefinition.m_ParamsJson, "provider", interfaceOverrideError);
@@ -1461,6 +1479,14 @@ namespace AIAssistant
                 if (rawProviderOpt.has_value())
                 {
                     envelopeInterfaceName = ExpandWithDefaults(*rawProviderOpt, defaultsMapEnvelope);
+                }
+                else
+                {
+                    auto const it = defaultsMapEnvelope.find("defaults.ai.provider");
+                    if (it != defaultsMapEnvelope.end() && !it->second.empty())
+                    {
+                        envelopeInterfaceName = it->second;
+                    }
                 }
 
                 AiInvocation envelope;

@@ -3,12 +3,13 @@
 §14 Tier B hermetic test — size-aware in-flight budget formula.
 
 Asserts that QueryData::m_TimeoutMs computed by AiRequestPool::Submit matches
-the §6.2 formula in `AI call performance optimization.md`:
+the formula in `AiRequestPool::Submit`:
 
     seconds = (in_tokens/1000) * per_1k_input
             + (out_tokens/1000) * per_1k_output
             + fixed_overhead_seconds
-    seconds *= safety_margin_factor
+    seconds *= max_concurrency       # worst-case queue-depth multiplier
+    seconds *= safety_margin_factor  # token-rate variance headroom
     seconds  = clamp(seconds, min_seconds, max_seconds)
     timeoutMs = long(seconds * 1000)
 
@@ -44,10 +45,12 @@ INTERFACE_NAME = "tier_b_size_iface"
 
 # Tight, well-defined budget so we can assert exact numbers.  Default
 # m_DefaultOutputTokens (4096) is used for max_output_tokens since we don't
-# override settings.max_tokens in the JCWF.
+# override settings.max_tokens in the JCWF.  `max_concurrency` feeds the
+# budget formula (worst-case queue-depth multiplier on serializing backends)
+# — kept low so the medium/large-input cases don't all clamp to max_seconds.
 RATE_LIMIT = {
     "initial_concurrency_probe": 4,
-    "max_concurrency": 16,
+    "max_concurrency": 2,
     "max_retries_429": 2,
     "max_retries_transient": 1,
     "base_retry_ms": 100,
@@ -60,6 +63,7 @@ RATE_LIMIT = {
         "max_seconds": 600.0,
     },
 }
+MAX_CONCURRENCY = RATE_LIMIT["max_concurrency"]
 
 DEFAULT_OUTPUT_TOKENS = 4096  # ConfigParser::ApiInterface::m_DefaultOutputTokens default
 
@@ -68,10 +72,12 @@ def expected_timeout_ms(estimated_input_tokens: int, *,
                         per_1k_in: float, per_1k_out: float,
                         fixed: float, safety: float,
                         min_s: float, max_s: float,
+                        max_concurrency: int,
                         out_tokens: int = DEFAULT_OUTPUT_TOKENS) -> int:
     seconds = (estimated_input_tokens / 1000.0) * per_1k_in \
             + (out_tokens / 1000.0) * per_1k_out \
             + fixed
+    seconds *= max(1, max_concurrency)  # queue-depth multiplier
     seconds *= safety
     seconds = max(min_s, min(max_s, seconds))
     return int(seconds * 1000.0)
@@ -162,6 +168,7 @@ def main() -> int:
                 safety=rl["safety_margin_factor"],
                 min_s=rl["min_seconds"],
                 max_s=rl["max_seconds"],
+                max_concurrency=MAX_CONCURRENCY,
             )
             ok = actual_ms == expected_ms
             tag = "ok" if ok else "FAIL"

@@ -68,7 +68,12 @@ namespace AIAssistant
                 double m_FixedOverheadSeconds{5.0};
                 double m_SafetyMarginFactor{4.0};
                 double m_MinSeconds{60.0};
-                double m_MaxSeconds{600.0};
+                // Raised to accommodate the cap-scaled budget in AiRequestPool::Submit:
+                // single-stream estimate × m_MaxConcurrency × safety covers worst-case
+                // queue depth on serializing backends (ollama / local LLMs).  The old
+                // 600s ceiling truncated cap-scaled budgets and caused timeouts under
+                // contention even though the backend was simply queueing.
+                double m_MaxSeconds{1800.0};
             };
 
             struct RateLimit

@@ -245,7 +245,7 @@ Every interface has an associated adaptive controller that decides how aggressiv
             "fixed_overhead_seconds": 5.0,
             "safety_margin_factor": 4.0,
             "min_seconds": 60.0,
-            "max_seconds": 600.0
+            "max_seconds": 1800.0
         }
     }
 }
@@ -254,7 +254,7 @@ Every interface has an associated adaptive controller that decides how aggressiv
 **Concurrency / retry knobs:**
 
 - `initial_concurrency_probe` — starting AIMD cap before the controller has observed any response. Default per `InterfaceType`: Anthropic 4, OpenAI 8, Empty 4. Set to 1 for a Tier-1 Anthropic account; raise to 16+ for Tier-3+.
-- `max_concurrency` — hard ceiling AIMD growth never crosses, regardless of how many clean completions accumulate. Default 48 (the HTTP/2 stream cap). Set lower to pace burn rate on cost-capped accounts (this is the only cost-shaping knob in 1.0).
+- `max_concurrency` — hard ceiling AIMD growth never crosses, regardless of how many clean completions accumulate. Default 48 (the HTTP/2 stream cap). Set lower to pace burn rate on cost-capped accounts (this is the only cost-shaping knob in 1.0). **Also feeds the request-budget formula** below — see the size-aware budget section.
 - `max_retries_429` — number of attempts after a 429 before giving up. Default 10 (controller's predictive gating means real 429s are rare in practice).
 - `max_retries_transient` — attempts after a transient HTTP error (400/500/502/503). Default 2.
 - `base_retry_ms` — first retry delay; subsequent retries use exponential backoff `base * 2^n`. Default 1000.
@@ -265,9 +265,12 @@ Every interface has an associated adaptive controller that decides how aggressiv
 seconds = (input_tokens / 1000 × per_1k_input_token_seconds)
         + (max_output_tokens / 1000 × per_1k_output_token_seconds)
         + fixed_overhead_seconds
-seconds *= safety_margin_factor
+seconds *= max_concurrency        # worst-case queue-depth multiplier
+seconds *= safety_margin_factor   # token-rate variance headroom
 seconds  = clamp(seconds, min_seconds, max_seconds)
 ```
+
+The `max_concurrency` multiplier handles the case where a backend serializes (e.g., a local ollama daemon on a single GPU): a request that lands at position N in the backend's queue takes N × single-stream time. Multiplying by `max_concurrency` (the configured ceiling on simultaneous in-flight requests) guarantees the timeout covers the worst-case queue position. For truly-parallel backends (cloud providers like OpenAI / Anthropic) the multiplier over-allocates timeout harmlessly — the only side effect is slower detection of genuinely hung requests, which is rare and worth trading for never-timeouts-from-contention reliability. No per-user knob to fiddle with.
 
 Curl's timeout only counts time *on the wire* — inbox waits, controller throttling, and retry-queue backoffs don't burn the budget. Each retry creates a fresh easy handle with a fresh budget.
 
@@ -282,7 +285,7 @@ Curl's timeout only counts time *on the wire* — inbox waits, controller thrott
 | Anthropic Claude Sonnet 4.6 | ~70 tok/s | 5.0 |
 | Anthropic Claude Opus 4.7 | ~30 tok/s | 12.0 |
 
-Shipped defaults (`per_1k_output=5.0`, `safety_margin=4.0`, `min=60s`) are calibrated for Sonnet, the slowest provider in active use. Fast providers finish well within the floor with no harm done.
+Shipped defaults (`per_1k_output=5.0`, `safety_margin=4.0`, `min=60s`, `max=1800s`) are calibrated to absorb the worst-case stack of (slowest cloud provider × full queue depth × token-rate variance). Fast providers finish well within the floor with no harm done; serializing local backends (e.g. ollama) get a budget that scales with `max_concurrency` so contention-induced queueing never trips the timeout. The 30 min `max_seconds` ceiling is the safety stop for pathological combinations (very large outputs × max queue depth × slow provider) — at that point the request is almost certainly hung rather than legitimately progressing.
 
 **Tuning examples:**
 
@@ -307,10 +310,12 @@ Shipped defaults (`per_1k_output=5.0`, `safety_margin=4.0`, `min=60s`) are calib
     "request_budget": {
         "per_1k_output_token_seconds": 15.0,
         "min_seconds": 120.0,
-        "max_seconds": 1200.0
+        "max_seconds": 3600.0
     }
 }
 ```
+
+*Local serializing backend (ollama, llama.cpp, vLLM single-GPU) — no extra knobs needed:* the default `max_concurrency: 48` multiplier in the budget formula automatically gives each request enough wall-clock to clear a full queue. If your hardware can sustain higher concurrent throughput (e.g. `OLLAMA_NUM_PARALLEL=8`), lower `max_concurrency` to a value `j9t` won't exceed simultaneously — the budget shrinks proportionally and you get faster hung-request detection.
 
 **Verifying tuning** — `GET /api/debug/signals` (debug builds only) exposes per-`(host, modelFamily)` controller state at `dispatcher_controllers[]`: current AIMD cap, streak since last 429, last observation (remaining requests / tokens, reset times), last consumed input/output tokens. Use this to confirm the controller is doing what you expect before scaling up.
 
