@@ -208,7 +208,8 @@ public:
     // `CredentialFactory::CloneAndPatch` (UPDATE).
     bool AddCredential(std::string const& name, std::unique_ptr<ICredential> cred);
     bool RemoveProvider(std::string const& name);
-    void SetDefaultProvider(std::string const& name);
+    [[nodiscard]] bool SetDefaultProvider(std::string const& name);  // rejects empty + unknown
+    void ClearDefaultProvider();                                      // explicit clear
 
     // Atomic read-modify-write under unique_lock — mutator(existing) → new credential.
     // Returns false if `name` doesn't exist or mutator returned nullptr.  Closes the
@@ -294,6 +295,14 @@ synchronous scope.  Don't smuggle the raw `ICredential const&` out via lambda ca
 the reference dangles after the callback returns.  Don't copy secret material into a
 plain `std::string` field — keep `SecureString` end-to-end so the mlock'd buffer + zero-
 on-destruct invariant survives.
+
+### Hardening guards
+
+- **Keystore size cap.** `Load` and `LoadPlaintext` reject files larger than `kMaxKeysFileBytes = 4 MB` before parsing.  Bounds OOM-via-hostile-keystore at the boundary; realistic keystores are < 100 KB.
+- **Provider count cap.** `ParseProvidersJson` aborts after `kMaxProviders = 1024` entries with a structured ERROR.  Bounds per-provider unique_ptr allocations.
+- **`SetDefaultProvider` rejects empty.** `[[nodiscard]]` return; empty / unknown names log a WARN and return false.  Use `ClearDefaultProvider()` for explicit clears so a hand-edit accident can't silently wipe the default by passing an empty string.
+- **`Unlock` TOCTOU closed.** The keys file path is captured under `m_KeysFilePathMutex` at function entry, so a concurrent `SetKeysFilePath` cannot swap the path between the existence check and the `Load` call.
+- **`LoadPlaintext` / `SavePlaintext` are Studio-only.** Both declarations + bodies and the lone caller in `engine.cpp` are wrapped in `#ifdef J9T_STUDIO`.  Engine binaries (the production server edition) carry no symbols for plaintext credential storage — verified with `nm`.
 
 ### 6.1 Startup sequence
 

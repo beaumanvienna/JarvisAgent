@@ -1,0 +1,19 @@
+{
+    "_comment": "URL with embedded traversal segments + unusual scheme. ConfigParser is fail-open on URL shape — it stores the URL verbatim and lets downstream validators (SSRF gate IsCallbackUrlAllowed, ConnectorHttp::ValidatePublicHttpEndpoint, AI-dispatch URL allowlist per Sitting 15) reject at request time. The fixture's value: prove that ConfigParser does NOT strip, normalise, or 'sanitise' URLs in a way that would create a discrepancy between the stored string and the string downstream validators see. The INFO log line should echo the URL byte-for-byte.",
+    "_expected_errors": [
+        "url: https://api.openai.com/v1/../admin/keys"
+    ],
+
+    "queue folder": "queue",
+    "workflows folder": "workflows",
+
+    "API interfaces": [
+        {
+            "name": "url-traversal-canary",
+            "url": "https://api.openai.com/v1/../admin/keys",
+            "model": "anything",
+            "API": "API1",
+            "key_name": "openai"
+        }
+    ]
+}

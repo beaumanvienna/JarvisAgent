@@ -1,0 +1,20 @@
+{
+    "_comment": "Out-of-bounds API index. Top-level 'API index' = 50 when there's exactly 1 interface in the array. ConfigParser stores it (RejectNegative allows non-negative); ConfigChecker rejects with 'config error: invalid API interface configuration (index 50, count 1)'. j9t stays alive but config is not ok.",
+    "_expected_errors": [
+        "config error: invalid API interface configuration (index 50, count 1)"
+    ],
+
+    "queue folder": "queue",
+    "workflows folder": "workflows",
+    "API index": 50,
+
+    "API interfaces": [
+        {
+            "name": "test/API1",
+            "url": "https://api.example.com/v1/chat",
+            "model": "test-model",
+            "API": "API1",
+            "key_name": "test-key"
+        }
+    ]
+}

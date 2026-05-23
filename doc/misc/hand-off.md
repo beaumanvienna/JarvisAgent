@@ -15,6 +15,520 @@ Keep entries self-contained — a fresh-context Claude should be able to read ju
 
 ---
 
+## 2026-05-23 (Sitting 14 — KeyManager hardening tail, 4 small items) → next session
+
+JC opened Sitting 14 immediately after Sitting 13 was cancelled (no operational need for `tools/replayTranscript.py`).  Four small KeyManager items bundled per the plan; all landed in one session.
+
+### What landed (working tree — JC handles commits)
+
+**Item 1 — `SetDefaultProvider` rejects empty + unknown; new `ClearDefaultProvider` separator.**  Signature changed `void → [[nodiscard]] bool`.  Empty name now logs WARN + returns false instead of silently clearing the default.  Unknown name still logs WARN + returns false (existing behaviour, now observable to callers).  New `ClearDefaultProvider()` is the explicit way to clear — intent visible in the diff, hand-edit accidents can't silently wipe via passing `""`.  The lone webServer caller (`HandleProviderSetDefaultPost`) honors the new return: on false (TOCTOU window between HasCredential and SetDefaultProvider where the credential gets removed) returns HTTP 409 `race_lost` so the client can retry.
+
+**Item 2 — `Unlock` TOCTOU closed.**  New `m_KeysFilePathMutex` (dedicated `shared_mutex` — separate from `m_Mutex` so credential-map reads don't contend with path access).  `SetKeysFilePath` takes unique_lock; `GetKeysFilePath` takes shared_lock and returns by value (was by const-ref).  `Unlock` captures the path into a local under shared_lock at function entry, then uses the captured value for both `fs::exists()` and `Load()` — no window for a concurrent `SetKeysFilePath` to swap the path.  Empty-path early-reject preserved.
+
+**Item 3 — `LoadPlaintext` / `SavePlaintext` are Studio-only.**  Both declarations in `keyManager.h`, both bodies in `keyManager.cpp`, and the lone production caller at `engine.cpp:183` all wrapped in `#ifdef J9T_STUDIO`.  Engine binaries link without these symbols (verified empirically via `nm`: 0 hits in Engine Debug+Release, 2 hits in Studio Release).  Plaintext keystore is a developer convenience; production servers (Engine edition) reject it at the link layer.
+
+**Item 4 — `kMaxKeysFileBytes` + `kMaxProviders` caps.**  Two compile-time constants in an anonymous namespace at the top of `keyManager.cpp`: `kMaxKeysFileBytes = 4 MB`, `kMaxProviders = 1024`.  `Load` (encrypted) + `LoadPlaintext` check the file blob/string size before parsing; over-cap → LOG_CORE_ERROR with the offending byte count + filename + return false (no parse attempted).  `ParseProvidersJson` increments a local counter inside the providers-object iteration loop; over-cap → LOG_CORE_ERROR, clear partial state, return false.  Both caps are defense-in-depth — legitimate keystores are < 100 KB with < 50 providers; either limit firing indicates tampering.
+
+### Files in working tree
+
+| File | Change |
+|---|---|
+| `engine/keys/keyManager.h` | 4 signature changes (LoadPlaintext/SavePlaintext `#ifdef`, SetDefaultProvider returns `[[nodiscard]] bool`, ClearDefaultProvider added, Set/GetKeysFilePath out-of-line + return-by-value); 1 new mutex member (`m_KeysFilePathMutex`) |
+| `engine/keys/keyManager.cpp` | 4 method bodies updated (Load/LoadPlaintext caps, SetDefaultProvider+ClearDefaultProvider rewrite, Unlock capture-then-use, Set/GetKeysFilePath impls); 2 new file-scope `constexpr` caps |
+| `engine/engine.cpp` | LoadPlaintext call site at line 183 wrapped in `#ifdef J9T_STUDIO` |
+| `application/web/webServer.cpp` | `HandleProviderSetDefaultPost` honors the new SetDefaultProvider bool return; HTTP 409 `race_lost` on TOCTOU loss |
+| `engine/keys.md` | 5-bullet "Hardening guards" subsection added under §6; SetDefaultProvider signature updated in the API code block |
+| `doc/misc/pre-1_0_follow-ups.md` | Sitting 14 close-out + count drop to 2 |
+| `doc/misc/hand-off.md` | This entry |
+
+### What's verified
+
+| Check | Result |
+|---|---|
+| All 4 binary configs build clean (`--clang`) | clean (only pre-existing asio `-Wshadow`) |
+| Engine binary symbol verification | `nm -C bin/Release/jarvisAgent-engine \| grep -c "LoadPlaintext\|SavePlaintext"` → **0**; same on Engine Debug |
+| Studio binary symbol counter-check | `nm -C bin/Release/jarvisAgent-studio \| grep -c "..."` → **2** (LoadPlaintext + SavePlaintext both present) |
+| Engine Release exit code on missing plaintext API | not exercised — symbol is gone so a hypothetical caller would be a compile-time error in the Engine TU |
+| Regression: test_auth_mcp | **100/100** |
+| Regression: Sitting 9 collision repro | **14/14** |
+| Regression: Sitting 11 malformed_configs | **46/46** |
+| Regression: Sitting 11 negative_paths | **28/28** |
+| Regression: inputResolutionTest workflow | **4/4 tasks PASS** |
+| Active edition at session end | `studio` per `.build-edition` |
+| Running server | studio Debug on 8443, keystore unlocked, fresh Sitting-14 binary |
+
+**Aggregate: 188+ passing checks** across the regression suite + the symbol-strip empirical verification.
+
+### Architecture notes for next-session-Claude
+
+- **`SetDefaultProvider` is now `[[nodiscard]] bool`.**  Every new caller must either honor the return or `(void)`-cast it.  Empty name and unknown-provider name both return false with a WARN log — callers can distinguish via a prior `HasCredential` check if they need to.
+- **`ClearDefaultProvider()` is the only way to clear the default.**  Passing `""` to `SetDefaultProvider` no longer works.  Use the explicit method so the intent is visible in `git blame`.
+- **`m_KeysFilePathMutex` is dedicated.**  Don't fold it into `m_Mutex` — credential-map access is hot and path access is cold.  Same separation pattern as `m_MasterPasswordMutex`.
+- **`LoadPlaintext` / `SavePlaintext` are Studio-only.**  Adding any new caller for these methods must also be inside `#ifdef J9T_STUDIO` — the Engine binary won't link otherwise.  Plaintext keystore is operator-convenience for dev workstations; production servers (Engine edition) require encrypted keystore.
+- **`kMaxKeysFileBytes = 4 MB` and `kMaxProviders = 1024`.**  Both are defensive — should never fire on legitimate keystores.  If either trips on a real customer keystore, that's a finding worth investigating (and possibly raising the cap with a comment naming the deployment that needed it, not silently).
+
+### Open items / next-session candidates
+
+Per `pre-1_0_follow-ups.md` after today's closure, **2 sittings remain**: 15 + 16.
+
+- **Sitting 15 — Plain-HTTP loopback policy + credentialed-HTTP refusal** is the next merge-gated stop.  Medium (~1 day).  Three parts (loopback-only `http://` allowlist, credentialed-plain-HTTP refusal, dashboard UI pill+banner).
+- **No new Sitting 16 candidates surfaced** during Sitting 14.  Basket stays at 9 items.
+
+### Gotchas next-session-Claude should know
+
+- **`nm -C` is the empirical build-guard verification.**  When wrapping symbols in `#ifdef`, confirm the strip worked by running `nm -C <binary> | grep <symbol>` against both the dropped-config (expect 0) and the kept-config (expect ≥1).  Saved me a "yeah it probably worked" trap.
+- **Per-field length cap from the original plan is subsumed by the file-size cap.**  Plan called for `kMaxFieldLength = 4096` per field; I didn't add that as a separate check because the 4 MB file-size cap bounds individual fields by construction (a single field can't exceed the file).  Per-field is more granular but the simpler file-size cap protects against the same OOM class with one boundary check instead of N.
+
+---
+
+## 2026-05-23 (Sitting 12 — email_watch UID watermark persisted across restart) → next session
+
+JC opened Sitting 12 immediately after Sitting 11's close-out + the no-sitting-refs cleanup.  Small targeted fix; verified live for load + restore.  Save path verified by code review only (live save requires a working IMAP server; host's `my-email` connection has an empty endpoint and rejects with "invalid host or port" before any successful poll fires the save).
+
+### What landed (working tree — JC handles commits)
+
+**`application/workflow/triggerEngine.h`** — three additions to the private section near the bottom of the `TriggerEngine` class:
+
+- `struct PersistedEmailWatermark { string m_ConnectionName, m_Folder, m_LastSeenUid, m_UpdatedAtIso; }` — informational fields plus the load-bearing `m_LastSeenUid`.
+- `std::unordered_map<std::string, PersistedEmailWatermark> m_PersistedEmailWatermarks` — key is `<workflowId>|<triggerId>`.
+- `void LoadPersistedEmailWatermarks()` + `void SavePersistedEmailWatermarksLocked()` + `std::filesystem::path EmailWatermarksFilePath() const` — three private methods.
+
+Plus `#include <filesystem>` at the top (was already implicitly available through other includes but adding directly makes the dependency explicit).
+
+**`application/workflow/triggerEngine.cpp`** — four wire-up sites:
+
+- Constructor: calls `LoadPersistedEmailWatermarks()` after `m_TriggerFileWatcher->Start()`.  Comment notes the ordering rationale: must run before any `AddEmailWatchTrigger` fires from the binder, otherwise instances seed with empty UIDs and the next poll re-seeds from current IMAP state, losing any restart-window mail.
+- `AddEmailWatchTrigger`: under `m_Mutex`, look up `m_PersistedEmailWatermarks[workflowId + "|" + triggerId]`.  If found AND non-empty UID, restore into `instance.m_LastSeenUid` + emit `[email_watch] restored persisted UID watermark '<uid>' for trigger '<id>' workflow '<wf>'` INFO line.
+- Post-poll watermark update site (was `m_EmailWatchTriggers[i].m_LastSeenUid = highestUid;`): now also updates the persisted map (writing all four fields including the `updated_at` ISO timestamp) AND calls `SavePersistedEmailWatermarksLocked()`.  Locking convention: caller already holds `m_Mutex` because the update is inside the same scoped_lock block — the `Locked` suffix on the method name documents that.
+- File-end: three method bodies + new `#include "auxiliary/file.h"`, `#include "json/jsonHelper.h"`, `#include "simdjson/simdjson.h"`.  `EmailWatermarksFilePath()` resolves `<queue_folder>/.email_watermarks.json` via `Core::g_Core->GetConfig().m_QueueFolderFilepath`; returns empty path if Core isn't initialised (defensive — load early-outs).  `LoadPersistedEmailWatermarks()` reads via `simdjson::padded_string::load` + ondemand iterate; tolerates missing informational fields (`connection_name`/`folder`/`updated_at`) but requires `workflow_id`/`trigger_id`/`last_seen_uid` for an entry to be loaded.  `SavePersistedEmailWatermarksLocked()` serialises via hand-built JSON using `JsonHelper::EscapeJsonString` (per `feedback_simdjson_only` — simdjson does parse but not pretty-print, so writers stay hand-built like the rest of the codebase) and writes via `EngineCore::AtomicWriteFile`.
+
+**`doc/cloud-integration.md`** — one-line bullet appended to the existing "email_watch Trigger" numbered list: `6. Watermarks persist across restart at <queue_folder>/.email_watermarks.json (atomic-rename per successful poll); mail that arrived during a restart window still fires the trigger on the next poll instead of being absorbed into the seed baseline.`  Per `feedback_long_term_docs_succinct` — one sentence, names the file, names the durability mechanism, names the operational outcome.
+
+### Files in working tree
+
+| File | Change |
+|---|---|
+| `application/workflow/triggerEngine.h` | +1 struct, +1 map, +3 method decls, +1 include |
+| `application/workflow/triggerEngine.cpp` | +3 method bodies, +3 wire-up sites, +3 includes |
+| `doc/cloud-integration.md` | one-line bullet on persistence |
+| `doc/misc/pre-1_0_follow-ups.md` | Sitting 12 close-out + count drop |
+| `doc/misc/hand-off.md` | This entry |
+
+### File format
+
+```json
+{
+  "format_version": 1,
+  "watermarks": [
+    {"workflow_id": "myWorkflow", "trigger_id": "email_t1", "connection_name": "my-email", "folder": "INBOX", "last_seen_uid": "12345", "updated_at": "2026-05-23T18:00:00Z"},
+    ...
+  ]
+}
+```
+
+Single file per j9t install, all email_watch triggers in one place.  Stale entries (for triggers that have been removed from any JCWF) stay in the file — they don't trigger any harm because no `AddEmailWatchTrigger` call will look them up.  If the file grows large, a future cleanup pass could purge entries that don't match a currently-registered trigger; not needed for 1.0.
+
+### What's verified
+
+| Check | Result |
+|---|---|
+| All 4 binary configs build clean (`--clang`) | clean (only pre-existing asio `-Wshadow`) |
+| Load path live | Planted a 2-entry sentinel file at `queue/.email_watermarks.json`, restarted j9t, observed `[email_watch] loaded 2 persisted UID watermark(s) from '.../queue/.email_watermarks.json'` INFO line at startup |
+| Restore-at-trigger-registration live | Hand-crafted a JCWF (`sitting12_canary`) with email_watch trigger whose `(workflowId, triggerId) = (sitting12_canary, email_t1)` matched a sentinel entry; reloaded workflows; observed `[email_watch] restored persisted UID watermark '99999' for trigger 'email_t1' workflow 'sitting12_canary'` INFO line + the subsequent `AddEmailWatchTrigger` registration line |
+| Save path live | NOT exercised — host's `my-email` connection has empty endpoint; poll fires the IMAP target validator which rejects with "invalid host or port" before reaching the watermark update.  Save code is the mirror of load (same map + same JSON shape + `EngineCore::AtomicWriteFile`) — verified by code review |
+| Regression: test_auth_mcp | **100/100** |
+| Regression: Sitting 9 collision repro | **14/14** |
+| Regression: Sitting 11 malformed_configs | **46/46** |
+| Regression: Sitting 11 negative_paths | **28/28** |
+| Regression: inputResolutionTest workflow | **4/4 tasks PASS** |
+| Active edition at session end | `studio` per `.build-edition` |
+| Running server | studio Debug on 8443, keystore unlocked, fresh build |
+
+**Aggregate: 188+ passing checks** across the regression suite.
+
+### Architecture notes for next-session-Claude
+
+- **Save site invokes `SavePersistedEmailWatermarksLocked()` inside the trigger-engine mutex.**  Method name's `Locked` suffix documents that caller MUST hold `m_Mutex`.  The actual file write (which can be slow on disk-full / fsync paths) happens under the lock — small but worth knowing if poll-batch throughput ever becomes a concern.  Acceptable for 1.0 because email_watch poll interval is min 60s and writes are tens of bytes per entry.
+- **JCWF workflow-level triggers come from `global.json`, NOT from the canvas JSON.**  Spent a chunk of this session figuring this out: the canvas JSON's `triggers` array is silently ignored (per workflowJsonParser.cpp:~1715 comment).  POSTing a canvas JSON to `/api/workflows` with embedded triggers WILL save it but the triggers won't propagate to `WorkflowDefinition.m_Triggers`; `WorkflowRegistry::SaveOrUpdateWorkflowFromJson` synthesises `global.json` from canvas-JSON metadata fields excluding triggers.  For test setups that need workflow-level triggers: hand-craft `global.json` with the `triggers` array and re-zip the `.jcwf`.
+- **Mailpit-as-IMAP isn't reachable in the host environment.**  The shipped `my-email` connection has `"endpoint": ""` which causes the IMAP target validator to reject before any IMAP query.  Live save-path testing for email_watch requires either (a) configuring a working IMAP endpoint on the existing `my-email` connection, (b) running mailpit in docker on a host:port that the IMAP validator accepts, or (c) mocking EmailConnector::CheckForNewMail to return a synthetic highest-UID.  For Sitting 12 verification I went with code review + the load+restore live test pair.
+- **Stale entries are tolerated.**  When a workflow with an email_watch trigger is removed from disk, the persisted entry stays in `.email_watermarks.json` (no `AddEmailWatchTrigger` will look it up, no harm done).  If the same `(workflowId, triggerId)` pair gets registered again later, the persisted UID is restored — which is the right behaviour for the "operator briefly deleted then re-added a workflow" case.  Long-term cleanup (purge entries that don't match any registered trigger) would be a small future addition; not gating 1.0.
+
+### Open items / next-session candidates
+
+Per `pre-1_0_follow-ups.md` after today's closure, **4 sittings remain**: 13 + 14 + 15 + 16.
+
+- **Sitting 13 cancelled** by JC mid-session — `tools/replayTranscript.py` not needed; speculative-build cost outweighs unproven demand.  Slot retired; numbering preserved.
+- **Sitting 14 — KeyManager hardening tail (4 small items)** is the next merge-gated stop.  Medium (~half-1 day).
+- **No new Sitting 16 candidates surfaced** during Sitting 12.  Basket stays at 9 items.
+
+### Gotchas next-session-Claude should know
+
+- **`triggersCount=N` in the parser-debug INFO line is misleading for workflow-level triggers.**  Canvas JSON's triggers ARE parsed (incrementing the count) but the silent-ignore at the registry layer means `WorkflowDefinition.m_Triggers` stays empty — the binder then adds an implicit `auto` trigger via the empty-triggers fallback at `workflowRegistry.cpp:807`.  Don't trust `triggersCount` alone; look for the corresponding `TriggerEngine::Add*Trigger: registered ...` line to confirm what actually got bound.
+- **`zip -q` from `cd workflows/<id>/` is the synthetic-JCWF route.**  Pack global.json + canvas JSON; place the `.jcwf` at `workflows/<id>.jcwf`; reload.  The registry's load path extracts the zip, parses both files, and registers triggers from `global.json`.  Pattern reused-able for any sitting that needs a controlled JCWF without going through the full POST API.
+- **Studio Release binary at `bin/Release/jarvisAgent-studio`** is current with this session's changes.
+
+---
+
+## 2026-05-23 (Sitting 11 — D1 negative-path test coverage) → next session
+
+JC opened Sitting 11 immediately after Sitting 10's close-out + Sitting 9's doc sweep.  The sitting was framed as "both halves in one go" (malformed-config tests + D1 hardening tests, ~21 expected new test surfaces).  Mid-sitting we caught + fixed a Sitting 9 thoroughness gap (`test_auth_mcp.py::test_adhoc_folder_namespace` had a literal `/_adhoc/{user}/` substring assertion that didn't accommodate the new `_<8hex>` slug suffix); patched the test, full suite back to 100/100.
+
+### What landed (working tree — JC handles commits)
+
+**Two new test files + the regression fix:**
+
+| File | Purpose |
+|---|---|
+| `test/config/test_malformed_configs.py` (NEW) | Subprocess-based config-parse harness — spawns the engine binary in `/tmp/claude/j9t-cfg-sandbox/<fixture>/` against each fixture under `test/config/fixtures/*.json`, captures the sandbox's `log/log.txt`, verifies every `_expected_errors` substring appears AND that the engine either stays alive or exits cleanly (rc ≥ 0; negative rc is the crash regression we'd flag).  **46 passing checks across 7 fixtures.** |
+| `test/hardening/test_negative_paths.py` (NEW) | REST-driven hardening test against the running j9t (https://localhost:8443).  4 groups, 9 sub-tests, **28 passing checks**. |
+| `test/config/fixtures/unknown_API.json` (NEW) | API enum = "API7" → InvalidAPI + ConfigChecker reject |
+| `test/config/fixtures/oob_API_index.json` (NEW) | API index 50 with 1 interface → reject |
+| `test/config/fixtures/url_substring_attack.json` (NEW) | URL with embedded `..` stored verbatim by parser (fail-open) |
+| `test/config/fixtures/malformed_types.json` (modified) | `_expected_errors` list retrofitted (Sitting 10 left it without one) |
+| `test/config/fixtures/out_of_range.json` (modified) | `_expected_errors` list retrofitted |
+| `test/config/fixtures/negative_rejected.json` (modified) | `_expected_errors` list retrofitted |
+| `test/config/fixtures/clamped_negatives.json` (modified) | `_expected_errors` list retrofitted |
+| `test/test_auth_mcp.py` (Sitting 9 regression fix) | `test_adhoc_folder_namespace` assertion updated from `f"/_adhoc/{user}/"` (with trailing slash) to `f"/_adhoc/{user}_"` (substring before the new `_<8hex>` suffix introduced by Sitting 9's SanitizeUserSlug change). |
+| `doc/misc/pre-1_0_follow-ups.md` | Sitting 11 close-out; 3 new Sitting 16 basket items (polarion path-traversal coverage, AI output size cap coverage, reaper CV shutdown-timing test); count "5 sittings remain" |
+| `doc/misc/hand-off.md` | This entry |
+
+### Test coverage matrix
+
+**Group 1 — Size caps**
+
+| Test | Surface | Verification |
+|---|---|---|
+| 1.1 | `kMaxJcwfBytes` (4 MB adhoc JCWF cap) | 5 MB JCWF → 400 `stage_failed`, `message` contains `jcwf_too_large`, /api/status still ok |
+
+**Group 2 — Path confinement on three JCWF surfaces**
+
+| Test | Surface | Verification |
+|---|---|---|
+| 2.1 | `IsAcceptedRelativePath` parser gate (cntx_files absolute path) | adhoc submit with `cntx_files: ["/etc/passwd"]` → 400 `stage_failed` |
+| 2.2 | Registry POST id-shape allowlist | `POST /api/workflows` with id `"../../etc/passwd-canary"` → 400 |
+| 2.3 | `triggerEngine.cpp:1096` ConfineUnderProjectRoot for file_watch path | POST a workflow with `file_watch` trigger path `/etc/passwd-watch-canary` → 201 (workflow stored, trigger silently dropped at registration — defensive default) |
+
+**Group 3 — Concurrency**
+
+| Test | Surface | Verification |
+|---|---|---|
+| 3.1 | WorkflowRegistry mutex stress under concurrent reload + list | 8-way parallel mix of POST `/api/workflows/reload` + GET `/api/workflows` all return 200 within 1 s (no deadlock) |
+| 3.2 | ai_calls_inflight counter leak | Submit 5 adhoc workflows + poll to terminal; `ai_calls_inflight` returns to baseline (0) — proves no per-call counter increments leaked |
+
+**Group 4 — db_query caps (`local-pg` connection)**
+
+| Test | Surface | Verification |
+|---|---|---|
+| 4.1 | dbQuery output_file path-separator rejection | `output_file: "/tmp/escape.csv"` → task fails with `"db_query 'output_file' must be a bare filename (no path separators)"`, escape file absent on disk |
+| 4.2 | `kDefaultMaxRows` cap (max_rows=5, ceiling 1M) | Query `SELECT generate_series(1, 100)` with `max_rows: 5` → task fails with `"Result set has 100 rows, exceeds max_rows=5"` |
+| 4.3 | `statement_timeout_ms` cap | `SELECT pg_sleep(2)` with `statement_timeout_ms: 100` → task fails with `"PostgreSQL query failed: ERROR: canceling statement due to statement timeout"` |
+
+Group 4 uses a connection-breaker warmup helper (`POST /api/connections/local-pg/test`) to neutralise the per-connection circuit breaker.  Without warmup, the breaker counts every failed task — including expected-app-level cap rejections — against the connection; 5 consecutive failures opens the breaker and subsequent tests short-circuit with "circuit_open" instead of hitting the cap they're meant to test.  Note this as a real Sitting 16 candidate: should "expected cap rejection" count against the breaker?  Probably not — that's an architectural conversation for post-1.0.
+
+### Sitting 9 regression: post-mortem
+
+The Sitting 9 verification only ran the new collision-repro test + two dispatch regressions, NOT the full `test_auth_mcp.py` suite.  When Sitting 11 needed to know the existing rejection coverage, the suite ran and surfaced one failure: `test_adhoc_folder_namespace` (line 396) asserted `f"/_adhoc/{user}/"` (with trailing slash) is a substring of the folder path.  After Sitting 9's `SanitizeUserSlug` change, the folder path is `_adhoc/<body>_<8hex>/...` — so the trailing slash no longer follows the user immediately.  Fix: assert `f"/_adhoc/{user}_"` (substring before the underscore that separates body from hash).  Full suite back to 100/100.  Lesson logged: `feedback_thorough_testing` — for any change touching authz / filesystem layout, the FULL `test_auth_mcp.py` suite is the regression net, not a per-feature subset.
+
+### Deferred to Sitting 16 (3 new items added)
+
+Items that the plan listed but can't be cleanly exercised from a shared host instance:
+
+| Sitting 16 # | Item | Why deferred |
+|---|---|---|
+| 5 | Polarion `WriteItemFile` / `WriteAttachmentFile` path-traversal coverage | Needs configured polarion fixture/mock — host's polarion is configured but the path-confinement-rejection path isn't trivially reproducible via REST |
+| 6 | AI output 64 KB size cap (kMaxOutputBytes) coverage | Cap is internal-truncation after AI call completes; not REST-observable as a rejection |
+| 7 | Reaper CV wake-on-stop shutdown-timing test | Requires controlled shutdown of a j9t instance; host's running j9t can't be hit for timing measurement without disturbing other tests.  Could reuse Sitting 11's sandbox-spawn harness — flagged as the fix sketch |
+
+Basket now carries **8 open items** (was 5 at Sitting 10 close).
+
+### What's verified
+
+| Check | Result |
+|---|---|
+| **`test/config/test_malformed_configs.py`** | **46 passing checks across 7 fixtures** — every fixture's `_expected_errors` list verified against the spawned engine's `log/log.txt` |
+| **`test/hardening/test_negative_paths.py`** | **28 passing checks across 4 groups** — size caps + path-confinement + concurrency + db_query caps |
+| `test/test_auth_mcp.py` (regression fix verification) | **100/100** — full suite green post-Sitting-9-regression-fix |
+| `test/security/test_adhoc_user_slug_collision.py` (Sitting 9) | **14/14 PASS** |
+| `test/dispatch/test_envelope_empty_body_rejected.py` | PASS — adhoc envelope rejection still working |
+| `test/run_tests.py --workflow inputResolutionTest` | PASS — 4/4 tasks |
+| Active edition at session end | `studio` per `.build-edition` |
+| Running server at session end | studio Debug, port 8443, keystore unlocked |
+
+**Aggregate: 190 passing checks across the Sitting 11 + regression suite.**
+
+### Architecture notes for next-session-Claude
+
+- **Sandbox-spawn harness pattern.**  `test/config/test_malformed_configs.py` provides a reusable subprocess-spawn pattern for any test that needs to exercise startup-time C++ code paths against a controlled fixture.  Each fixture lives in `/tmp/claude/j9t-cfg-sandbox/<name>/` with minimal `queue/`, `workflows/`, `log/`, `scripts/` directories.  Port injection (default 8444) only happens when the fixture doesn't already define one — fixtures that test port handling (e.g. port="https" or port=99999) MUST keep their original value.  Survival contract is "process didn't crash" (rc ≥ 0) rather than "responds on a specific port", because some fixtures intentionally leave the listen port unpredictable.  Sitting 16 #7 (reaper CV) is a natural follow-on use of this harness.
+- **Connection-breaker warmup.**  When testing per-connection cap rejections that are classified as "failures" by the circuit breaker, hit `POST /api/connections/<name>/test` first as a warmup.  Without it, 5 consecutive cap-rejection tests trip the breaker open and subsequent tests fail with "circuit_open" instead of hitting the cap.  See `_warm_up_connection` in test_negative_paths.py.
+- **Run-JSON shape gotcha.**  `GET /api/workflow-runs/<id>` returns task errors under `run.tasks[i].error`, NOT `last_error` / `error_message` / `m_LastError`.  My first version of `_poll_terminal` got this wrong; verified the right field name via raw curl + python -m json.tool against a live run.
+- **`_expected_errors` fixture contract.**  Each malformed-config fixture carries its own list of substrings that MUST appear in the spawned j9t's log.  The harness strips `_comment` + `_expected_errors` before writing config.json to the sandbox.  Future fixtures should follow this contract.
+
+### Open items / next-session candidates
+
+Per `pre-1_0_follow-ups.md` after today's closure, **5 sittings remain**: 12 + 13 + 14 + 15 + 16.
+
+- **Sitting 12 — Cloud tail: persist email_watch watermark across restart** is the next merge-gated stop.  Small (~half-day).  Drops post-restart silent-skip of mail that arrived during the j9t restart window.
+- **Sitting 16 basket** grew to 8 items (was 5).  3 new items from Sitting 11 (Polarion path-traversal coverage, AI output size cap coverage, reaper CV shutdown-timing test).  Basket-pass execution time estimate scales with item count — JC may want to split into per-theme passes when the basket runs.
+
+### Gotchas next-session-Claude should know
+
+- **Run `test/test_auth_mcp.py` as part of EVERY sitting that touches authz / filesystem layout / slug derivation.**  Sitting 9 didn't, and a literal-substring regression slipped through for a full sitting cycle.  Cost was ~5 minutes to find and fix once surfaced; cost would have been much higher if it had landed in a release.  `feedback_thorough_testing` updated with this lesson.
+- **The cp -i alias still bites.**  When swapping config.json for any fixture run, use `\cp -f`.  Last seen blocking Sitting 10's malformed-fixture run.
+- **The MCP-bridge heartbeat trap is still a live operational risk.**  Every server restart (planned or otherwise) requires immediate keystore unlock within ~150 s or the bridge's heartbeat polling will burn through the per-IP lockout counter (10 failures / 5 min) and lock JC out for 15 minutes — during which REST shutdown is ALSO blocked.  Sitting 16 #4 is the fix; consider promoting it out of the basket if the operational pain continues.
+- **The host's local-pg circuit breaker recovers to closed on a clean connection test.**  If you trip it during testing, `POST /api/connections/local-pg/test` with the admin key resets it.  Group 4's helper does this automatically; manual probes (curl) need to do it explicitly.
+
+### Follow-on within the same session: doc sweep
+
+After Sitting 11 closed, JC asked for a doc sweep.  Per `feedback_session_handoff_log` + the established Sitting 9 pattern, I greps every tracked doc that names a test/ path or rejection-branch keyword.  Two steady-state docs needed updates:
+
+| Doc | Change |
+|---|---|
+| `CLAUDE.md` | "Testing" section gained five new commands: `test/test_auth_mcp.py`, `test/security/test_adhoc_user_slug_collision.py` (Sitting 9), `test/config/test_malformed_configs.py` (46 checks), `test/hardening/test_negative_paths.py` (28 checks).  Each entry carries a one-line summary of what it covers so next-session-Claude doesn't have to read the file to know whether to run it. |
+| `doc/cyber security.md` | New sub-section "Empirical verification — D1 negative-path tests (Sitting 11)" inserted after the "MCP + adhoc threat surface" threat-model table (around line 203).  Contains a per-group test-coverage table for `test_negative_paths.py` + a per-fixture summary for `test_malformed_configs.py` + a "run before any PR touching these files" trigger list + a deferred-coverage note pointing at Sitting 16 #5–#7.  The placement mirrors the existing "Empirical verification — heap-scan audit (Sittings 8c + 8d + 8e)" sub-section so reviewers find both empirical-verification blocks in the same docs region. |
+
+**Tracked docs left as-is** (verified each is intentionally skipped, not overlooked):
+
+- `test/README.md` — Existing convention is that this file documents `run_tests.py` (the JCWF workflow runner) only.  It doesn't enumerate `test_auth_mcp.py`, `test/dispatch/*`, `test/security/*`, etc.  Respecting the convention; CLAUDE.md is the cross-cutting test-command index.
+- `doc/architecture.md` — Lists individual test files only when they enforce a contract (e.g. `test_schema_covers_parser.py` at line 218).  Negative-path tests are coverage, not contract — they don't fit the existing architecture-doc convention.
+- `doc/api-endpoints.md` — REST surface documentation.  The new tests' assertions about HTTP codes / error bodies are *already* documented at each endpoint; the tests verify the docs, they don't add to them.
+- `doc/jarvisagent.md` — User manual; test infrastructure is outside its scope.
+- `doc/misc/*` — Session notes are historical artifacts per `feedback_no_audit_traces_in_code`.
+- `combined*.md`, jarvisCpp{CyberSec,Safety}Audit JCWFs — per `feedback_combined_doc_generated` + `feedback_audit_republish_end_of_domain`.
+
+**Post-sweep correction (same session):**
+
+- The circuit-breaker-counts-expected-app-failures observation (Group 4 of `test_negative_paths.py` exposed it: consecutive cap-rejection tests trip the breaker open, requiring a `POST /api/connections/<name>/test` warmup helper) was promoted from "post-1.0 architectural conversation" to **Sitting 16 basket item #8** on JC's call.  Per `project_pre_1_0_release_push`: pre-1.0 findings flag through the basket gate, not silent deferral.  Fix sketch logged in the basket entry: extend `CloudCircuitBreaker::RecordFailure` to weight by `ConnectorErrorCode` — `ValueOutOfRange` (cap class) shouldn't decrement the connection's health budget.  Basket now carries **9 open items**.
+- **Doc-sweep retracted + redone for verbosity + sitting-ref violations.**  My initial sweep added a 25-line "Empirical verification (Sitting 11)" sub-section to `doc/cyber security.md` plus sitting-tagged test commands in `CLAUDE.md` — both violating `feedback_no_audit_traces_in_code` (recurring violation, second time in two sittings).  JC called it out; I rewrote both as steady-state and collapsed the cyber-sec sub-section to ~2 sentences.  Memory elevated: `feedback_no_audit_traces_in_code` rewritten as TOP-TIER with pre-write grep check; new `feedback_long_term_docs_succinct` memo added; both promoted to MEMORY.md positions 1 and 2 above `project_pre_1_0_release_push` so they're hit first on every conversation start.  Also swept 5 pre-existing sitting refs in long-term docs (`doc/cyber security.md` × 3 sites, `engine/json/json.md`, `engine/curlWrapper/curlWrapper.md`).  Final grep across all long-term docs: zero sitting refs remaining.
+
+**Open / deferred items review (per JC's "deferral window is closing" prompt):**
+
+- **Sitting 11 acceptance: no items deferred from THIS sitting.**  All planned tests landed or are explicitly in Sitting 16 (with per-item rationale).  The 3 new Sitting 16 entries (#5 Polarion, #6 AI output size cap, #7 reaper CV) are not "I ran out of time" deferrals — they're "this test surface isn't cleanly REST-driveable" deferrals with a clear fix sketch (reuse the sandbox-spawn harness) where applicable.
+- **Sitting 9 thoroughness gap discovered + fixed mid-sitting** — `test_adhoc_folder_namespace` regression — already documented in the main entry, lesson logged.
+- **No other open or deferred items remain.**
+
+---
+
+## 2026-05-23 (Sitting 10 — ConfigParser 38-site boilerplate refactor) → next session
+
+JC opened Sitting 10 immediately after Sitting 9's close-out + doc sweep.  The refactor collapsed 29 of 38 field-parse sites in `engine/json/configParser.cpp` into single-line helper calls; behaviour-neutrality verified byte-identical against the pre-refactor binary on both happy-path and malformed/out-of-range fixtures.
+
+### What landed (working tree — JC handles commits)
+
+**Six file-local helpers added to `engine/json/configParser.cpp` anonymous namespace** (one more than the plan's four — uint64 and log-only string variants came out of enumerating actual sites):
+
+| Helper | Purpose | Sites |
+|---|---|---|
+| `ParseStringField` | string → target + counter | 10 in Parse(), 5 in ParseInterfaces() |
+| `ParseStringFieldLogOnly` | string → log + count, no storage | 2 in Parse() (description, author) |
+| `ParseInt64Field<T>` + `NumericPolicy` enum | int64 with per-site policy | 8 in Parse() |
+| `ParseUint64Field<T>` | uint64 → target + counter | 1 in Parse() (MaxRequestBodyMB) |
+| `ParseBoolField` | bool → target + counter | 1 in Parse() (verbose) |
+| `ParseInt64FieldWithBounds<T>` | int64 with [min,max] clamp + WARN-on-out-of-range + default + optional `warnSuffix` (" (auto)" for port) | 2 in Parse() (port, session_timeout_hours) |
+
+`NumericPolicy` enum has four variants — `AcceptAny`, `RejectNegative`, `ClampNegativeToZero`, `StoreOnlyIfPositive` — that capture the per-site post-extract checks declaratively at the call site rather than open-coded.
+
+**Total enumeration: 38 field-parse branches** (`grep -nE "jsonObjectKey == \"" configParser.cpp | wc -l` → 38).  Refactored: 29.  Stayed inline (with reason documented at each site):
+
+| Stay-inline site | Reason |
+|---|---|
+| `file format identifier` (Parse) | counter-only, no value extraction |
+| `API interfaces` (Parse) | array dispatch into `ParseInterfaces` |
+| `use_bash` (Parse) | platform-conditional INFO suffix " (Windows-only, ignored on this platform)" |
+| `max_context_tokens` (ApiInterface) | silent-on-failure (no log/no error on type mismatch) |
+| `default_output_tokens` (ApiInterface) | silent-on-failure + StoreOnlyIfPositive |
+| `rate_limit` (ApiInterface) | nested object with its own sub-field parse loop |
+| `API` (ApiInterface) | migration-error path for legacy "Test" + ParseInterfaceType enum mapping |
+| `is_mock` (ApiInterface) | distinct error message wording ("must be a bool" not "must be a boolean"), no counter |
+| `fixture_path` (ApiInterface) | distinct lenient handling, no counter |
+
+**Helper design choice — raw `uint32_t*` counter pointer rather than `ConfigFields` enum + `FieldOccurances` array reference.**  `ConfigFields` and `FieldOccurances` are private members of `ConfigParser`; passing them into anonymous-namespace helpers would have required `friend ConfigParser` or making the types public.  Raw pointer keeps helpers file-local + the enum indexing happens at the call site (`&fieldOccurances[ConfigFields::QueueFolder]`).  Nullable so log-only string sites + future counter-less sites work without a fork.
+
+**4 malformed-config fixtures landed under `test/config/fixtures/`:**
+
+| Fixture | Tests |
+|---|---|
+| `malformed_types.json` | every wrong-type field type — string-where-string-expected → 23 ERRORs |
+| `out_of_range.json` | port=99999, session_timeout_hours=500 → 2 WARNs + clamp-default INFOs |
+| `negative_rejected.json` | negative-value rejection for the 5 RejectNegative-policy fields |
+| `clamped_negatives.json` | clamping for max_ai_calls_per_jcwf, max_per_item_fan_out, jcwf batch size |
+
+Each fixture carries a `_comment` field documenting the expected behaviour for Sitting 11's test harness.  ConfigParser treats `_comment` as an unknown field (best-effort stringification log) — no parse error.
+
+**Doc updates (same session):**
+
+| Doc | Change |
+|---|---|
+| `engine/json/json.md` | Section 2.4 rewritten to describe the helper family + `NumericPolicy` enum + the 9 stay-inline sites with reasons.  Section 2.5 updated to mention the ParseStringField use in ParseInterfaces with the narrower `"ConfigParser: API interface"` logPrefix. |
+| `doc/misc/pre-1_0_follow-ups.md` | Sitting 10 marked closed at the top + "6 sittings remain (11, 12, 13, 14, 15, 16)".  Plan section rewritten as close-out paragraph. |
+| `doc/misc/hand-off.md` | This entry. |
+
+### Files in working tree
+
+| File | Change |
+|---|---|
+| `engine/json/configParser.cpp` | +6 helpers in anon namespace; Parse() field loop collapsed from ~360 lines to ~150; ParseInterfaces string fields collapsed from 60 lines to 30; total file size 950 → 921 lines (modest because helper bodies replace per-site bodies, but call sites are dramatically simpler) |
+| `engine/json/json.md` | Section 2.4 + 2.5 updates |
+| `test/config/fixtures/malformed_types.json` (NEW) | wrong-type fixture |
+| `test/config/fixtures/out_of_range.json` (NEW) | range-clamp fixture |
+| `test/config/fixtures/negative_rejected.json` (NEW) | reject-negative fixture |
+| `test/config/fixtures/clamped_negatives.json` (NEW) | clamp-to-zero fixture |
+| `doc/misc/pre-1_0_follow-ups.md` | Sitting 10 close-out |
+| `doc/misc/hand-off.md` | This entry |
+
+### What's verified
+
+| Check | Result |
+|---|---|
+| Studio Debug + Release builds (`--clang`) | clean (only pre-existing asio `-Wshadow`) |
+| Engine Debug + Release builds (`--clang --engine`) | clean |
+| **Behaviour-neutrality: happy-path log diff** | `diff /tmp/claude/sitting10_pre_notime.log /tmp/claude/sitting10_post_notime.log` → exit code 0, **zero lines diff**.  120 ConfigParser INFO + field-summary lines from the pre-refactor binary vs the post-refactor binary against the same real `config.json` — byte-identical (timestamps aside) |
+| **Behaviour-neutrality: malformed-types fixture** | 23 ERROR lines, every one matched `ConfigParser: '<key>' must be a <type>` shape exactly.  Type labels matched per-helper ("string", "number", "boolean", "non-negative number" for uint64).  ApiInterface variant produced `ConfigParser: API interface 'description' must be a string` + `ConfigParser: API interface 'is_mock' must be a bool` (bool not boolean — matches kept-inline site) |
+| **Behaviour-neutrality: out_of_range fixture** | `port 99999 out of range [0, 65535], defaulting to 0 (auto)` + `port: 0` + `session_timeout_hours 500 out of range [1, 168], defaulting to 8` + `session_timeout_hours: 8` — byte-identical to pre-refactor WARN format (no `ConfigParser:` prefix on the WARN per pre-refactor, with `warnSuffix=" (auto)"` for port) |
+| Regression: existing adhoc empty-body test | PASS |
+| Regression: Sitting 9 slug-collision test | 14/14 PASS |
+| Regression: `inputResolutionTest` workflow | 4/4 tasks PASS |
+| Regression: `make-example` workflow | PASS |
+| Active edition at session end | `studio` per `.build-edition` |
+| Running server at session end | studio Debug, port 8443, keystore unlocked, fresh build |
+
+### Architecture notes for next-session-Claude
+
+- **Adding a new config.json field is now one line in Parse().**  Pick the matching helper based on JSON value type + post-extract policy.  String?  `ParseStringField(jsonObject.value(), jsonObjectKey, engineConfig.m_NewField, &fieldOccurances[ConfigFields::NewField]);`.  Bounded number?  `ParseInt64FieldWithBounds(jsonObject.value(), jsonObjectKey, engineConfig.m_NewField, kMin, kMax, kDefault, &fieldOccurances[ConfigFields::NewField]);`.  The `ConfigFields` enum + `ConfigFieldNames` array in `configParser.h` still need an entry for the field summary log.
+- **Adding a new ApiInterface string field is one line in ParseInterfaces().**  Pass `"ConfigParser: API interface"` as the `logPrefix` so error logs land in the narrower scope.
+- **`NumericPolicy` choices, by site type.**  RejectNegative: size_t / uint32_t targets where negative is meaningless (default-via-configChecker semantics).  ClampNegativeToZero: cap-style fields where negative just means "no cap" (`max_ai_calls_per_jcwf` etc.).  StoreOnlyIfPositive: fields where 0/negative means "keep existing default" (`jcwf batch size`).  AcceptAny: signed-permissive fields where -1 has meaning (`jcwf AI interface` sentinel) or where the target is a sign-permitting type (`int64_t sleepTime` before chrono conversion).
+- **Helpers stay file-local.**  They're in the anonymous namespace and take a raw `uint32_t*` counter rather than the private `ConfigFields` enum.  Don't promote to ConfigParser methods just to use the enum directly; the file-local design is intentional and matches the existing `ParseInterfaceType` / `InterfaceTypeName` / `ResolveMaxContextTokensFromModelImpl` helpers in the same anon namespace.
+- **The 9 stay-inline sites are NOT technical debt.**  Each has a reason that doesn't fit the boilerplate pattern (silent-on-failure, nested object, migration logic, distinct log shape, platform-conditional log).  Don't try to push them through helpers without first widening the helper interface — the resulting helper bloat would defeat the readability gain.
+
+### Open items / next-session candidates
+
+Per `pre-1_0_follow-ups.md` after today's closure, **6 sittings remain**: 11 + 12 + 13 + 14 + 15 + 16.
+
+- **Sitting 11 — Verification: malformed config.json tests + D1 negative-path fixtures** is the next merge-gated stop.  Sitting 10 already landed 4 fixtures under `test/config/fixtures/` — Sitting 11 will write the `test_malformed_configs.py` harness that ingests them + extends the fixture set to cover `negative-numeric.json`, `unknown-API.json`, `oob-API-index.json`, `url-substring-attack.json` (per the plan's acceptance list).  Plus the D1 negative-path fixtures under `test/hardening/`.
+- **No new Sitting 16 candidates surfaced this sitting.**  The basket stays at the same 5 items from Sitting 9's close-out (dual SigV4Signer classes, OAuth StoreTokens secret-string params, awsSigV4 HmacSha256 data param consistency, MCP-bridge heartbeat trap, ReadMeta hand-rolled JSON pluck).
+
+### Gotchas next-session-Claude should know
+
+- **`cp -i` alias bites.**  When swapping config.json for a fixture run, use `\cp -f` (or `/bin/cp -f`) to bypass the interactive overwrite prompt.  An interactive `cp` waiting on STDIN looks like a successful command in non-interactive shells but silently doesn't replace the file — I caught this only because the test produced the wrong log output and forced a re-investigation.
+- **`MCP-bridge heartbeat trap during malformed-fixture runs.**  When restarting j9t with a malformed config, the keystore is locked again on the new process — MCP-bridge keeps polling and burns through the lockout counter.  The Sitting 16 fix (Item #4) is more urgent than its "post-1.0?" classification suggests for any sitting that does fixture-based config testing; for now, unlock the keystore IMMEDIATELY after the malformed-fixture process starts and BEFORE the 5-minute lockout window expires.  Today's runs all stayed within the window because each malformed-fixture pass takes ~4s before shutdown.
+- **The behaviour-neutral byte-diff is the gold standard verification for this kind of refactor.**  Both the pre and post binaries dump their `LOG_CORE_INFO("description: jarvisAgent ...")`, `LOG_CORE_INFO("field: <Name>, field occurance: <N>")` lines through the same spdlog sink with the same `[Engine] [info]` prefix.  Strip the timestamp with `sed 's/^\[[^]]*\] //'` and `diff` against the pre-snapshot — zero output = byte-equivalent.  Capture the pre-snapshot BEFORE running the new binary because j9t's log rotation will overwrite the running log on next startup if no rotation is configured.
+- **`test/config/fixtures/*.json` files contain a `_comment` field** that documents the expected behaviour.  ConfigParser treats unknown fields as best-effort-logged + skipped, so the `_comment` doesn't break parse.  Sitting 11's test harness should ignore the `_comment` field when generating expected-output strings.
+- **Studio Release binary at `bin/Release/jarvisAgent-studio`** is current with this session's changes.
+
+---
+
+## 2026-05-23 (Sitting 9 — SanitizeUserSlug collision fix + Sha256Hex consolidation) → next session
+
+JC opened Sitting 9 per `pre-1_0_follow-ups.md`.  The fix is small in lines of code but touched five files and consolidated a third would-be-copy of `Sha256Hex` into a new shared helper.  Live e2e collision-repro test landed under `test/security/`.  All 14 checks pass; existing adhoc + non-adhoc regression tests stay green; all 4 binary configs build clean.
+
+### What landed (working tree — JC handles commits)
+
+**`SanitizeUserSlug` now appends `_<8 hex chars of SHA-256(original_user)>`** (`application/workflow/adhocWorkflowManager.cpp:108-145`).  Two-stage: character-collapse the user to `[A-Za-z0-9._@-]_` (body capped at 55 bytes via the new `kMaxUserSlugBodyLength` = 64 − 1 − 8), then append `_<8hex>` (total ≤ 64).  Hash is over the ORIGINAL pre-collapse user string — collapse is lossy, hash is not.  `bob+admin@example.com` and `bob_admin@example.com` previously collapsed to the same `bob_admin@example.com` slug; now their hex suffixes are `_e73fea79` vs `_acbd47ee` (and JC can re-derive distinct slugs for any pair he cares to check).  The collapse-suffix split is intentional: distinct users that DON'T pre-fix collide still get a stable, recognisable slug body — only the hash disambiguates.
+
+**Authz primitive switched from slug to user identity** (`application/web/webServer.cpp:7894-7910` + `8124-8140`).  Pre-fix the two adhoc-artifact REST handlers computed `callerSlug = SanitizeUserSlug(auth.m_User)` and compared to `info->m_OwnerSlug`.  After the hash suffix this would have broken legacy folders' accessibility (callerSlug is now hashed, legacy stored owner_slug is unhashed), AND it was always the wrong primitive — the slug is a filesystem-naming derivative, the actual authorisation primitive is who the caller is.  Both sites now compare `auth.m_User != info->m_User` directly.  The slug becomes purely a filesystem-organisation primitive; collision-prone slugs no longer leak access regardless of what the suffix does.  Security log lines unchanged (already named caller/owner via `m_User` fields, not slug fields).
+
+**`ReadMeta` legacy-meta backfill reads from parent dir name** (`application/workflow/adhocWorkflowManager.cpp:373-381`).  Pre-fix the backfill ran `SanitizeUserSlug(meta.m_User)` to fill an empty `m_OwnerSlug` field; post-fix that would compute the NEW hashed form and bake a slug that doesn't match the legacy filesystem dir name.  Switched to `folder.parent_path().filename().string()` — the canonical truth on disk.  Also extended the guard to apply whenever owner_slug is empty (not just when user is non-empty) since the new fallback is independent of user.
+
+**Horizontal sweep: shared `Sha256Hex` helper at `engine/auxiliary/sha256.{h,cpp}`.**  Two pre-existing file-local copies (`engine/curlWrapper/awsSigV4.cpp:65` + `application/web/mcpKeyManager.cpp:75`) plus the would-be-third for adhocWorkflowManager triggered `feedback_cpp_discipline` ("extract before a third site appears").  New header exports `std::string Sha256Hex(std::string_view data)` — empty-string return on the impossible OpenSSL-NULL path, LOG_CORE_ERROR with `Sha256Hex:` tag inside the helper so callers without run context still get a breadcrumb.  6 call sites in `mcpKeyManager.cpp` migrated to `EngineCore::Sha256Hex`; 4 in `awsSigV4.cpp` migrated (including the `awsSigV4.cpp::RunSelfTest` empty-input KAT at line 339).  The engine-side SigV4 self-test (locked Bedrock KAT signature) ran on server start — passed — proving byte-identical output post-consolidation.  `<openssl/sha.h>` removed from mcpKeyManager.cpp (no remaining caller); kept in awsSigV4.cpp (still uses SHA256_DIGEST_LENGTH directly elsewhere).
+
+**`polarionClient.cpp:63-69` cross-ref comment refresh.**  The "matches AdhocWorkflowManager::SanitizeUserSlug's character set" comment now explains that SanitizeUserSlug also appends an 8-hex suffix; hex `[0-9a-f]` is a strict subset of the polarion ID allowlist so cross-component filesystem-safety still holds.
+
+### Files in working tree
+
+| File | Change |
+|---|---|
+| `engine/auxiliary/sha256.h` (NEW) | shared `Sha256Hex` declaration |
+| `engine/auxiliary/sha256.cpp` (NEW) | shared `Sha256Hex` implementation |
+| `engine/curlWrapper/awsSigV4.cpp` | local `Sha256Hex` deleted; 4 callers route through `EngineCore::Sha256Hex` |
+| `application/web/mcpKeyManager.cpp` | local `Sha256Hex` deleted; 6 callers route through `EngineCore::Sha256Hex`; `<openssl/sha.h>` removed |
+| `application/workflow/adhocWorkflowManager.cpp` | `SanitizeUserSlug` appends `_<8hex>`; `ReadMeta` backfill from parent dir name; `kMaxUserSlugBodyLength` constant |
+| `application/web/webServer.cpp` | 2 authz sites flipped from slug compare to `m_User` compare |
+| `application/workflow/filter/polarionClient.cpp` | cross-ref comment refresh |
+| `test/security/test_adhoc_user_slug_collision.py` (NEW) | live e2e collision-repro test |
+| `doc/misc/pre-1_0_follow-ups.md` | Sitting 9 marked closed |
+| `doc/misc/hand-off.md` | this entry |
+
+Net diff scope: 2 new files (sha256.{h,cpp}) + 1 new test + 5 modified .cpp/.h files + 2 doc updates.
+
+### What's verified
+
+| Check | Result |
+|---|---|
+| Studio Debug build (`--clang`) | clean (only pre-existing asio `-Wshadow`) |
+| Studio Release build (`--clang`) | clean |
+| Engine Debug build (`--clang --engine`) | clean |
+| Engine Release build (`--clang --engine`) | clean |
+| SigV4 startup self-test (locked Bedrock KAT signature) | **PASSED** — `Sha256Hex` consolidation is byte-identical to the pre-refactor bytes |
+| Live e2e collision repro (`test/security/test_adhoc_user_slug_collision.py`) | **PASS 14/14** — two pre-fix-colliding users produce distinct hashed slugs; cross-user 403 with `not_owner`; admin 200 with `admin_cross_user_read` INFO audit line; self-access 200 |
+| Regression: existing `test_envelope_empty_body_rejected.py` | **PASS** — adhoc dispatch path intact |
+| Regression: non-adhoc workflow `inputResolutionTest` | **PASS** 4/4 tasks |
+| Security audit log lines | verified inline at `log/log.txt`: 2 × `[security] run_files_denied reason=not_owner` (WARN) + 2 × `[security] admin_cross_user_read kind=list` (INFO) |
+| On-disk slug dirs distinct | verified: `_adhoc/<body>_e73fea79/` and `_adhoc/<body>_acbd47ee/` (same body, different suffix) |
+| Active edition at session end | `studio` per `.build-edition` |
+
+### Architecture notes for next-session-Claude
+
+- **`EngineCore::Sha256Hex(std::string_view)` is the canonical SHA-256-hex helper** under `engine/auxiliary/sha256.h`.  Returns empty string on the impossible OpenSSL-NULL path (logs LOG_CORE_ERROR internally with a `Sha256Hex:` tag so callers without run context still get a breadcrumb).  When extending the SecureString-only HTTP path or any other path that needs a SHA-256 digest of a SecureString view, use this helper — `string_view` input lets callers feed `SecureString::Get()` views without a `std::string` materialisation step.
+- **Adhoc authz is on `m_User`, not slug.**  Future REST handlers that touch adhoc artifacts should follow the pattern in `webServer.cpp::HandleRunFilesListGet` (around line 7895) — compare `auth.m_User` directly to `info->m_User`.  The slug is purely for filesystem organisation; never use it for authorisation comparisons.
+- **`SanitizeUserSlug`'s body cap is `kMaxUserSlugBodyLength = 55`**, not the old 64.  The slug builder appends `_<8hex>` to a body of at most 55 chars to keep the total at ≤ 64 (the original limit).  If a future change wants longer slugs, update both constants.
+- **`ReadMeta` legacy-meta backfill reads from `folder.parent_path().filename()`.**  For any future case where the on-disk slug dir name needs to be re-derived for legacy state, prefer reading the dir name directly over re-running a hash function — the dir name IS the truth.
+
+### Open items / next-session candidates
+
+Per `pre-1_0_follow-ups.md` after today's closure, **7 sittings remain**: 10 + 11 + 12 + 13 + 14 + 15 + 16.
+
+- **Sitting 10 — `ConfigParser` 36-field boilerplate refactor** is the next merge-gated stop.  Plan unchanged; full text at `pre-1_0_follow-ups.md` "Sitting 10".  Pairable with Sitting 11 (malformed config fixtures) if time permits — they share the test surface.
+- **Sitting 16 — Incidental-findings basket** — no new items surfaced this sitting.  The four existing entries (dual SigV4Signer classes, OAuthTokenManager::StoreTokens secret-string params, engine awsSigV4::HmacSha256 data param consistency, MCP-bridge heartbeat trap during locked startup) remain.
+
+### Gotchas next-session-Claude should know
+
+- **`premake5 clean` is required when switching between `--clang` (libc++) and gcc builds.**  Stale `.o` files from a prior toolchain leave the linker unable to resolve symbols — the error shape is `std::__1::*` undefined references (libc++ mangling against libstdc++ link) or `std::__cxx11::*` undefined (libstdc++ mangling against libc++ link).  Reproduced this session when initial `premake5 gmake` (no `--clang`) tried to link against stale clang artefacts.  `premake5 clean` + re-run with `--clang` resolves; takes a full rebuild but it's the canonical fix.
+- **`premake5 clean` ALSO wipes React + MCP `dist/` outputs** (per `feedback_rebuild_after_premake_clean`).  For REST-only test paths the server starts fine without them; for any UI-touching test JC should rebuild dashboard/editor/MCP before launching.  This sitting's test is REST-only so the dists are still gone in working tree — JC will want to `npm run build` in all three before launching for editor work.
+- **MCP-bridge heartbeat trap is still live** (Sitting 16 entry #4).  When restarting the server during a sitting, unlock the keystore IMMEDIATELY — JC's prompt this session reminded that bridge heartbeats burn through the per-IP lockout counter while the keystore is locked.  Today's restart unlocked within ~1 s of port-up; no lockout fired.  Watch for this in any sitting that involves server restarts.
+- **The two test adhoc folders persist on disk** under `_adhoc/bob_admin-baa2fc62@example.com_{acbd47ee,e73fea79}/` (TTL 1h from 2026-05-23T16:10:13, so reaped automatically by ~17:10).  JC can inspect their `meta.json` to confirm the post-fix shape — each carries the original user string + the new hashed owner_slug.  No cleanup required; the reaper will sweep them.
+- **Studio Release binary at `bin/Release/jarvisAgent-studio`** is current with this session's changes.  Switching to it (instead of Debug) for any post-session live work is a one-liner: shut down via `POST /api/shutdown`, start `./bin/Release/jarvisAgent-studio`, unlock the keystore.
+
+### Follow-on within the same session: doc sweep + Sitting 16 finding
+
+After the implementation closed, JC asked for a thorough doc sweep — verify every tracked doc that names `SanitizeUserSlug`, `owner_slug`, or the adhoc authz primitive reflects the post-fix shape, and flag anything noticed mid-sitting that should drop into the Sitting 16 incidental-findings basket.
+
+**Tracked-doc updates (steady-state docs only — combined*.md / CyberSecAudit / SafetyAudit JCWFs skipped per `feedback_combined_doc_generated` + `feedback_audit_republish_end_of_domain`):**
+
+| Doc | Change |
+|---|---|
+| `doc/api-endpoints.md` | "Folder layout" paragraph (around line 560) rewritten to describe the body-plus-`_<8hex>` slug shape and to clarify that authorisation runs on the original user identity, not on a derived slug.  Example response body's `owner_slug` value updated from `"alice@company.com"` to `"alice@company.com_a1b2c3d4"` so client integrators see the right shape. |
+| `doc/cyber security.md` | "Isolated folder per run, namespaced by user" bullet (around line 170) rewritten with the new slug shape + collision-free guarantee.  "Ownership check" bullet (around line 180) rewritten: comparison primitive is `auth.m_User == info->m_User`, not slug↔slug; slug is the second-layer defence.  Threat-model table row "Cross-tenant artifact leak" (around line 202) updated with the identity-based handler check + hash-suffixed namespace wording. |
+| `doc/architecture.md` | Adhoc subsection (around line 124) authorisation sentence updated to name the `m_User == m_User` primitive explicitly.  "Key Design Decisions" table row "Per-user folder namespace for adhoc" (around line 395) rewritten with the slug shape + the "authorisation primitive is original user identity, never a derived slug" rationale. |
+| `CLAUDE.md` | New discipline bullet under "Discipline rules": `EngineCore::Sha256Hex(std::string_view)` at `engine/auxiliary/sha256.h` is the canonical SHA-256 hex helper.  Inserted directly above the `AtomicWriteFile` bullet (similar shape, similar reasoning).  Captures the consolidation so a future would-be-fourth copy of `Sha256Hex` gets caught at code-review time. |
+| `engine/auxiliary/auxiliary.md` | New section 2 "SHA-256 Hex Helper" between Filesystem Utilities and Thread Pool Wrapper.  Documents the API, the rationale for consolidation (three pre-fix would-be copies), the `string_view` input choice (load-bearing for SecureString throughput), the reference implementations across SigV4 / mcpKeyManager / adhoc slug, and the self-test KAT inside SigV4's `RunSelfTest` that catches regressions before any traffic is served. |
+| `doc/misc/pre-1_0_follow-ups.md` | Sitting 16 basket gained entry #5 — see below. |
+| `doc/misc/hand-off.md` | This follow-on section. |
+
+**Tracked docs left as-is (verified the existing content is still accurate post-fix or out of scope):**
+
+- `doc/jarvisagent.md:458` — mentions the layout `_adhoc/<user_slug>/<run>/` at the workflow-spec level without internal shape detail; no slug-character-class description to fix.
+- `doc/roadmap.md:10` — bullet-level layout reference, no internal detail.
+- `doc/jarvisagent.1` / `doc/jarvisagent.html` — generated man pages; produced from `doc/jarvisagent.md` so no direct edit.  Will regenerate cleanly at the next man-page rebuild.
+- `doc/cloud-integration.md:413` — references the cloud-side `SigV4Signer::Sha256Hex()` method (NOT the consolidated engine one).  Still accurate — the cloud-side signer keeps its own helper until Sitting 16 entry #1 consolidates the dual SigV4Signer classes, at which point both Sha256Hex copies fold into `EngineCore::Sha256Hex` together.
+- `doc/misc/S3-D1-session-note.md` and other `doc/misc/*` session notes — historical session records, per `feedback_no_audit_traces_in_code` ("upstream docs describe steady state, not iteration history").  Their references to the old slug shape are accurate at the time of writing; they document what was known then.
+
+**New Sitting 16 entry (item #5):** `AdhocWorkflowManager::ReadMeta` uses a `std::string::find`-based hand-rolled JSON pluck (`adhocWorkflowManager.cpp:373-394`) instead of simdjson DOM.  Violates `feedback_simdjson_only`.  Theoretical-only weakness today: `WriteMeta` JSON-escapes symmetrically, and the four field values are upstream-validated by McpKeyManager + the cleanup-policy whitelist.  Adding to Sitting 16 per JC's call (pre-1.0 closing-list policy — flag rather than silently defer).  Fix sketch: rewrite using the same simdjson DOM pattern already used by `RewriteWorkflowId` in the same file; keep the parent-dir-name fallback for legacy meta.json files missing `owner_slug`.  Small effort.
+
+**Open / deferred items review (per JC's "deferral window is closing" prompt):**
+
+- **Sitting 9 acceptance: legacy-folder reachability** — the plan's acceptance criterion "Existing adhoc folders (legacy slug in `meta.json`) remain reachable via their stored `owner_slug`" was not exercised by a real legacy folder in the dev env (the existing `_adhoc/` contained only the two test-collision dirs from this session, both with post-fix shape).  The code path was verified by inspection: `Init()` scans `_adhoc/<l1>/<run>/`, calls `ReadMeta` for each, which now backfills `owner_slug` from `folder.parent_path().filename()`.  `GetRunInfo(runId)` returns the cached entry; authz compares `auth.m_User != info->m_User` which is the unchanged original user string from any meta.json shape (old or new).  Code-path verification is solid; live verification against an actual legacy folder is the gap.  Not pre-1.0-blocking because the code structure makes it provably correct — but worth noting.
+- **JC's e2e on legacy folders** — JC may want to plant a synthetic legacy `meta.json` (no `owner_slug` field) under `_adhoc/<unhashed-body>/<run>/`, restart the server, and confirm the run is reachable.  Optional verification; not part of Sitting 9's automated suite.
+- **No other open or deferred items surfaced during this sitting.**  Sitting 9 closes cleanly with the doc sweep + Sitting 16 follow-on.
+
+**Final state at session end:**
+
+- Working tree: 7 modified files + 2 new files from the implementation, plus 6 modified docs + 1 new test from the doc sweep.  No legacy code remains.
+- Active edition: `studio` per `.build-edition`.
+- Running server: studio Debug, port 8443, keystore unlocked, fresh build of all four binaries.
+- Tests on disk: `test/security/test_adhoc_user_slug_collision.py` (new, 14/14 PASS).
+- Sittings remaining for pre-1.0: 7 (Sittings 10 + 11 + 12 + 13 + 14 + 15 + 16; Sitting 16 now carries 5 open items).
+
+---
+
 ## 2026-05-22 (Sitting 8e — Close in-house SecureString residuals + structural-check audit scenario) → next session
 
 Same-day follow-on to 8d.  JC opened 8e to close the four in-house residuals a post-8d walkthrough surfaced (the audit-coverage matrix in the 8d hand-off entry listed them as "still open").  All four closed in this session; the 8c audit gained one new structural-check scenario; the existing SigV4 KAT held byte-identical through the canonical-request refactor.

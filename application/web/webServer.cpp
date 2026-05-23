@@ -6147,7 +6147,17 @@ namespace AIAssistant
             return MakeJsonResponse(404, err);
         }
 
-        keyManager.SetDefaultProvider(providerName);
+        if (!keyManager.SetDefaultProvider(providerName))
+        {
+            // HasCredential confirmed above, so a false return here means
+            // the credential was removed in the TOCTOU window — race rather
+            // than caller error.  Surface as 409 so the client can retry.
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "race_lost";
+            err["message"] = "Provider was removed before default could be set; retry";
+            return MakeJsonResponse(409, err);
+        }
 
         crow::json::wvalue responseJson;
         responseJson["ok"] = true;
@@ -7892,8 +7902,14 @@ namespace AIAssistant
         }
 
         bool const isAdmin = auth.m_Role == "admin";
-        std::string const callerSlug = AdhocWorkflowManager::SanitizeUserSlug(auth.m_User);
-        if (!isAdmin && callerSlug != info->m_OwnerSlug)
+        // Authorize on the actual user identity (m_User), not on the derived
+        // slug.  The slug is a filesystem-naming primitive — distinct users
+        // are guaranteed to land in distinct slug dirs (via the SHA-256
+        // suffix in SanitizeUserSlug), but the comparison primitive for
+        // "does this caller own this run" is the user string itself.  Legacy
+        // runs written before the hash suffix existed remain reachable
+        // because m_User is the same string the caller authenticated as.
+        if (!isAdmin && auth.m_User != info->m_User)
         {
             LOG_SECURITY_WARN("[security] run_files_denied reason=not_owner caller={} owner={} runId={}",
                               auth.m_User, info->m_User, runId);
@@ -7903,7 +7919,7 @@ namespace AIAssistant
             err["message"] = "This run belongs to another user.";
             return MakeJsonResponse(403, err);
         }
-        if (isAdmin && callerSlug != info->m_OwnerSlug)
+        if (isAdmin && auth.m_User != info->m_User)
         {
             // Cross-user admin read — durable audit trail for compliance.
             LOG_SECURITY_INFO("[security] admin_cross_user_read kind=list caller={} owner={} runId={}",
@@ -8123,8 +8139,8 @@ namespace AIAssistant
         }
 
         bool const isAdmin = auth.m_Role == "admin";
-        std::string const callerSlug = AdhocWorkflowManager::SanitizeUserSlug(auth.m_User);
-        if (!isAdmin && callerSlug != info->m_OwnerSlug)
+        // Authz on m_User (not slug) — see HandleRunFilesListGet for rationale.
+        if (!isAdmin && auth.m_User != info->m_User)
         {
             LOG_SECURITY_WARN("[security] run_file_denied reason=not_owner caller={} owner={} runId={} path={}",
                               auth.m_User, info->m_User, runId, relPath);
@@ -8134,7 +8150,7 @@ namespace AIAssistant
             err["message"] = "This run belongs to another user.";
             return MakeJsonResponse(403, err);
         }
-        if (isAdmin && callerSlug != info->m_OwnerSlug)
+        if (isAdmin && auth.m_User != info->m_User)
         {
             LOG_SECURITY_INFO("[security] admin_cross_user_read kind=file caller={} owner={} runId={} path={}",
                               auth.m_User, info->m_User, runId, relPath);

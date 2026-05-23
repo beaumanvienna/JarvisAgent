@@ -24,6 +24,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -412,5 +413,24 @@ namespace AIAssistant
 
         // Acceleration structure for webhook lookups: workflowId → index into m_WebhookTriggers.
         std::unordered_map<std::string, size_t> m_WebhookIndex;
+
+        // Persisted email_watch UID watermarks.  Loaded at construction from
+        // `<queue_folder>/.email_watermarks.json`; written via atomic-rename
+        // after each successful poll's watermark update.  Survives restart so
+        // a message that arrived during the restart window still fires the
+        // trigger on the next poll instead of being silently absorbed into
+        // the seed baseline.  Key: `<workflowId>|<triggerId>`.
+        struct PersistedEmailWatermark
+        {
+            std::string m_ConnectionName;  // informational; helps debug stale entries
+            std::string m_Folder;          // informational
+            std::string m_LastSeenUid;     // the load-bearing field
+            std::string m_UpdatedAtIso;    // informational
+        };
+        std::unordered_map<std::string, PersistedEmailWatermark> m_PersistedEmailWatermarks;
+
+        void LoadPersistedEmailWatermarks();
+        void SavePersistedEmailWatermarksLocked();  // caller holds m_Mutex
+        std::filesystem::path EmailWatermarksFilePath() const;
     };
 } // namespace AIAssistant

@@ -30,6 +30,7 @@
 #include <sstream>
 
 #include "auxiliary/file.h"
+#include "auxiliary/sha256.h"
 #include "engine.h"
 #include "file/fileWatcher.h"
 #include "json/jsonHelper.h"
@@ -44,7 +45,11 @@ namespace AIAssistant
         constexpr char const* kMetaFileName = "meta.json";
         constexpr char const* kManifestFileName = "manifest.json";
         constexpr char const* kWorkflowIdPrefix = "_adhoc_";
-        constexpr size_t kMaxUserSlugLength = 64;
+
+        // Slug shape: `<sanitised body>_<8 hex chars of SHA-256(user)>`.
+        // Total ≤ 64 bytes: body capped at 55, suffix is `_xxxxxxxx` (9 bytes).
+        constexpr size_t kSlugHashSuffixLength = 8;
+        constexpr size_t kMaxUserSlugBodyLength = 64 - 1 - kSlugHashSuffixLength; // 55
 
         // Hard cap on a single submitted JCWF JSON.  Prevents a malicious
         // caller from sending a multi-GB payload that would consume RAM
@@ -104,17 +109,38 @@ namespace AIAssistant
 
     std::string AdhocWorkflowManager::SanitizeUserSlug(std::string const& user)
     {
-        std::string slug;
-        slug.reserve(std::min(user.size(), kMaxUserSlugLength));
+        // Two-stage:
+        //   1. Character-collapse the user string to the filesystem-safe
+        //      allowlist (capped at kMaxUserSlugBodyLength bytes).
+        //   2. Append `_<8 hex chars of SHA-256(original_user)>` so that two
+        //      distinct user strings that collapse to the same body still
+        //      produce distinct slugs.  Without the suffix, `bob+admin@x.com`
+        //      and `bob_admin@x.com` both collapse to `bob_admin@x.com`,
+        //      letting one user enumerate / interfere with the other's adhoc
+        //      artefacts via the shared parent dir under `_adhoc/`.  The hash
+        //      is over the ORIGINAL user (pre-collapse) — collapse is lossy,
+        //      hash is not.
+        std::string body;
+        body.reserve(std::min(user.size(), kMaxUserSlugBodyLength));
         for (char ch : user)
         {
-            if (slug.size() >= kMaxUserSlugLength) break;
+            if (body.size() >= kMaxUserSlugBodyLength) break;
             bool const allowed = (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
                                  (ch >= '0' && ch <= '9') || ch == '.' || ch == '_' ||
                                  ch == '@' || ch == '-';
-            slug.push_back(allowed ? ch : '_');
+            body.push_back(allowed ? ch : '_');
         }
-        return slug;
+
+        std::string const digest = EngineCore::Sha256Hex(user);
+        // Sha256Hex returns empty only on the impossible OpenSSL-NULL path
+        // (already logged inside).  Fall back to a constant suffix so the
+        // slug shape stays consistent — any collision under this path means
+        // OpenSSL is broken at a level where adhoc enumeration is the least
+        // of the operator's worries.
+        std::string const suffix = digest.empty() ? std::string("00000000") : digest.substr(0, kSlugHashSuffixLength);
+        body.push_back('_');
+        body.append(suffix);
+        return body;
     }
 
     std::string AdhocWorkflowManager::Iso8601NowCompactUtc()
@@ -364,11 +390,14 @@ namespace AIAssistant
         meta.m_Role = pluck("role");
         meta.m_CleanupPolicy = pluck("cleanup_policy");
         meta.m_OwnerSlug = pluck("owner_slug");
-        // Backfill owner_slug for meta files written by earlier builds — keeps
-        // existing runs readable without a migration step.
-        if (meta.m_OwnerSlug.empty() && !meta.m_User.empty())
+        // Backfill owner_slug for meta files written by earlier builds — read
+        // the slug from the folder's parent directory name, which IS the slug
+        // used at write time.  Re-running SanitizeUserSlug on m_User would
+        // produce the current hashed form, which doesn't match the legacy
+        // unhashed dir name and would break filesystem locator round-trips.
+        if (meta.m_OwnerSlug.empty())
         {
-            meta.m_OwnerSlug = SanitizeUserSlug(meta.m_User);
+            meta.m_OwnerSlug = folder.parent_path().filename().string();
         }
         meta.m_FolderPath = folder;
         if (meta.m_User.empty()) return std::nullopt;

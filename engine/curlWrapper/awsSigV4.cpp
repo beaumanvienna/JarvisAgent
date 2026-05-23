@@ -21,6 +21,7 @@
 
 #include "curlWrapper/awsSigV4.h"
 
+#include "auxiliary/sha256.h"
 #include "curlWrapper/credValidation.h"
 #include "engine.h"
 #include "keys/credential.h"
@@ -54,24 +55,6 @@ namespace AIAssistant
                 out[2 * i + 1] = hex[data[i] & 0x0F];
             }
             return out;
-        }
-
-        // Returns the hex digest, or empty string on OpenSSL failure (rare —
-        // SHA256 only returns NULL on impossible argument conditions).  Caller
-        // detects failure by checking output length / emptiness.  string_view input
-        // lets the caller hand in a SecureString::Get() view (e.g. the canonical
-        // request body when it contains the STS session token) without a std::string
-        // materialisation step.
-        std::string Sha256Hex(std::string_view data)
-        {
-            unsigned char hash[SHA256_DIGEST_LENGTH];
-            unsigned char const* result = SHA256(reinterpret_cast<unsigned char const*>(data.data()), data.size(), hash);
-            if (result == nullptr)
-            {
-                LOG_CORE_ERROR("SigV4: SHA256() returned NULL — output would be uninitialised, returning empty");
-                return {};
-            }
-            return ToHex(hash, SHA256_DIGEST_LENGTH);
         }
 
         // Returns the MAC bytes, or empty vector on OpenSSL failure.  Caller
@@ -229,7 +212,7 @@ namespace AIAssistant
         out.m_AmzDate = in.m_AmzDate.empty() ? FormatAmzDateNow() : in.m_AmzDate;
         std::string const dateStamp = out.m_AmzDate.substr(0, 8); // YYYYMMDD
 
-        out.m_ContentSha256 = Sha256Hex(in.m_Body);
+        out.m_ContentSha256 = EngineCore::Sha256Hex(in.m_Body);
         if (out.m_ContentSha256.empty())
         {
             // SHA256 failure — leave Authorization empty so Apply() detects and rejects.
@@ -292,7 +275,7 @@ namespace AIAssistant
 
         std::string const credentialScope = dateStamp + "/" + in.m_Region + "/" + in.m_Service + "/aws4_request";
 
-        std::string const canonicalRequestHash = Sha256Hex(canonicalRequest.Get());
+        std::string const canonicalRequestHash = EngineCore::Sha256Hex(canonicalRequest.Get());
         if (canonicalRequestHash.empty())
         {
             return out;
@@ -353,9 +336,9 @@ namespace AIAssistant
 
         // (1) SHA256 of empty string — universally known constant.
         constexpr char const* kEmptyHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-        if (Sha256Hex("") != kEmptyHash)
+        if (EngineCore::Sha256Hex("") != kEmptyHash)
         {
-            LOG_CORE_ERROR("SigV4 self-test (1) Sha256Hex(\"\"): got '{}', expected '{}'", Sha256Hex(""), kEmptyHash);
+            LOG_CORE_ERROR("SigV4 self-test (1) Sha256Hex(\"\"): got '{}', expected '{}'", EngineCore::Sha256Hex(""), kEmptyHash);
             ok = false;
         }
 

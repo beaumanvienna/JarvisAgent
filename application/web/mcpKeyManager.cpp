@@ -25,7 +25,6 @@
 
 #include <openssl/crypto.h>
 #include <openssl/rand.h>
-#include <openssl/sha.h>
 
 #include <algorithm>
 #include <chrono>
@@ -39,6 +38,7 @@
 #include "simdjson/simdjson.h"
 
 #include "auxiliary/file.h"
+#include "auxiliary/sha256.h"
 #include "engine.h"
 #include "json/jsonHelper.h"
 #include "keys/keyEncryption.h"
@@ -68,20 +68,6 @@ namespace AIAssistant
             {
                 out[2 * i] = hex[(buf[i] >> 4) & 0xF];
                 out[2 * i + 1] = hex[buf[i] & 0xF];
-            }
-            return out;
-        }
-
-        std::string Sha256Hex(std::string_view input)
-        {
-            unsigned char hash[SHA256_DIGEST_LENGTH];
-            SHA256(reinterpret_cast<unsigned char const*>(input.data()), input.size(), hash);
-            static constexpr char const* hex = "0123456789abcdef";
-            std::string out(SHA256_DIGEST_LENGTH * 2, '0');
-            for (int i = 0; i < SHA256_DIGEST_LENGTH; ++i)
-            {
-                out[2 * i] = hex[(hash[i] >> 4) & 0xF];
-                out[2 * i + 1] = hex[hash[i] & 0xF];
             }
             return out;
         }
@@ -263,7 +249,7 @@ namespace AIAssistant
         std::string rawEnrollmentToken = std::string(kEnrollPrefix) + randomHex;
 
         EnrollmentRecord rec;
-        rec.m_TokenHash = Sha256Hex(rawEnrollmentToken);
+        rec.m_TokenHash = EngineCore::Sha256Hex(rawEnrollmentToken);
         rec.m_User = req.m_User;
         rec.m_Role = req.m_Role;
         rec.m_AdhocEnabled = req.m_AdhocEnabled;
@@ -299,7 +285,7 @@ namespace AIAssistant
             return std::nullopt;
         }
 
-        std::string const candidateHash = Sha256Hex(rawEnrollmentToken);
+        std::string const candidateHash = EngineCore::Sha256Hex(rawEnrollmentToken);
 
         std::lock_guard lock(m_Mutex);
 
@@ -326,7 +312,7 @@ namespace AIAssistant
 
         Record rec;
         rec.m_KeyId = keyId;
-        rec.m_KeyHash = Sha256Hex(rawKey);
+        rec.m_KeyHash = EngineCore::Sha256Hex(rawKey);
         rec.m_User = it->m_User;
         rec.m_Role = it->m_Role;
         rec.m_AdhocEnabled = it->m_AdhocEnabled;
@@ -358,7 +344,7 @@ namespace AIAssistant
         if (rawKey.size() < std::string(kKeyPrefix).size() + kKeyIdHexChars) return std::nullopt;
 
         std::string const keyId = rawKey.substr(0, std::string(kKeyPrefix).size() + kKeyIdHexChars);
-        std::string const candidateHash = Sha256Hex(rawKey);
+        std::string const candidateHash = EngineCore::Sha256Hex(rawKey);
 
         std::lock_guard lock(m_Mutex);
         Record* rec = FindByKeyIdUnlocked(keyId);
@@ -401,7 +387,7 @@ namespace AIAssistant
 
         Record rec;
         rec.m_KeyId = keyId;
-        rec.m_KeyHash = Sha256Hex(rawKey);
+        rec.m_KeyHash = EngineCore::Sha256Hex(rawKey);
         rec.m_User = "boss";
         rec.m_Role = "admin";
         rec.m_AdhocEnabled = true;
@@ -440,7 +426,7 @@ namespace AIAssistant
 
         Record renewed = auth->m_Record;
         renewed.m_KeyId = keyId;
-        renewed.m_KeyHash = Sha256Hex(rawKey);
+        renewed.m_KeyHash = EngineCore::Sha256Hex(rawKey);
         renewed.m_CreatedAt = Iso8601NowUtc();
         renewed.m_ExpiresAt = Iso8601FromNow(std::chrono::hours(24 * 90));
         renewed.m_LastUsedAt.clear();

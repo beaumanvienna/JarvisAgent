@@ -856,6 +856,7 @@ Polls an IMAP folder on a configurable interval.
 3. On the **first poll**, seeds the watermark to the highest UID silently — does not fire the trigger for pre-existing mail.
 4. On subsequent polls, fires the trigger only when UIDs strictly greater than the watermark are found, then advances the watermark.
 5. IMAP network I/O runs **outside the trigger engine mutex** to avoid blocking other triggers during potentially slow connections.
+6. Watermarks persist across restart at `<queue_folder>/.email_watermarks.json` (atomic-rename per successful poll); mail that arrived during a restart window still fires the trigger on the next poll instead of being absorbed into the seed baseline.
 
 ### Connections UI
 

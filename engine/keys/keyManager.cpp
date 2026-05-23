@@ -32,6 +32,15 @@
 
 namespace AIAssistant
 {
+    namespace
+    {
+        // Blast-radius caps on keystore parsing.  Either limit being hit
+        // means the keystore was tampered with (a legitimately-curated key
+        // file is < 100 KB and has < 50 providers in any realistic
+        // deployment) — fail closed with ERROR.
+        constexpr size_t kMaxKeysFileBytes = 4ull * 1024 * 1024;  // 4 MB
+        constexpr size_t kMaxProviders     = 1024;
+    } // namespace
 
     bool KeyManager::Load(std::filesystem::path const& keysFilePath, std::string_view masterPassword)
     {
@@ -49,6 +58,12 @@ namespace AIAssistant
         if (blob.empty())
         {
             LOG_CORE_ERROR("KeyManager::Load: '{}' is empty", keysFilePath.string());
+            return false;
+        }
+        if (blob.size() > kMaxKeysFileBytes)
+        {
+            LOG_CORE_ERROR("KeyManager::Load: '{}' is {} bytes, exceeds kMaxKeysFileBytes={} — refusing to parse",
+                           keysFilePath.string(), blob.size(), kMaxKeysFileBytes);
             return false;
         }
 
@@ -120,6 +135,7 @@ namespace AIAssistant
         return true;
     }
 
+#ifdef J9T_STUDIO
     bool KeyManager::LoadPlaintext(std::filesystem::path const& keysFilePath)
     {
         std::ifstream file(keysFilePath);
@@ -137,6 +153,12 @@ namespace AIAssistant
         if (json.empty())
         {
             LOG_CORE_ERROR("KeyManager::LoadPlaintext: '{}' is empty", keysFilePath.string());
+            return false;
+        }
+        if (json.size() > kMaxKeysFileBytes)
+        {
+            LOG_CORE_ERROR("KeyManager::LoadPlaintext: '{}' is {} bytes, exceeds kMaxKeysFileBytes={} — refusing to parse",
+                           keysFilePath.string(), json.size(), kMaxKeysFileBytes);
             return false;
         }
 
@@ -187,6 +209,7 @@ namespace AIAssistant
                       keysFilePath.string());
         return true;
     }
+#endif // J9T_STUDIO
 
     bool KeyManager::LoadFromEnvironment(std::string const& endpoint, std::string const& model, std::string const& apiType)
     {
@@ -219,20 +242,29 @@ namespace AIAssistant
 
     bool KeyManager::Unlock(std::string_view masterPassword)
     {
-        if (m_KeysFilePath.empty())
+        // Capture the path once under the path mutex so a concurrent
+        // SetKeysFilePath can't swap m_KeysFilePath between the existence
+        // check and the Load() call.
+        std::filesystem::path capturedPath;
+        {
+            std::shared_lock pathLock(m_KeysFilePathMutex);
+            capturedPath = m_KeysFilePath;
+        }
+
+        if (capturedPath.empty())
         {
             LOG_CORE_ERROR("KeyManager::Unlock: no keys file path set");
             return false;
         }
 
-        if (!std::filesystem::exists(m_KeysFilePath))
+        if (!std::filesystem::exists(capturedPath))
         {
-            LOG_CORE_ERROR("KeyManager::Unlock: keys file '{}' does not exist", m_KeysFilePath.string());
+            LOG_CORE_ERROR("KeyManager::Unlock: keys file '{}' does not exist", capturedPath.string());
             m_KeyLoadStatus = KeyLoadStatus::NoKeysFile;
             return false;
         }
 
-        if (Load(m_KeysFilePath, masterPassword))
+        if (Load(capturedPath, masterPassword))
         {
             m_KeyLoadStatus = KeyLoadStatus::Ok;
             LOG_CORE_INFO("KeyManager::Unlock: successfully unlocked with runtime password");
@@ -241,6 +273,18 @@ namespace AIAssistant
 
         m_KeyLoadStatus = KeyLoadStatus::WrongPassword;
         return false;
+    }
+
+    void KeyManager::SetKeysFilePath(std::filesystem::path const& path)
+    {
+        std::unique_lock pathLock(m_KeysFilePathMutex);
+        m_KeysFilePath = path;
+    }
+
+    std::filesystem::path KeyManager::GetKeysFilePath() const
+    {
+        std::shared_lock pathLock(m_KeysFilePathMutex);
+        return m_KeysFilePath;
     }
 
     bool KeyManager::HasCredential(std::string const& name) const
@@ -337,17 +381,28 @@ namespace AIAssistant
         return true;
     }
 
-    void KeyManager::SetDefaultProvider(std::string const& name)
+    bool KeyManager::SetDefaultProvider(std::string const& name)
     {
-        std::unique_lock lock(m_Mutex);
-        if (m_Credentials.count(name) || name.empty())
+        if (name.empty())
         {
-            m_DefaultProviderName = name;
+            LOG_CORE_WARN("KeyManager::SetDefaultProvider: refusing to set default to empty name; "
+                          "call ClearDefaultProvider() explicitly to clear");
+            return false;
         }
-        else
+        std::unique_lock lock(m_Mutex);
+        if (m_Credentials.count(name) == 0)
         {
             LOG_CORE_WARN("KeyManager::SetDefaultProvider: provider '{}' not found", name);
+            return false;
         }
+        m_DefaultProviderName = name;
+        return true;
+    }
+
+    void KeyManager::ClearDefaultProvider()
+    {
+        std::unique_lock lock(m_Mutex);
+        m_DefaultProviderName.clear();
     }
 
     bool KeyManager::ParseProvidersJson(std::string const& json)
@@ -396,8 +451,18 @@ namespace AIAssistant
             return false;
         }
 
+        size_t providerCount = 0;
         for (auto field : providers)
         {
+            if (++providerCount > kMaxProviders)
+            {
+                LOG_CORE_ERROR("KeyManager::ParseProvidersJson: provider count exceeds kMaxProviders={} — "
+                               "refusing further entries; aborting parse",
+                               kMaxProviders);
+                m_Credentials.clear();
+                m_DefaultProviderName.clear();
+                return false;
+            }
             std::string_view providerName = field.unescaped_key();
             simdjson::ondemand::object providerObj;
             if (field.value().get_object().get(providerObj) != simdjson::SUCCESS)

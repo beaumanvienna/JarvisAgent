@@ -393,9 +393,11 @@ class Runner:
             return
         body = r.json()
         folder = body.get("folder_path", "")
-        # The user is ASCII-safe so the slug should equal the user string exactly.
-        self.expect(f"/_adhoc/{user}/" in folder,
-                    f"folder_path contains '/_adhoc/{user}/' (got {folder!r})")
+        # Post Sitting-9 SanitizeUserSlug: slug body is the ASCII-safe portion
+        # followed by `_<8 hex of SHA-256(user)>`.  Check the body substring
+        # WITHOUT a trailing slash (the next char is `_` from the hash suffix).
+        self.expect(f"/_adhoc/{user}_" in folder,
+                    f"folder_path contains '/_adhoc/{user}_' (got {folder!r})")
 
     def test_run_files_list(self):
         header("run files: list endpoint (ownership, retention, files[])")

@@ -1,0 +1,23 @@
+{
+    "_comment": "Negative values for ClampNegativeToZero-policy fields + StoreOnlyIfPositive (jcwf batch size). Expected: max_ai_calls_per_jcwf and max_per_item_fan_out both clamp silently to 0 and log INFO ': 0'. jcwf batch size with value 0 leaves the field at its default (10) — INFO ': 0' but no store.",
+    "_expected_errors": [
+        "max_ai_calls_per_jcwf: 0",
+        "max_per_item_fan_out: 0",
+        "jcwf batch size: 0"
+    ],
+
+    "queue folder": "queue",
+    "workflows folder": "workflows",
+    "max_ai_calls_per_jcwf": -50,
+    "max_per_item_fan_out": -1000,
+    "jcwf batch size": 0,
+    "API interfaces": [
+        {
+            "name": "api.openai.com/gpt-4.1/API1",
+            "url": "https://api.openai.com/v1/chat/completions",
+            "model": "gpt-4.1",
+            "API": "API1",
+            "key_name": "openai"
+        }
+    ]
+}

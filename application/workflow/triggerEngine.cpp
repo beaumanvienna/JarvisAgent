@@ -28,12 +28,15 @@
 #include <unordered_set>
 
 // Bring in logging and core types.
+#include "auxiliary/file.h"
 #include "core.h"
 #include "engine.h"
 #include "file/fileWatcher.h"
 #include "file/pathConfinement.h"
+#include "json/jsonHelper.h"
 #include "log/secretRedactor.h"
 #include "cloud/emailConnector.h"
+#include "simdjson/simdjson.h"
 
 // MSVC natively supports C++20 chrono timezone (time_zone, zoned_time, etc.).
 // Apple Clang's libc++ does not, so we use Howard Hinnant's date library on non-MSVC platforms.
@@ -230,6 +233,11 @@ namespace AIAssistant
         : m_TriggerCallback{triggerCallback}, m_TriggerFileWatcher{std::make_unique<FileWatcher>(std::filesystem::path{})}
     {
         m_TriggerFileWatcher->Start();
+        // Load before any AddEmailWatchTrigger fires — otherwise the binder
+        // would seed instances with empty UIDs and the next poll would
+        // re-seed from current IMAP state, losing any message that arrived
+        // during the restart window.
+        LoadPersistedEmailWatermarks();
     }
 
     TriggerEngine::~TriggerEngine()
@@ -469,6 +477,20 @@ namespace AIAssistant
         instance.m_PollInterval = std::chrono::seconds(std::max(pollIntervalSeconds, 60u));
         instance.m_NextPollTime = std::chrono::steady_clock::now() + instance.m_PollInterval;
         instance.m_IsEnabled = isEnabled;
+
+        // Restore persisted UID watermark so mail that arrived during the
+        // restart window still fires the trigger on the next poll.  If no
+        // entry is found, m_LastSeenUid stays empty and the first poll
+        // seeds the watermark from current IMAP state (same as a fresh
+        // install).
+        std::string const persistKey = workflowId + "|" + triggerId;
+        auto const persistedIt = m_PersistedEmailWatermarks.find(persistKey);
+        if (persistedIt != m_PersistedEmailWatermarks.end() && !persistedIt->second.m_LastSeenUid.empty())
+        {
+            instance.m_LastSeenUid = persistedIt->second.m_LastSeenUid;
+            LOG_APP_INFO("[email_watch] restored persisted UID watermark '{}' for trigger '{}' workflow '{}'",
+                         instance.m_LastSeenUid, triggerId, workflowId);
+        }
 
         m_EmailWatchTriggers.push_back(std::move(instance));
 
@@ -848,13 +870,34 @@ namespace AIAssistant
 
             // Update the watermark under lock, looking up by identity.  If the
             // trigger was removed during the network call, drop the update —
-            // there's nothing valid to write it to.
+            // there's nothing valid to write it to.  After updating, mirror
+            // into the persisted-watermark map and write the file so a
+            // restart doesn't lose ground.
             {
                 std::scoped_lock<std::mutex> const lock(m_Mutex);
                 size_t const triggerIndex = findEmailTriggerIndexLocked(job);
                 if (triggerIndex < m_EmailWatchTriggers.size())
                 {
                     m_EmailWatchTriggers[triggerIndex].m_LastSeenUid = highestUid;
+
+                    std::string const persistKey = job.m_WorkflowId + "|" + job.m_TriggerId;
+                    PersistedEmailWatermark& entry = m_PersistedEmailWatermarks[persistKey];
+                    entry.m_ConnectionName = job.m_ConnectionName;
+                    entry.m_Folder = job.m_Folder;
+                    entry.m_LastSeenUid = highestUid;
+                    {
+                        std::time_t const t = std::time(nullptr);
+                        std::tm utc{};
+#ifdef _WIN32
+                        gmtime_s(&utc, &t);
+#else
+                        gmtime_r(&t, &utc);
+#endif
+                        char buf[32];
+                        std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &utc);
+                        entry.m_UpdatedAtIso = buf;
+                    }
+                    SavePersistedEmailWatermarksLocked();
                 }
                 else
                 {
@@ -1137,6 +1180,115 @@ namespace AIAssistant
 
         char const boundaryCharacter = eventPath[watchedPath.size()];
         return boundaryCharacter == '/';
+    }
+
+    // -----------------------------------------------------------------------
+    // Persisted email_watch UID watermarks
+    // -----------------------------------------------------------------------
+
+    std::filesystem::path TriggerEngine::EmailWatermarksFilePath() const
+    {
+        std::filesystem::path const queueFolder = Core::g_Core != nullptr
+            ? std::filesystem::path(Core::g_Core->GetConfig().m_QueueFolderFilepath)
+            : std::filesystem::path{};
+        if (queueFolder.empty()) return {};
+        return std::filesystem::absolute(queueFolder).lexically_normal() / ".email_watermarks.json";
+    }
+
+    void TriggerEngine::LoadPersistedEmailWatermarks()
+    {
+        std::filesystem::path const path = EmailWatermarksFilePath();
+        if (path.empty() || !std::filesystem::exists(path))
+        {
+            return;
+        }
+
+        using namespace simdjson;
+        ondemand::parser parser;
+        padded_string json;
+        if (auto err = padded_string::load(path.string()).get(json); err != simdjson::SUCCESS)
+        {
+            LOG_APP_ERROR("[email_watch] failed to load '{}': {}", path.string(), error_message(err));
+            return;
+        }
+
+        ondemand::document doc;
+        if (auto err = parser.iterate(json).get(doc); err != simdjson::SUCCESS)
+        {
+            LOG_APP_ERROR("[email_watch] failed to parse '{}': {}", path.string(), error_message(err));
+            return;
+        }
+
+        std::unordered_map<std::string, PersistedEmailWatermark> loaded;
+        ondemand::array watermarks;
+        if (auto err = doc["watermarks"].get_array().get(watermarks); err != simdjson::SUCCESS)
+        {
+            LOG_APP_ERROR("[email_watch] '{}' missing 'watermarks' array: {}", path.string(), error_message(err));
+            return;
+        }
+
+        for (auto entry : watermarks)
+        {
+            ondemand::object obj;
+            if (entry.get_object().get(obj) != simdjson::SUCCESS) continue;
+            std::string_view workflowId, triggerId, connectionName, folder, lastSeenUid, updatedAt;
+            if (obj["workflow_id"].get_string().get(workflowId) != simdjson::SUCCESS) continue;
+            if (obj["trigger_id"].get_string().get(triggerId) != simdjson::SUCCESS) continue;
+            if (obj["last_seen_uid"].get_string().get(lastSeenUid) != simdjson::SUCCESS) continue;
+            // Informational fields — tolerate absence
+            (void)obj["connection_name"].get_string().get(connectionName);
+            (void)obj["folder"].get_string().get(folder);
+            (void)obj["updated_at"].get_string().get(updatedAt);
+
+            PersistedEmailWatermark wm;
+            wm.m_ConnectionName = std::string(connectionName);
+            wm.m_Folder = std::string(folder);
+            wm.m_LastSeenUid = std::string(lastSeenUid);
+            wm.m_UpdatedAtIso = std::string(updatedAt);
+            loaded.emplace(std::string(workflowId) + "|" + std::string(triggerId), std::move(wm));
+        }
+
+        {
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            m_PersistedEmailWatermarks = std::move(loaded);
+        }
+        LOG_APP_INFO("[email_watch] loaded {} persisted UID watermark(s) from '{}'",
+                     m_PersistedEmailWatermarks.size(), path.string());
+    }
+
+    void TriggerEngine::SavePersistedEmailWatermarksLocked()
+    {
+        std::filesystem::path const path = EmailWatermarksFilePath();
+        if (path.empty()) return;
+
+        std::ostringstream body;
+        body << "{\n  \"format_version\": 1,\n  \"watermarks\": [";
+        bool first = true;
+        for (auto const& [key, wm] : m_PersistedEmailWatermarks)
+        {
+            auto const pipe = key.find('|');
+            if (pipe == std::string::npos) continue;
+            std::string const workflowId = key.substr(0, pipe);
+            std::string const triggerId = key.substr(pipe + 1);
+            if (!first) body << ",";
+            first = false;
+            body << "\n    {"
+                 << "\"workflow_id\": \""    << JsonHelper::EscapeJsonString(workflowId)        << "\", "
+                 << "\"trigger_id\": \""     << JsonHelper::EscapeJsonString(triggerId)         << "\", "
+                 << "\"connection_name\": \""<< JsonHelper::EscapeJsonString(wm.m_ConnectionName) << "\", "
+                 << "\"folder\": \""         << JsonHelper::EscapeJsonString(wm.m_Folder)         << "\", "
+                 << "\"last_seen_uid\": \""  << JsonHelper::EscapeJsonString(wm.m_LastSeenUid)    << "\", "
+                 << "\"updated_at\": \""     << JsonHelper::EscapeJsonString(wm.m_UpdatedAtIso)   << "\""
+                 << "}";
+        }
+        if (!first) body << "\n  ";
+        body << "]\n}\n";
+
+        std::string writeError;
+        if (!EngineCore::AtomicWriteFile(path, body.str(), writeError))
+        {
+            LOG_APP_ERROR("[email_watch] failed to write '{}': {}", path.string(), writeError);
+        }
     }
 
 } // namespace AIAssistant

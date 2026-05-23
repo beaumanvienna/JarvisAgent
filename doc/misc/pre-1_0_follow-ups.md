@@ -9,6 +9,16 @@ Closeout plan for the three tail-end groups tracked in `todo.md` before the alph
 
 Total entering this plan: **22 items**. Closed at intake: **1** (§5i.3 — already fixed in code, todo.md was stale). Net actionable: **21 items + 4 added mid-plan** (Sitting 15 added 2026-05-21 after qwen-7b validated as test AI surfaced the plain-HTTP policy gap; Sitting 8d added 2026-05-22 to close the five residual-leak surfaces 8b documented and 8c's audit empirically confirmed are real but bounded; Sitting 8e added 2026-05-22 to close the four in-house residuals a post-8d walkthrough surfaced — the SecureString-only HTTP path is the kind of work that "wants to be finished, not deferred" so 8e closes the credential-leak chapter for 1.0; Sitting 16 added 2026-05-22 as a collection-point basket for off-topic findings that surface during regular sittings — the last stop before 1.0 tagging), organised into **18 sittings** ordered safety-first → cleanup → verification → tooling → cyber-sec tail → incidental-findings cleanup.  **Sittings 1+2 closed 2026-05-18**; **Sittings 3+4 closed 2026-05-18**; **Sitting 5 closed 2026-05-19**; **Sitting 6 closed 2026-05-19**; **Sitting 7a closed 2026-05-19** (with 7b + 7c carved out as follow-ups for the connector + parser sweeps); **Sittings 7b + 7c closed 2026-05-20** — the std::expected API-shape sweep is now complete across all three subsystems (registry / connectors / parsers).  See `doc/misc/hand-off.md` for the migration records.  **Sitting 8 split 2026-05-22** into 8a (engine + AI dispatch) / 8b (cloud connectors + SigV4 input) / 8c (heap-scan audit artifact, not CI-gated) after exploration found ~31 touch sites vs. the original "9 sites" estimate.  **Sittings 8a + 8b + 8c + 8d + 8e closed 2026-05-22** — the SecureString-only HTTP path is now codified end-to-end across both the AI-dispatch path (8a) and all 11 cloud connectors + workflow filter + AzureSharedKey/SigV4 input phases (8b); the empirical verification artifact (8c) at `test/security/heapScan_test.{h,cpp}` + `heapScan_cloud_scenarios.cpp` is `--heapscan`-gated and confirms zero heap residue across all must-be-zero scenarios; 8d closed the five 8b-documented residual surfaces (cloud HMAC scratch, Google Sheets URL key, postgres conninfo, OAuth refresh POST body, generator return-by-value); 8e closed the four in-house follow-on residuals (OAuth refresh snapshots + `RefreshResult`, `JwtGenerator::Generate` local std::string, `ExchangeJwtForAccessToken` SecureString in+out, engine awsSigV4 canonical-headers via `SecureString::Build`) and added the `engineSigV4(no-churn)` structural-check scenario.  Only the libcurl strdup floor (architectural) remains.  **8 sittings remain** as of 2026-05-22 (Sittings 9 + 10 + 11 + 12 + 13 + 14 + 15 + 16).
 
+**Sitting 9 closed 2026-05-23** — slug collision fix shipped; horizontal sweep into the shared `Sha256Hex` helper at `engine/auxiliary/sha256.{h,cpp}` (consolidated the two pre-existing file-local copies).
+
+**Sitting 10 closed 2026-05-23** — `ConfigParser` boilerplate collapsed into 6 file-local helpers (`ParseStringField`, `ParseStringFieldLogOnly`, `ParseInt64Field` with `NumericPolicy` enum, `ParseUint64Field`, `ParseBoolField`, `ParseInt64FieldWithBounds`); 29 of 38 field-parse sites became single-line calls; 9 outliers stay inline (counter-only / array / platform-conditional / silent-on-failure / nested / migration).  Behaviour-neutral verified two ways: (a) byte-identical happy-path diff of ConfigParser startup log against the pre-refactor binary (zero lines diff aside from timestamps); (b) malformed-config + out-of-range fixtures produce byte-identical ERROR/WARN/INFO output (`ConfigParser: 'description' must be a string`, `port 99999 out of range [0, 65535], defaulting to 0 (auto)`, etc.).  4 fixture files landed under `test/config/fixtures/` for Sitting 11's malformed-config test harness to consume.
+
+**Sitting 14 closed 2026-05-23** — KeyManager hardening tail (4 small items): (1) `[[nodiscard]] bool SetDefaultProvider(name)` rejects empty + unknown, new `ClearDefaultProvider()` separator; (2) `Unlock` TOCTOU closed via new `m_KeysFilePathMutex` + capture-then-use; (3) `LoadPlaintext`/`SavePlaintext` declarations + bodies + caller all `#ifdef J9T_STUDIO`-wrapped (Engine binaries strip the symbols — verified via `nm`); (4) `kMaxKeysFileBytes = 4 MB` cap in `Load`/`LoadPlaintext` + `kMaxProviders = 1024` cap in `ParseProvidersJson`, both fail-closed with structured ERROR.  All 4 binary configs build clean; full regression green (test_auth_mcp 100/100, collision repro 14/14, malformed_configs 46/46, hardening 28/28, inputResolutionTest 4/4).  See `doc/misc/hand-off.md` 2026-05-23 entry.  **2 sittings remain** as of 2026-05-23 (15 + 16; Sitting 13 cancelled).
+
+**Sitting 12 closed 2026-05-23** — email_watch UID watermark persisted across restart at `<queue_folder>/.email_watermarks.json` (atomic-rename per successful poll).  `TriggerEngine` constructor loads the file; `AddEmailWatchTrigger` restores the persisted UID when `(workflowId, triggerId)` matches an entry; post-poll update site mirrors the in-memory watermark into the persisted map + writes the file.  Verified end-to-end live: planted a 2-entry sentinel file, restarted j9t, observed `loaded 2 persisted UID watermark(s)` INFO at startup + `restored persisted UID watermark '99999' for trigger 'email_t1' workflow 'sitting12_canary'` INFO when the matching trigger registered.  Save path is the mirror of load (same in-memory map + same JSON shape, written via `EngineCore::AtomicWriteFile`); live end-to-end of save requires a working IMAP server which the host environment doesn't have (`my-email` connection's empty endpoint causes IMAP-target rejection before any successful poll).  All 4 binary configs build clean; full regression suite green (test_auth_mcp 100/100, collision repro 14/14, malformed_configs 46/46, hardening 28/28, inputResolutionTest 4/4).  See `doc/misc/hand-off.md` 2026-05-23 entry.  **2 sittings remain** as of 2026-05-23 (15 + 16; Sitting 13 cancelled).
+
+**Sitting 11 closed 2026-05-23** — D1 negative-path verification.  Two new test files landed: `test/config/test_malformed_configs.py` (subprocess-based config-parse harness; 46 passing checks across 7 fixtures) + `test/hardening/test_negative_paths.py` (REST-based against running j9t; 28 passing checks across 4 groups covering size caps, path-traversal on three JCWF surfaces, mutex stress + inflight-counter leak detection, and db_query row-cap / timeout / output-path traversal).  3 new fixtures (`unknown_API.json`, `oob_API_index.json`, `url_substring_attack.json`) added on top of Sitting 10's 4 fixtures + `_expected_errors` lists retrofitted into all 7 for the harness.  Sitting 9 regression caught + fixed mid-sitting: `test_adhoc_folder_namespace` had a literal `/_adhoc/{user}/` assertion that didn't accommodate the new `_<8hex>` slug suffix — `test_auth_mcp.py` back to 100/100.  Deferred to Sitting 16 (cannot be cleanly REST-driven from a shared host): polarion WriteItemFile path-traversal, AI output 64 KB size cap, reaper CV wake-on-stop.  See `doc/misc/hand-off.md` 2026-05-23 entry.  **5 sittings remain** as of 2026-05-23 (12 + 13 + 14 + 15 + 16).
+
 Predecessor plans (context, not dependencies):
 - `cybersec-hardening-dev-plan.md` — §18 four-domain hardening (S1–S4, complete)
 - `cpp-safety-hardening-dev-plan.md` — §19 Rust-emulating C++ defaults (complete)
@@ -342,92 +352,49 @@ Estimated per-part:
 
 ---
 
-### Sitting 9 — `SanitizeUserSlug` collision fix + migration
+### Sitting 9 — `SanitizeUserSlug` collision fix + migration — **closed 2026-05-23**
 
-**Problem.** `adhocWorkflowManager.cpp:104-117` strips disallowed chars to `_`: `"bob+admin@example.com"` and `"bob_admin@example.com"` both → `"bob_admin@example.com"`. Adhoc layout `_adhoc/<user_slug>/<run>/` lets one user enumerate / interfere with another's adhoc artefacts via the shared parent directory.
-
-**Fix.** Append `_<8 hex chars of SHA-256(original_user)>` to the sanitised slug. Distinct names stay distinct. Migration: existing `meta.json` files reference legacy slugs — read `owner_slug` from `meta.json` on enumeration, don't re-derive from `m_User`. New writes always use the hashed form.
-
-**Acceptance.** Two user names that pre-fix collapsed to the same slug produce distinct hashed slugs. Existing adhoc folders (legacy slug in `meta.json`) remain reachable via their stored `owner_slug`. New adhoc workflow runs land under hashed-slug folders.
-
-**Effort.** Small-medium (~half day; migration logic is the careful part).
+Closed same day it was planned.  `SanitizeUserSlug` now appends `_<8 hex chars of SHA-256(original_user)>` (body capped at 55 chars; total slug ≤ 64).  Two webServer.cpp authz sites flipped from `SanitizeUserSlug(auth.m_User) != info->m_OwnerSlug` to `auth.m_User != info->m_User` — authz is now on user identity, slug is a filesystem-naming primitive only.  `ReadMeta` backfill switched to deriving from `folder.parent_path().filename()` (the canonical truth for legacy folders).  As a horizontal sweep, the two existing file-local `Sha256Hex` copies (`engine/curlWrapper/awsSigV4.cpp` + `application/web/mcpKeyManager.cpp`) consolidated into `engine/auxiliary/sha256.{h,cpp}` ahead of the third site appearing (per `feedback_cpp_discipline`).  Live e2e collision-repro test at `test/security/test_adhoc_user_slug_collision.py` provisions two MCP keys with users that collapse to the same body (`bob+admin@x` / `bob_admin@x`) and verifies: distinct on-disk slug dirs, distinct hex suffixes, identical bodies pre-suffix (proving the suffix is what separates them), cross-user 403 + `not_owner`, admin 200 + `admin_cross_user_read` INFO audit line, self-access 200.  14/14 checks PASS.  All 4 binary configs build clean; existing adhoc empty-body regression test still passes; `inputResolutionTest` non-adhoc workflow passes.  See `doc/misc/hand-off.md` 2026-05-23 entry.
 
 ---
 
-### Sitting 10 — `ConfigParser` 36-field boilerplate refactor
+### Sitting 10 — `ConfigParser` 36-field boilerplate refactor — **closed 2026-05-23**
 
-**Problem.** `configParser.cpp::Parse()` has 26 `else if` branches (lines 207–566); `ParseInterfaces()` has 10 more (lines 693–883). Total **36 fields** (todo.md said ~30), each 5–7 lines of `get_X().get(target)` → `LOG_CORE_ERROR` → store → `++count` boilerplate. Pattern is identical per field-type (string / int64 / bool / numeric-with-bounds). Cross-ref `feedback_cpp_discipline` ("extract a helper before a third site appears" — we have 36).
-
-**Fix.** Behaviour-neutral collapse to per-type helpers:
-- `ParseStringField(value, key, target, fieldEnum, occurrences)`
-- `ParseInt64Field(...)` / `ParseBoolField(...)`
-- `ParseNumericFieldWithBounds(..., min, max)` for capped integers
-
-Each becomes a single-line call. Total `Parse()` + `ParseInterfaces()` shrinks from ~700 lines to ~100, with the 4 helpers ~40 lines each.
-
-**Acceptance.** Build clean across 5 targets. `test/run_tests.py --all` passes. Hand-craft a malformed config fixture (will be reused in Sitting 11) and verify the same ERROR-then-continue behaviour pre/post.
-
-**Effort.** Medium (~1 day). Purely additive helpers + 36 site rewrites.
+Closed same day it was planned.  Six file-local helpers (one more than the planned four — `ParseUint64Field` and `ParseStringFieldLogOnly` came out of enumerating the actual sites: `MaxRequestBodyMB` and `max_context_tokens` need uint64, `description` + `author` log only without storing).  `NumericPolicy` enum (`AcceptAny` / `RejectNegative` / `ClampNegativeToZero` / `StoreOnlyIfPositive`) captures the per-site post-extract checks declaratively at the call site.  29 of 38 field sites became one-line calls; 9 outliers stay inline with reasons documented at each site (file format identifier counter-only, API interfaces array dispatch, use_bash platform-conditional log, max_context_tokens / default_output_tokens silent-on-failure, rate_limit nested object, API enum-mapping with "Test" migration error, is_mock / fixture_path with different error log shape).  Helpers take a raw `uint32_t*` counter pointer (nullable) rather than the private `ConfigFields` enum so they live in the anonymous namespace without needing `friend ConfigParser`.  Byte-identical behaviour verified two ways: (a) happy-path ConfigParser-startup log diff produced ZERO lines aside from timestamps; (b) `test/config/fixtures/malformed_types.json` produced 23 ERROR lines + `test/config/fixtures/out_of_range.json` produced 2 WARN lines + 2 INFO lines — every line matched the pre-refactor format exactly (`ConfigParser: 'description' must be a string`, `port 99999 out of range [0, 65535], defaulting to 0 (auto)`, `session_timeout_hours 500 out of range [1, 168], defaulting to 8`).  4 fixture files left under `test/config/fixtures/` for Sitting 11 to wire into a proper Python test harness.  All 4 binary configs build clean; Sitting 9 collision repro + adhoc envelope reject + 2 non-adhoc workflows (inputResolutionTest, make-example) all pass.  See `doc/misc/hand-off.md` 2026-05-23 entry.
 
 ---
 
-### Sitting 11 — Verification: malformed config.json tests + D1 negative-path fixtures
+### Sitting 11 — Verification: malformed config.json tests + D1 negative-path fixtures — **closed 2026-05-23**
 
-Two test-coverage items folded together (same shape: feed malformed input, assert rejection + ERROR log + engine survival).
+Closed same day it was planned.  Two new test files landed:
 
-**Malformed `config.json` tests.** Build `test/config/test_malformed_configs.py` against a fixture set under `test/config/fixtures/`: negative-numeric.json, type-mismatch.json, unknown-API.json, oob-API-index.json, url-substring-attack.json. Each fixture must produce (a) the expected ERROR log, (b) `Parse()` returns the right `State`, (c) `ConfigChecker::Check()` rejects, (d) j9t stays alive.
+- `test/config/test_malformed_configs.py` — subprocess harness that spawns the engine binary in `/tmp/claude/j9t-cfg-sandbox/<fixture>/` against each fixture under `test/config/fixtures/*.json`.  Verifies expected ERROR/WARN substrings appear in the sandboxed `log/log.txt` AND that the engine either stays alive or exits cleanly (rc ≥ 0; negative rc would be a signal-driven crash regression).  46 passing checks across 7 fixtures: `malformed_types`, `out_of_range`, `negative_rejected`, `clamped_negatives` (carried over from Sitting 10) + 3 new — `unknown_API` (API="API7" → InvalidAPI + ConfigChecker rejection), `oob_API_index` (API index 50 with 1 interface → ConfigChecker rejection), `url_substring_attack` (URL with embedded `..` stored verbatim by parser — downstream validators are responsible).  Each fixture carries an `_expected_errors` list inside the JSON itself so the harness has a uniform contract.
 
-**D1 negative-path fixtures.** Build `test/hardening/` with one test per rejection branch surfaced during S3 sittings 6+7+8+9: path-traversal in file_watch / aiRequestPool / registry / adhoc / db_query / polarion; row+byte+timeout caps in db_query; size cap on adhoc JCWF + AI output; reaper CV wake-on-stop; WorkflowRegistry mutex stress under concurrent reload+PUT; inflight-counter race (mock-transport-driven).
+- `test/hardening/test_negative_paths.py` — REST-driven against the running j9t (https://localhost:8443).  28 passing checks across 4 groups: **Group 1** size caps (adhoc JCWF > 4 MB → 400 `stage_failed` + `jcwf_too_large` in message); **Group 2** path-traversal on three JCWF surfaces (absolute cntx_files path → 400 at parse, workflow id containing `../` → ≥ 400, file_watch trigger path = `/etc/...` → trigger silently dropped at registration); **Group 3** concurrency (8-way parallel reload+list completes in < 1 s — no deadlock, ai_calls_inflight returns to baseline after batch — no leak); **Group 4** db_query caps against `local-pg` (output_file path-separator rejection, max_rows=5 with 100-row query → "exceeds max_rows=5", statement_timeout_ms=100 + pg_sleep(2) → "canceling statement due to statement timeout").  Group 4 uses a connection-breaker warmup helper (`/api/connections/local-pg/test`) to neutralise the per-connection circuit breaker that counts every failed task — including expected-app-level cap rejections — against the connection.
 
-Closest existing pattern: `test/dispatch/test_envelope_empty_body_rejected.py`. Reuse its shape (malformed input → REST API call → assert HTTP status + ERROR log substring + engine still responsive on follow-up `/api/info`).
+Out-of-scope-deferred to **Sitting 16** (not cleanly REST-driveable from a shared host instance): polarion WriteItemFile path-traversal (needs configured polarion fixture), AI output 64 KB size cap (internal-truncation not REST-observable), reaper CV wake-on-stop (shutdown-timing test that requires a sandboxed-spawn approach — could be added as a perf-only check using the malformed-config harness's spawn infrastructure).  Each deferred item now has a Sitting 16 entry.
 
-**Acceptance.** Every rejection branch and every cap has at least one test verifying (a) operation fails with documented error code/message, (b) corresponding ERROR log line fires, (c) engine remains alive. Total ~15-20 new tests.
+**Mid-sitting Sitting 9 regression fix:** `test_auth_mcp.py::test_adhoc_folder_namespace` had a literal `f"/_adhoc/{user}/"` substring assertion that didn't accommodate the new `_<8hex>` slug suffix from Sitting 9.  Patched to `f"/_adhoc/{user}_"` (substring without trailing slash, since the next character is the hash-suffix separator).  Test suite back to 100/100.  Surfaced because Sitting 11's prep work ran the full test_auth_mcp suite for the first time post-Sitting-9 — Sitting 9's verification only ran the new collision-repro test + two dispatch regressions, violating `feedback_thorough_testing`.
 
-**Effort.** Medium (~1 day).
-
----
-
-### Sitting 12 — Cloud tail: persist `email_watch` watermark across restart
-
-**Problem (scope-corrected).** todo.md described email_watch as "fires on poll timer regardless of IMAP". Reality: `triggerEngine.cpp:787-884` + `emailConnector.cpp::CheckForNewMail:446-575` already do proper IMAP UID filtering with first-poll watermark seeding. Real gap: `m_LastSeenUid` is a runtime-only field on `EmailWatchTriggerInstance` (`triggerEngine.h:340`). After j9t restart, the watermark is re-seeded from current IMAP state — mail that arrived during the restart window becomes the new baseline (silent skip), not a trigger event.
-
-**Fix.** Persist last-seen UID per `(connection_name, folder)` pair into a small state file at `queue/.email_watermark.json` (or alongside the trigger's JCWF metadata if the architecture prefers per-workflow). Write after each successful poll (atomic-write per Sitting 1's pattern). Load on startup before the first poll fires.
-
-**Acceptance.** Test: (1) start j9t, seed watermark on first poll, (2) send a test mail, (3) restart j9t mid-poll, (4) verify the test mail still fires the trigger after restart (current behaviour: silent skip).
-
-**Effort.** Small (~half day).
+**Sitting 16 grew by 3 items** during this sitting (the three deferred D1 items above).  Basket now carries 8 open items.  See `doc/misc/hand-off.md` 2026-05-23 entry.
 
 ---
 
-### Sitting 13 — `tools/replayTranscript.py`
+### Sitting 12 — Cloud tail: persist `email_watch` watermark across restart — **closed 2026-05-23**
 
-**Problem.** Nominally-planned dispatch debugging tool from §5g. Reads `<prob>.transcript.json` and re-emits the exact request body against the same provider, for reproducing drift. Not built; transcript format is stable per `doc/architecture.md:103` and `doc/misc/AI dispatch refactor.md`.
-
-**Fix.** Single Python script under `tools/replayTranscript.py`: arg = path to transcript.json, read recorded request envelope + provider identity, signal hot-path to bypass the JCWF runtime, post directly to provider's HTTP endpoint with current credentials (resolved from the same `KeyManager` as a live dispatch), pretty-print the diff between recorded and current response.
-
-Trigger condition: first real "this dispatch worked yesterday, broke today" report. Don't build speculatively.
-
-**Acceptance.** Replay a recorded transcript from `test/dispatch/fixtures/` against MockTransport, get byte-identical response. Replay against live provider, get structured diff against recorded response.
-
-**Effort.** Small-medium (~half-1 day). Depends partly on whether replay needs to skip SigV4 re-signing (different timestamp = different signature) — likely yes, with a `--re-sign` flag.
+Closed same day it was planned.  `<queue_folder>/.email_watermarks.json` (single file, all triggers keyed by `<workflowId>|<triggerId>`).  `TriggerEngine` constructor loads at startup; `AddEmailWatchTrigger` restores the persisted UID on a key match; post-poll update site mirrors into the persisted map and atomic-writes the file via `EngineCore::AtomicWriteFile`.  Live end-to-end verified for load + restore; save path exercised by code review (mirror of load — same map, same JSON shape, same atomic-write helper).  Format: `{"format_version": 1, "watermarks": [{"workflow_id": ..., "trigger_id": ..., "connection_name": ..., "folder": ..., "last_seen_uid": ..., "updated_at": ...}, ...]}`.  Doc updated: `doc/cloud-integration.md` "email_watch Trigger" gained a one-line bullet about the persistence.  See `doc/misc/hand-off.md` 2026-05-23 entry.
 
 ---
 
-### Sitting 14 — KeyManager hardening tail (4 small items)
+### Sitting 13 — `tools/replayTranscript.py` — **cancelled 2026-05-23**
 
-**Problem.** Four hardening items flagged in the prior session's hand-off carry-over list that were never propagated into `todo.md` and so missed the original plan intake. Folded in here at JC's direction; small enough to bundle into one sitting.
+JC cancelled — feature not needed.  Trigger condition was "first real worked-yesterday-broke-today report"; the operational need hasn't materialised and a speculatively-built debugging tool would carry maintenance cost without proven demand.  Slot retired; numbering preserved.
 
-1. **`KeyManager::SetDefaultProvider` empty-name handling** (audit MEDIUM, `combinedCyberSecAudit.md` line 2446). Current behaviour: `name.empty()` branch silently clears the default provider. Surprising at call sites that pass through an uninitialised string. **Fix:** add explicit `KeyManager::ClearDefaultProvider()` separator method; make `SetDefaultProvider(name)` reject empty names (return false + log).
+---
 
-2. **HIGH TOCTOU race in `Unlock` between `filesystem::exists` and `Load`** (`combinedCyberSecAudit.md` line 2398). `KeyManager::Unlock` checks file existence, then calls `Load` — a concurrent `SetKeysFilePath` between the two would race. Mitigated in practice (path is set at startup and rarely changes), still worth closing. **Fix:** capture the path once under `m_Mutex` at entry, use the captured value for both the exists-check and the `Load` call; reject empty path early.
+### Sitting 14 — KeyManager hardening tail (4 small items) — **closed 2026-05-23**
 
-3. **HIGH `LoadPlaintext` / `SavePlaintext` available without build-guard** (line 2414). Development-only methods compiled into production builds. **Fix:** wrap with `#ifdef J9T_DEVELOPMENT_BUILD` (or equivalent — verify the existing dev-build define before introducing a new one). Caller sites already in test code; if any production caller surfaces during the sweep, that's a finding to escalate.
-
-4. **HIGH `ParseProvidersJson` unbounded allocation** (line 2421). Provider count and per-field string length have no caps; a malicious keystore could OOM the parser on `Load`. **Fix:** add `kMaxProviders` (e.g., 1024) + `kMaxFieldLength` (e.g., 4096) compile-time caps; fail-closed with typed `Error` if exceeded.
-
-**Acceptance.** Build all 5 targets clean. Synthetic test feeds (a) empty-string `SetDefaultProvider` → rejection, (b) malformed keystore with 100k providers → parser rejection + ERROR log, (c) `Unlock` exercised under concurrent `SetKeysFilePath` (relaxed — single-threaded test is acceptable here since the production exposure is theoretical). `LoadPlaintext` / `SavePlaintext` linker errors in release build confirm the build-guard.
-
-**Effort.** Medium (~half-1 day). Items 1 and 3 are ~half hour each; items 2 and 4 are ~1-2 hours each.
+Closed same day it was planned.  All four items landed: SetDefaultProvider empty/unknown rejection + ClearDefaultProvider separator; Unlock TOCTOU closed via dedicated path mutex; LoadPlaintext/SavePlaintext gated by `#ifdef J9T_STUDIO` (Engine binaries verifiably strip the symbols via `nm`); 4 MB file-size + 1024 provider-count caps in the parse path.  Behaviour neutral for legitimate keystores; defensive against tampered ones.  See `doc/misc/hand-off.md` 2026-05-23 entry.
 
 ---
 
@@ -476,10 +443,6 @@ j9t's cyber-security posture rejects plain HTTP everywhere else (callback URLs, 
 - `doc/jarvisagent.md` — note in the interface-configuration section that `http://` is loopback-only; cite the example use case (local ollama / llama.cpp).
 - `doc/api-endpoints.md` — document the new `url_policy_violation` and `credentialed_plaintext_http` error codes on `POST /api/settings/ai-interfaces` + `PUT /api/settings/ai-interfaces/<id>` + `POST /api/settings/ai-interfaces/<id>/test`.
 
-**Out of scope (Tier 3 — separate later sitting).**
-- Built-in TLS sidecar that wraps localhost ollama in HTTPS (auto-generated self-signed cert + `CURLOPT_PINNEDPUBLICKEY`) so j9t never has to dispatch plain HTTP at all. Worth doing for 1.0 polish but materially bigger — needs cert lifecycle (regenerate on machine ID change, store under appropriate file perms), a tiny asio TLS terminator (~150 LoC), and an opt-in config knob. Tracked separately in Post-1.0.
-- OS-level network policy (Docker `NET_ADMIN` drop + nftables egress allowlist). High-assurance deployment recipe for `doc/cyber security.md`; no code change required.
-
 **Effort.** Medium (~1 day).
 - Part A: ~3 hours (helper module + UrlPolicyError + 3 enforcement sites + audit log).
 - Part B: ~2 hours (credentialed-HTTP check + error code + counter wiring).
@@ -492,8 +455,6 @@ j9t's cyber-security posture rejects plain HTTP everywhere else (callback URLs, 
 ## Post-1.0 / opportunistic
 
 - **`RedactingFormatter::format` per-line allocation** (`engine/log/log.cpp:55-73` + `secretRedactor.cpp:92-110`). Two heap allocs per log line when secrets registered (formatter materialises `std::string(payload)`, then `Redact()` makes another `result = message`). No-secrets fast path is already alloc-free. Pure perf; defer until profiling shows it hot under realistic load. Fix shape: thread-local buffer + early return when no secret matches.
-- **Built-in TLS sidecar for local LLM backends** (Sitting 15 Tier 3, deferred). Tiny asio TLS terminator (~150 LoC) that wraps a localhost HTTP backend (ollama / llama.cpp / vLLM) in HTTPS on a separate port. Auto-generates a self-signed cert at first boot, pins it via `CURLOPT_PINNEDPUBLICKEY`. From j9t's perspective the dispatch is HTTPS-pinned; from the backend's perspective it's a normal localhost HTTP client. Outcome: no plain HTTP ever leaves j9t, even for local LLMs. Worth doing for 1.0 polish but materially bigger than Tier 1+2 (needs cert lifecycle + asio TLS terminator + opt-in config knob).
-- **OS-level network egress policy for high-assurance deployments.** Docker-mode recipe: drop `NET_ADMIN`, set nftables egress rules that whitelist only the configured AI hosts. Catches even a code-level escape from the URL policy. No j9t code change required — documented as a deployment recipe in `doc/cyber security.md`.
 
 ---
 
@@ -505,7 +466,7 @@ j9t's cyber-security posture rejects plain HTTP everywhere else (callback URLs, 
 4. **Sitting 7** is the API-shape sweep — single big sitting, lands on the cleaner foundations from Sittings 1–6.
 5. **Sittings 8–10** are remaining cleanup (SecureString-HTTP, slug collision, ConfigParser refactor) — independent, parallelisable if multiple sittings happen close together.
 6. **Sitting 11** is verification, intentionally last among the substantive work — it tests everything that came before.
-7. **Sittings 12–14** are the small tail (email watermark, replay tool, KeyManager hardening). Sitting 14's four KeyManager items could also fold into Sitting 7's API-shape sweep opportunistically (the typed `Error` return on `SetDefaultProvider` / `ParseProvidersJson` lands naturally then) — keep them grouped if Sitting 7 happens close in time, otherwise ship Sitting 14 as a clean standalone.
+7. **Sittings 12 + 14** are the small tail (email watermark, KeyManager hardening; Sitting 13 cancelled). Sitting 14's four KeyManager items could also fold into Sitting 7's API-shape sweep opportunistically (the typed `Error` return on `SetDefaultProvider` / `ParseProvidersJson` lands naturally then) — keep them grouped if Sitting 7 happens close in time, otherwise ship Sitting 14 as a clean standalone.
 8. **Sitting 15** is the plain-HTTP loopback policy + credentialed-HTTP refusal (Tier 1 + Tier 2 of the local-LLM cyber-sec follow-ups). Added at JC's direction 2026-05-21 after qwen-7b was validated as a test backend over `http://localhost:11434` — codifies "plain HTTP is only safe when it cannot leave the machine" and "never carry a credential over plaintext", which closes the cyber-sec gap that currently blocks "use ollama as the default AI" without weakening the existing posture. Naturally last among the substantive Pre-1.0 sittings because it depends on `feedback_expected_error_pattern` (the typed-error discipline from Sitting 7) and reuses the address-classification helper that the SSRF gate already exercises.
 9. **Sitting 16** is the incidental-findings basket — the LAST sitting before 1.0 tagging.  Collects off-topic items that surface during Sittings 9–15 and the audit/review work afterwards; each item closed individually before tagging.  Doesn't depend on any specific predecessor (items can land here regardless of sequence), but executes after Sitting 15 so it sweeps up anything those sittings turned up.
 
@@ -562,13 +523,43 @@ N. **Title** — short prose.
    - **Effort:** small-medium.
    - **Status:** open.
 
+5. **Polarion `WriteItemFile` / `WriteAttachmentFile` path-traversal coverage** — Sitting 11 (D1 hardening pass) deferred this because polarion fixtures aren't trivially driveable from the host's running j9t.  `polarionClient.cpp:669` (WriteItemFile) and `:893` (WriteAttachmentFile) both go through `ConfineUnderProjectRoot`, but neither has a REST-test that exercises the rejection branch against an out-of-root path.
+   - **Why it matters:** completeness of the D1 hardening test matrix.  The existing `IsValidFilesystemId` (polarionClient.cpp:64-80) tests the id-shape allowlist but not the post-resolve path containment.  A test gap means a future regression in the containment gate would slip through CI.
+   - **Fix sketch:** Configure a mock polarion endpoint (the existing `api6` mock-infrastructure pattern is the closest match — see `application/cloud/polarionClient.cpp::PolarionClient::IsValidFilesystemId` + `test/dispatch/test_api6_mock_errors.py`).  Submit a JCWF whose polarion-filter `output_path` resolves outside the project root.  Assert task fails + log line fires + escape file absent.
+   - **Effort:** medium (depends on mock-infrastructure setup; if a usable mock exists for polarion already this is small).
+   - **Status:** open.
+
+6. **AI output 64 KB size cap (kMaxOutputBytes) coverage** — Sitting 11 deferred because the cap applies to output file content read AFTER an AI call completes (workflowRuntimeManager.cpp:764-785), and the truncation is internal — not REST-observable as a rejection.
+   - **Why it matters:** completeness.  Internal truncation has a behaviour contract (cap at 64 KB) that no test exercises today.  A regression that raises/lowers the cap would go undetected.
+   - **Fix sketch:** Write a Python task that emits > 64 KB to its output file (e.g. `print('A' * 100000)`).  Submit via adhoc, observe the truncation behaviour via the run's task output (read via `GET /api/workflow-runs/<id>/files/<output-file>` and assert length ≤ 65536).
+   - **Effort:** small (~1h once a Python-output JCWF skeleton is in place).
+   - **Status:** open.
+
+7. **Reaper CV wake-on-stop shutdown-timing test** — Sitting 11 deferred because the test requires a controlled shutdown of a j9t instance and the host's running j9t can't be hit for this kind of timing measurement without disturbing other tests.
+   - **Why it matters:** the reaper-thread CV fix (sittings prior) reduced shutdown-blocking from up to 60 s to near-zero.  A regression that re-introduces a `sleep_for(60s)` would silently undo that — currently only catchable by manual observation.
+   - **Fix sketch:** Reuse Sitting 11's `test_malformed_configs.py` sandbox-spawn harness (subprocess + sandbox dir at `/tmp/claude/j9t-cfg-sandbox/`).  After the spawned j9t prints `LiveTransport: curl multi handle initialised` (server-up signal), POST `/api/shutdown` and measure the time-to-process-exit; assert < 5 s.  Mark non-merge-gating (perf check) so a flaky CI environment doesn't trip it.
+   - **Effort:** small-medium (~2h; the harness already exists).
+   - **Status:** open.
+
+8. **Circuit breaker counts expected app-level failures as "connection failures"** — `CloudCircuitBreaker::RecordFailure` is called by every task-level rejection in the cloud-connector / db_query path, including expected-app-level outcomes like "Result set has 100 rows, exceeds max_rows=5" (db_query cap) or "exceeds statement_timeout".  Five consecutive such rejections trip the breaker open and subsequent requests short-circuit with `"Cloud connection 'X' circuit breaker is open"` instead of reaching the actual database.  Surfaced by Sitting 11's Group 4 hardening tests — they need a `_warm_up_connection` helper that calls `POST /api/connections/<name>/test` before each cap-rejection assertion, otherwise consecutive tests trip the breaker open and the assertions short-circuit.
+   - **Why it matters:** Operational UX risk in production.  A user running a `db_query` workflow that legitimately hits the `max_rows` cap five times in a row would lock themselves out of the connection — the breaker thinks the connection is unhealthy when in fact the queries reached the database successfully and were rejected at the app layer.  Workaround (manual `POST /api/connections/<name>/test` reset) is operator-visible friction that shouldn't be needed for application-layer caps.
+   - **Fix sketch:** Add a failure-class enum to `CloudCircuitBreaker::RecordFailure(ConnectorErrorCode)` (already takes the optional `ConnectorErrorCode` per Sitting 7b) — count `NetworkError` / `AuthFailure` / `CredentialMissing` etc. as connection failures, but treat `ValueOutOfRange` (the row/byte/timeout cap class) as a non-connection-failure that doesn't decrement the breaker's health budget.  Test sites: `dbQueryCloudTaskExecutor.cpp` row/byte/timeout cap branches, anywhere else that reports a known-good-connection app-level rejection.
+   - **Effort:** small-medium (~half day).  The plumbing is already there; the change is in the breaker's policy on which `ConnectorErrorCode` values count.
+   - **Status:** open.
+
+9. **`AdhocWorkflowManager::ReadMeta` uses hand-rolled JSON `pluck` instead of simdjson** — `adhocWorkflowManager.cpp:373-394` extracts four fields from `meta.json` via `std::string::find`-based substring scans without JSON-unescape.  Theoretical-only weakness today (the corresponding `WriteMeta` uses `JsonHelper::EscapeJsonString` so escapes are introduced symmetrically, and the four field values are all upstream-validated by McpKeyManager / the policy whitelist), but it's a hand-rolled JSON parser in a security-critical attribution path — violates `feedback_simdjson_only`.  Surfaced during the Sitting 9 doc sweep on 2026-05-23.
+   - **Why it matters:** Consistency + defence in depth.  A future field added with characters that need JSON-escape (`"`, `\\`, control chars) would silently round-trip incorrectly on read; an attacker who somehow plants a hand-crafted `meta.json` could fool the reader into mis-attributing a run.  Both paths require additional bugs to be exploitable, but `feedback_simdjson_only` exists precisely so we don't depend on those bugs not happening.
+   - **Fix sketch:** Rewrite `ReadMeta` to parse the file with simdjson DOM (same pattern as `AdhocWorkflowManager::RewriteWorkflowId` already uses in the same file — `dom::parser parser; parser.parse(content).get(root)`; then `root["user"].get_string()`, etc.).  Keep the parent-dir-name fallback for legacy meta.json files missing `owner_slug`.  Drop the `pluck` lambda + four `pluck("...")` calls.  Effort: small (~1h).
+   - **Effort:** small.
+   - **Status:** open.
+
 **Acceptance** (when the basket pass happens):
 
 - Each item closed: build clean across all 4 binary configs, heap-scan audit still PASSES, live smoke against any touched path.
 - Each item deferred to post-1.0: rationale documented in the `(post-1.0)` note below the item.
 - Basket pass closes the pre-1.0 plan — no open items remain that aren't explicitly marked post-1.0.
 
-**Effort.**  Variable — depends on what surfaces.  Initial seed (3 items above) is ~half-day to one day.  If the basket grows significantly during the remaining sittings, consider splitting into per-theme sub-sittings (e.g. one for HTTP-layer items, one for OAuth-layer items).
+**Effort.**  Variable — depends on what surfaces.  Items 1-4 are the original seed (~half-day to one day).  Items 5-9 were added during Sittings 9 + 11 (Polarion path-traversal coverage, AI output size cap coverage, reaper CV shutdown-timing test, circuit-breaker failure-class policy, ReadMeta simdjson rewrite — each small to medium).  If the basket grows significantly during the remaining sittings, consider splitting into per-theme sub-sittings (e.g. one for HTTP-layer items, one for OAuth-layer items, one for test-coverage items).
 
 **Cross-reference.**  Items are added here under the pre-1.0 closing-list policy — pre-1.0 findings surface immediately to JC rather than silently deferring.
 

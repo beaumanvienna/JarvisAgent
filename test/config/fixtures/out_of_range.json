@@ -1,0 +1,21 @@
+{
+    "_comment": "Out-of-range numeric values for bounded fields. Expected: port out of [0, 65535] triggers WARN 'port <v> out of range [0, 65535], defaulting to 0 (auto)' then INFO 'port: 0'. session_timeout_hours out of [1, 168] triggers WARN ... defaulting to 8 then INFO 'session_timeout_hours: 8'.",
+    "_expected_errors": [
+        "port 99999 out of range [0, 65535], defaulting to 0 (auto)",
+        "session_timeout_hours 500 out of range [1, 168], defaulting to 8"
+    ],
+
+    "queue folder": "queue",
+    "workflows folder": "workflows",
+    "port": 99999,
+    "session_timeout_hours": 500,
+    "API interfaces": [
+        {
+            "name": "api.openai.com/gpt-4.1/API1",
+            "url": "https://api.openai.com/v1/chat/completions",
+            "model": "gpt-4.1",
+            "API": "API1",
+            "key_name": "openai"
+        }
+    ]
+}

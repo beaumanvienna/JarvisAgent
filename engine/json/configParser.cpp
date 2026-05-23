@@ -143,6 +143,202 @@ namespace AIAssistant
             }
             return "";
         }
+
+        // -----------------------------------------------------------------------
+        // Field-parse boilerplate helpers — one per JSON value type.
+        //
+        // Every config field used to be 5–7 lines of `get_X().get(target)` ->
+        // LOG_CORE_ERROR -> store -> ++counter, repeated 29 times across
+        // Parse() and ParseInterfaces().  These helpers collapse that to a
+        // single line per site so the parser body reads as a field table.
+        //
+        // Contract for every helper:
+        //   - Extract once via simdjson; on type mismatch log
+        //     `LOG_CORE_ERROR("{} '{}' must be a <type>", logPrefix, key)`
+        //     and return without touching the target or counter.
+        //   - On success: store into the caller's target, log
+        //     `LOG_CORE_INFO("{}: {}", key, value)`, and (if `counter`
+        //     is non-null) `++(*counter)`.
+        //
+        // The `logPrefix` parameter exists because the top-level Parse()
+        // says "ConfigParser:" while ParseInterfaces() says
+        // "ConfigParser: API interface" — same shape, different scope.
+        //
+        // Counter pointer is optional: a few ApiInterface sub-fields don't
+        // track occurrences (`max_context_tokens`, `default_output_tokens`)
+        // but those are kept inline anyway because they have silent-on-
+        // failure semantics; the nullable-counter design is here so future
+        // counter-less helpers can use the same code path without forking.
+        //
+        // We take a raw `uint32_t*` rather than the private `ConfigFields`
+        // enum + `FieldOccurances` array so these helpers stay file-local
+        // (anonymous-namespace) without needing `friend ConfigParser`.
+        // Call sites pass `&fieldOccurances[ConfigFields::X]` directly.
+        // -----------------------------------------------------------------------
+
+        // Numeric-field policies — capture the per-site post-extract checks
+        // that vary across the int64 sites.  AcceptAny is the default;
+        // others mirror the existing pre-refactor behaviour exactly.
+        enum class NumericPolicy
+        {
+            AcceptAny,            // store the value as-is (sign-permissive).
+            RejectNegative,       // negative → log error + skip store/count.
+            ClampNegativeToZero,  // negative → cap = 0 then store + count.
+            StoreOnlyIfPositive,  // store only if value > 0, but always count.
+        };
+
+        void ParseStringField(simdjson::ondemand::value value,
+                              std::string_view key,
+                              std::string& target,
+                              uint32_t* counter,
+                              char const* logPrefix = "ConfigParser:")
+        {
+            std::string_view sv;
+            if (value.get_string().get(sv) != simdjson::SUCCESS)
+            {
+                LOG_CORE_ERROR("{} '{}' must be a string", logPrefix, key);
+                return;
+            }
+            target = std::string(sv);
+            LOG_CORE_INFO("{}: {}", key, sv);
+            if (counter) ++(*counter);
+        }
+
+        // Metadata-only string field (no storage, just validate + log +
+        // count).  Used by `description` and `author` which are informative
+        // only and never end up in `EngineConfig`.
+        void ParseStringFieldLogOnly(simdjson::ondemand::value value,
+                                     std::string_view key,
+                                     uint32_t* counter,
+                                     char const* logPrefix = "ConfigParser:")
+        {
+            std::string_view sv;
+            if (value.get_string().get(sv) != simdjson::SUCCESS)
+            {
+                LOG_CORE_ERROR("{} '{}' must be a string", logPrefix, key);
+                return;
+            }
+            LOG_CORE_INFO("{}: {}", key, sv);
+            if (counter) ++(*counter);
+        }
+
+        template <typename TargetT>
+        void ParseInt64Field(simdjson::ondemand::value value,
+                             std::string_view key,
+                             TargetT& target,
+                             NumericPolicy policy,
+                             uint32_t* counter,
+                             char const* logPrefix = "ConfigParser:")
+        {
+            int64_t v = 0;
+            if (value.get_int64().get(v) != simdjson::SUCCESS)
+            {
+                LOG_CORE_ERROR("{} '{}' must be a number", logPrefix, key);
+                return;
+            }
+            // INFO log placement matches pre-refactor: AcceptAny / RejectNegative /
+            // StoreOnlyIfPositive log the raw value first; ClampNegativeToZero
+            // logs the clamped value so the INFO line reflects what was stored.
+            switch (policy)
+            {
+                case NumericPolicy::AcceptAny:
+                    LOG_CORE_INFO("{}: {}", key, v);
+                    target = static_cast<TargetT>(v);
+                    break;
+                case NumericPolicy::RejectNegative:
+                    LOG_CORE_INFO("{}: {}", key, v);
+                    if (v < 0)
+                    {
+                        LOG_CORE_ERROR("{} '{}' is negative ({}), ignoring; configChecker will assign default",
+                                       logPrefix, key, v);
+                        return;
+                    }
+                    target = static_cast<TargetT>(v);
+                    break;
+                case NumericPolicy::ClampNegativeToZero:
+                    if (v < 0) v = 0;
+                    LOG_CORE_INFO("{}: {}", key, v);
+                    target = static_cast<TargetT>(v);
+                    break;
+                case NumericPolicy::StoreOnlyIfPositive:
+                    LOG_CORE_INFO("{}: {}", key, v);
+                    if (v > 0) target = static_cast<TargetT>(v);
+                    break;
+            }
+            if (counter) ++(*counter);
+        }
+
+        template <typename TargetT>
+        void ParseUint64Field(simdjson::ondemand::value value,
+                              std::string_view key,
+                              TargetT& target,
+                              uint32_t* counter,
+                              char const* logPrefix = "ConfigParser:")
+        {
+            uint64_t v = 0;
+            if (value.get_uint64().get(v) != simdjson::SUCCESS)
+            {
+                LOG_CORE_ERROR("{} '{}' must be a non-negative number", logPrefix, key);
+                return;
+            }
+            target = static_cast<TargetT>(v);
+            LOG_CORE_INFO("{}: {}", key, target);
+            if (counter) ++(*counter);
+        }
+
+        void ParseBoolField(simdjson::ondemand::value value,
+                            std::string_view key,
+                            bool& target,
+                            uint32_t* counter,
+                            char const* logPrefix = "ConfigParser:")
+        {
+            bool v = false;
+            if (value.get_bool().get(v) != simdjson::SUCCESS)
+            {
+                LOG_CORE_ERROR("{} '{}' must be a boolean", logPrefix, key);
+                return;
+            }
+            target = v;
+            LOG_CORE_INFO("{}: {}", key, v);
+            if (counter) ++(*counter);
+        }
+
+        // Numeric field with a closed [min, max] range and a sane default
+        // applied + WARN logged when the supplied value lands outside.
+        // Used by `port` (range [0, 65535], default 0, warnSuffix " (auto)")
+        // and `session_timeout_hours` (range [1, 168], default 8).
+        //
+        // The WARN format intentionally matches the pre-refactor shape
+        // byte-for-byte: `"<key> <value> out of range [<min>, <max>],
+        // defaulting to <default><warnSuffix>"` — no `ConfigParser:` prefix,
+        // no quotes around the key.  An optional `warnSuffix` lets port
+        // keep its " (auto)" annotation without complicating callers.
+        template <typename TargetT>
+        void ParseInt64FieldWithBounds(simdjson::ondemand::value value,
+                                       std::string_view key,
+                                       TargetT& target,
+                                       int64_t minInclusive, int64_t maxInclusive,
+                                       int64_t defaultIfOutOfRange,
+                                       uint32_t* counter,
+                                       char const* warnSuffix = "",
+                                       char const* logPrefix = "ConfigParser:")
+        {
+            int64_t v = 0;
+            if (value.get_int64().get(v) != simdjson::SUCCESS)
+            {
+                LOG_CORE_ERROR("{} '{}' must be a number", logPrefix, key);
+                return;
+            }
+            if (v < minInclusive || v > maxInclusive)
+            {
+                LOG_CORE_WARN("{} {} out of range [{}, {}], defaulting to {}{}",
+                              key, v, minInclusive, maxInclusive, defaultIfOutOfRange, warnSuffix);
+                v = defaultIfOutOfRange;
+            }
+            LOG_CORE_INFO("{}: {}", key, v);
+            target = static_cast<TargetT>(v);
+            if (counter) ++(*counter);
+        }
     } // namespace
 
     uint64_t ConfigParser::EngineConfig::ResolveMaxContextTokensFromModel(std::string const& modelName)
@@ -210,109 +406,48 @@ namespace AIAssistant
             }
             else if (jsonObjectKey == "description")
             {
-                std::string_view description;
-                if (jsonObject.value().get_string().get(description) != simdjson::SUCCESS)
-                {
-                    LOG_CORE_ERROR("ConfigParser: '{}' must be a string", jsonObjectKey);
-                    continue;
-                }
-                LOG_CORE_INFO("description: {}", description);
-                ++fieldOccurances[ConfigFields::Description];
+                ParseStringFieldLogOnly(jsonObject.value(), jsonObjectKey,
+                                        &fieldOccurances[ConfigFields::Description]);
             }
             else if (jsonObjectKey == "author")
             {
-                std::string_view author;
-                if (jsonObject.value().get_string().get(author) != simdjson::SUCCESS)
-                {
-                    LOG_CORE_ERROR("ConfigParser: '{}' must be a string", jsonObjectKey);
-                    continue;
-                }
-                LOG_CORE_INFO("author: {}", author);
-                ++fieldOccurances[ConfigFields::Author];
+                ParseStringFieldLogOnly(jsonObject.value(), jsonObjectKey,
+                                        &fieldOccurances[ConfigFields::Author]);
             }
             else if (jsonObjectKey == "queue folder")
             {
-                std::string_view queueFolderFilepath;
-                if (jsonObject.value().get_string().get(queueFolderFilepath) != simdjson::SUCCESS)
-                {
-                    LOG_CORE_ERROR("ConfigParser: '{}' must be a string", jsonObjectKey);
-                    continue;
-                }
-                LOG_CORE_INFO("queue folder: {}", queueFolderFilepath);
-                engineConfig.m_QueueFolderFilepath = queueFolderFilepath;
-                ++fieldOccurances[ConfigFields::QueueFolder];
+                ParseStringField(jsonObject.value(), jsonObjectKey,
+                                 engineConfig.m_QueueFolderFilepath,
+                                 &fieldOccurances[ConfigFields::QueueFolder]);
             }
             else if (jsonObjectKey == "workflows folder")
             {
-                std::string_view workflowsFolder;
-                if (jsonObject.value().get_string().get(workflowsFolder) != simdjson::SUCCESS)
-                {
-                    LOG_CORE_ERROR("ConfigParser: '{}' must be a string", jsonObjectKey);
-                    continue;
-                }
-                LOG_CORE_INFO("workflows folder: {}", workflowsFolder);
-                engineConfig.m_WorkflowsFolderFilepath = workflowsFolder;
-                ++fieldOccurances[ConfigFields::WorkflowsFolder];
+                ParseStringField(jsonObject.value(), jsonObjectKey,
+                                 engineConfig.m_WorkflowsFolderFilepath,
+                                 &fieldOccurances[ConfigFields::WorkflowsFolder]);
             }
             else if (jsonObjectKey == "max threads")
             {
-                int64_t maxThreads = 0;
-                if (jsonObject.value().get_int64().get(maxThreads) != simdjson::SUCCESS)
-                {
-                    LOG_CORE_ERROR("ConfigParser: '{}' must be a number", jsonObjectKey);
-                    continue;
-                }
-                LOG_CORE_INFO("max threads: {}", maxThreads);
-                if (maxThreads < 0)
-                {
-                    LOG_CORE_ERROR("ConfigParser: '{}' is negative ({}), ignoring; configChecker will assign default",
-                                   jsonObjectKey, maxThreads);
-                    continue;
-                }
-                engineConfig.m_MaxThreads = static_cast<uint32_t>(maxThreads);
-                ++fieldOccurances[ConfigFields::MaxThreads];
+                ParseInt64Field(jsonObject.value(), jsonObjectKey, engineConfig.m_MaxThreads,
+                                NumericPolicy::RejectNegative, &fieldOccurances[ConfigFields::MaxThreads]);
             }
             else if (jsonObjectKey == "engine sleep time in run loop in ms")
             {
                 int64_t sleepTime = 0;
-                if (jsonObject.value().get_int64().get(sleepTime) != simdjson::SUCCESS)
-                {
-                    LOG_CORE_ERROR("ConfigParser: '{}' must be a number", jsonObjectKey);
-                    continue;
-                }
-                LOG_CORE_INFO("engine sleep time in run loop in ms: {}", sleepTime);
+                ParseInt64Field(jsonObject.value(), jsonObjectKey, sleepTime,
+                                NumericPolicy::AcceptAny, &fieldOccurances[ConfigFields::SleepTime]);
                 engineConfig.m_SleepDuration = std::chrono::milliseconds(sleepTime);
-                ++fieldOccurances[ConfigFields::SleepTime];
             }
             else if (jsonObjectKey == "max file size in kB")
             {
-                int64_t maxFileSizekB = 0;
-                if (jsonObject.value().get_int64().get(maxFileSizekB) != simdjson::SUCCESS)
-                {
-                    LOG_CORE_ERROR("ConfigParser: '{}' must be a number", jsonObjectKey);
-                    continue;
-                }
-                LOG_CORE_INFO("max file size in kB: {}", maxFileSizekB);
-                if (maxFileSizekB < 0)
-                {
-                    LOG_CORE_ERROR("ConfigParser: '{}' is negative ({}), ignoring; configChecker will assign default",
-                                   jsonObjectKey, maxFileSizekB);
-                    continue;
-                }
-                engineConfig.m_MaxFileSizekB = static_cast<size_t>(maxFileSizekB);
-                ++fieldOccurances[ConfigFields::MaxFileSizekB];
+                ParseInt64Field(jsonObject.value(), jsonObjectKey, engineConfig.m_MaxFileSizekB,
+                                NumericPolicy::RejectNegative,
+                                &fieldOccurances[ConfigFields::MaxFileSizekB]);
             }
             else if (jsonObjectKey == "verbose")
             {
-                bool verbose = false;
-                if (jsonObject.value().get_bool().get(verbose) != simdjson::SUCCESS)
-                {
-                    LOG_CORE_ERROR("ConfigParser: '{}' must be a boolean", jsonObjectKey);
-                    continue;
-                }
-                engineConfig.m_Verbose = verbose;
-                LOG_CORE_INFO("verbose: {}", verbose);
-                ++fieldOccurances[ConfigFields::Verbose];
+                ParseBoolField(jsonObject.value(), jsonObjectKey, engineConfig.m_Verbose,
+                               &fieldOccurances[ConfigFields::Verbose]);
             }
             else if (jsonObjectKey == "API interfaces")
             {
@@ -326,62 +461,30 @@ namespace AIAssistant
             }
             else if (jsonObjectKey == "API index")
             {
-                int64_t apiIndex = 0;
-                if (jsonObject.value().get_int64().get(apiIndex) != simdjson::SUCCESS)
-                {
-                    LOG_CORE_ERROR("ConfigParser: '{}' must be a number", jsonObjectKey);
-                    continue;
-                }
-                if (apiIndex < 0)
-                {
-                    LOG_CORE_ERROR("ConfigParser: '{}' is negative ({}), ignoring", jsonObjectKey, apiIndex);
-                    continue;
-                }
-                engineConfig.m_ApiIndex = static_cast<size_t>(apiIndex);
-                LOG_CORE_INFO("API index: {}", engineConfig.m_ApiIndex);
-                ++fieldOccurances[ConfigFields::ApiIndex];
+                ParseInt64Field(jsonObject.value(), jsonObjectKey, engineConfig.m_ApiIndex,
+                                NumericPolicy::RejectNegative, &fieldOccurances[ConfigFields::ApiIndex]);
             }
             else if (jsonObjectKey == "jcwf batch size")
             {
-                int64_t batchSize = 0;
-                if (jsonObject.value().get_int64().get(batchSize) != simdjson::SUCCESS)
-                {
-                    LOG_CORE_ERROR("ConfigParser: '{}' must be a number", jsonObjectKey);
-                    continue;
-                }
-                LOG_CORE_INFO("jcwf batch size: {}", batchSize);
-                if (batchSize > 0)
-                {
-                    engineConfig.m_JcwfBatchSize = static_cast<size_t>(batchSize);
-                }
-                ++fieldOccurances[ConfigFields::JcwfBatchSize];
+                ParseInt64Field(jsonObject.value(), jsonObjectKey, engineConfig.m_JcwfBatchSize,
+                                NumericPolicy::StoreOnlyIfPositive,
+                                &fieldOccurances[ConfigFields::JcwfBatchSize]);
             }
             else if (jsonObjectKey == "jcwf AI interface")
             {
-                int64_t ifaceIndex = 0;
-                if (jsonObject.value().get_int64().get(ifaceIndex) != simdjson::SUCCESS)
-                {
-                    LOG_CORE_ERROR("ConfigParser: '{}' must be a number", jsonObjectKey);
-                    continue;
-                }
-                LOG_CORE_INFO("jcwf AI interface: {}", ifaceIndex);
-                engineConfig.m_JcwfAiInterfaceIndex = static_cast<int>(ifaceIndex);
-                ++fieldOccurances[ConfigFields::JcwfAiInterface];
+                ParseInt64Field(jsonObject.value(), jsonObjectKey, engineConfig.m_JcwfAiInterfaceIndex,
+                                NumericPolicy::AcceptAny, &fieldOccurances[ConfigFields::JcwfAiInterface]);
             }
             else if (jsonObjectKey == "keys_file")
             {
-                std::string_view keysFile;
-                if (jsonObject.value().get_string().get(keysFile) != simdjson::SUCCESS)
-                {
-                    LOG_CORE_ERROR("ConfigParser: '{}' must be a string", jsonObjectKey);
-                    continue;
-                }
-                LOG_CORE_INFO("keys_file: {}", keysFile);
-                engineConfig.m_KeysFilePath = keysFile;
-                ++fieldOccurances[ConfigFields::KeysFile];
+                ParseStringField(jsonObject.value(), jsonObjectKey, engineConfig.m_KeysFilePath,
+                                 &fieldOccurances[ConfigFields::KeysFile]);
             }
             else if (jsonObjectKey == "use_bash")
             {
+                // Kept inline because the INFO log has a platform-conditional
+                // " (Windows-only, ignored on this platform)" annotation on
+                // non-Windows that the generic helper can't synthesise.
                 bool useBash = false;
                 if (jsonObject.value().get_bool().get(useBash) != simdjson::SUCCESS)
                 {
@@ -398,171 +501,69 @@ namespace AIAssistant
             }
             else if (jsonObjectKey == "TlsCert")
             {
-                std::string_view tlsCert;
-                if (jsonObject.value().get_string().get(tlsCert) != simdjson::SUCCESS)
-                {
-                    LOG_CORE_ERROR("ConfigParser: '{}' must be a string", jsonObjectKey);
-                    continue;
-                }
-                engineConfig.m_TlsCert = std::string(tlsCert);
-                LOG_CORE_INFO("TlsCert: {}", engineConfig.m_TlsCert);
-                ++fieldOccurances[ConfigFields::TlsCert];
+                ParseStringField(jsonObject.value(), jsonObjectKey, engineConfig.m_TlsCert,
+                                 &fieldOccurances[ConfigFields::TlsCert]);
             }
             else if (jsonObjectKey == "TlsKey")
             {
-                std::string_view tlsKey;
-                if (jsonObject.value().get_string().get(tlsKey) != simdjson::SUCCESS)
-                {
-                    LOG_CORE_ERROR("ConfigParser: '{}' must be a string", jsonObjectKey);
-                    continue;
-                }
-                engineConfig.m_TlsKey = std::string(tlsKey);
-                LOG_CORE_INFO("TlsKey: {}", engineConfig.m_TlsKey);
-                ++fieldOccurances[ConfigFields::TlsKey];
+                ParseStringField(jsonObject.value(), jsonObjectKey, engineConfig.m_TlsKey,
+                                 &fieldOccurances[ConfigFields::TlsKey]);
             }
             else if (jsonObjectKey == "TrustedProxyHeader")
             {
-                std::string_view header;
-                if (jsonObject.value().get_string().get(header) != simdjson::SUCCESS)
-                {
-                    LOG_CORE_ERROR("ConfigParser: '{}' must be a string", jsonObjectKey);
-                    continue;
-                }
-                engineConfig.m_TrustedProxyHeader = std::string(header);
-                LOG_CORE_INFO("TrustedProxyHeader: {}", engineConfig.m_TrustedProxyHeader);
-                ++fieldOccurances[ConfigFields::TrustedProxyHeader];
+                ParseStringField(jsonObject.value(), jsonObjectKey, engineConfig.m_TrustedProxyHeader,
+                                 &fieldOccurances[ConfigFields::TrustedProxyHeader]);
             }
             else if (jsonObjectKey == "TrustedRoleHeader")
             {
-                std::string_view header;
-                if (jsonObject.value().get_string().get(header) != simdjson::SUCCESS)
-                {
-                    LOG_CORE_ERROR("ConfigParser: '{}' must be a string", jsonObjectKey);
-                    continue;
-                }
-                engineConfig.m_TrustedRoleHeader = std::string(header);
-                LOG_CORE_INFO("TrustedRoleHeader: {}", engineConfig.m_TrustedRoleHeader);
-                ++fieldOccurances[ConfigFields::TrustedRoleHeader];
+                ParseStringField(jsonObject.value(), jsonObjectKey, engineConfig.m_TrustedRoleHeader,
+                                 &fieldOccurances[ConfigFields::TrustedRoleHeader]);
             }
             else if (jsonObjectKey == "MaxRequestBodyMB")
             {
-                uint64_t maxBody = 0;
-                if (jsonObject.value().get_uint64().get(maxBody) != simdjson::SUCCESS)
-                {
-                    LOG_CORE_ERROR("ConfigParser: '{}' must be a non-negative number", jsonObjectKey);
-                    continue;
-                }
-                engineConfig.m_MaxRequestBodyMB = static_cast<size_t>(maxBody);
-                LOG_CORE_INFO("MaxRequestBodyMB: {}", engineConfig.m_MaxRequestBodyMB);
-                ++fieldOccurances[ConfigFields::MaxRequestBodyMB];
+                ParseUint64Field(jsonObject.value(), jsonObjectKey, engineConfig.m_MaxRequestBodyMB,
+                                 &fieldOccurances[ConfigFields::MaxRequestBodyMB]);
             }
             else if (jsonObjectKey == "max inflight ai calls")
             {
-                int64_t maxInflight = 0;
-                if (jsonObject.value().get_int64().get(maxInflight) != simdjson::SUCCESS)
-                {
-                    LOG_CORE_ERROR("ConfigParser: '{}' must be a number", jsonObjectKey);
-                    continue;
-                }
-                LOG_CORE_INFO("max inflight ai calls: {}", maxInflight);
-                if (maxInflight < 0)
-                {
-                    LOG_CORE_ERROR("ConfigParser: '{}' is negative ({}), ignoring; configChecker will assign default",
-                                   jsonObjectKey, maxInflight);
-                    continue;
-                }
-                engineConfig.m_MaxInflightAiCalls = static_cast<size_t>(maxInflight);
-                ++fieldOccurances[ConfigFields::MaxInflightAiCalls];
+                ParseInt64Field(jsonObject.value(), jsonObjectKey, engineConfig.m_MaxInflightAiCalls,
+                                NumericPolicy::RejectNegative,
+                                &fieldOccurances[ConfigFields::MaxInflightAiCalls]);
             }
             else if (jsonObjectKey == "max_ai_calls_per_jcwf")
             {
-                int64_t cap = 0;
-                if (jsonObject.value().get_int64().get(cap) != simdjson::SUCCESS)
-                {
-                    LOG_CORE_ERROR("ConfigParser: '{}' must be a number", jsonObjectKey);
-                    continue;
-                }
-                if (cap < 0) cap = 0;
-                LOG_CORE_INFO("max_ai_calls_per_jcwf: {}", cap);
-                engineConfig.m_MaxAiCallsPerJcwf = static_cast<size_t>(cap);
-                ++fieldOccurances[ConfigFields::MaxAiCallsPerJcwf];
+                ParseInt64Field(jsonObject.value(), jsonObjectKey, engineConfig.m_MaxAiCallsPerJcwf,
+                                NumericPolicy::ClampNegativeToZero,
+                                &fieldOccurances[ConfigFields::MaxAiCallsPerJcwf]);
             }
             else if (jsonObjectKey == "max_per_item_fan_out")
             {
-                int64_t cap = 0;
-                if (jsonObject.value().get_int64().get(cap) != simdjson::SUCCESS)
-                {
-                    LOG_CORE_ERROR("ConfigParser: '{}' must be a number", jsonObjectKey);
-                    continue;
-                }
-                if (cap < 0) cap = 0;
-                LOG_CORE_INFO("max_per_item_fan_out: {}", cap);
-                engineConfig.m_MaxPerItemFanOut = static_cast<size_t>(cap);
-                ++fieldOccurances[ConfigFields::MaxPerItemFanOut];
+                ParseInt64Field(jsonObject.value(), jsonObjectKey, engineConfig.m_MaxPerItemFanOut,
+                                NumericPolicy::ClampNegativeToZero,
+                                &fieldOccurances[ConfigFields::MaxPerItemFanOut]);
             }
             else if (jsonObjectKey == "python engines")
             {
-                int64_t count = 0;
-                if (jsonObject.value().get_int64().get(count) != simdjson::SUCCESS)
-                {
-                    LOG_CORE_ERROR("ConfigParser: '{}' must be a number", jsonObjectKey);
-                    continue;
-                }
-                LOG_CORE_INFO("python engines: {}", count);
-                if (count < 0)
-                {
-                    LOG_CORE_ERROR("ConfigParser: '{}' is negative ({}), ignoring; configChecker will assign default",
-                                   jsonObjectKey, count);
-                    continue;
-                }
-                engineConfig.m_PythonEngines = static_cast<size_t>(count);
-                ++fieldOccurances[ConfigFields::PythonEngines];
+                ParseInt64Field(jsonObject.value(), jsonObjectKey, engineConfig.m_PythonEngines,
+                                NumericPolicy::RejectNegative,
+                                &fieldOccurances[ConfigFields::PythonEngines]);
             }
             else if (jsonObjectKey == "port")
             {
-                int64_t port = 0;
-                if (jsonObject.value().get_int64().get(port) != simdjson::SUCCESS)
-                {
-                    LOG_CORE_ERROR("ConfigParser: '{}' must be a number", jsonObjectKey);
-                    continue;
-                }
-                if (port < 0 || port > 65535)
-                {
-                    LOG_CORE_WARN("port {} out of range [0, 65535], defaulting to 0 (auto)", port);
-                    port = 0;
-                }
-                LOG_CORE_INFO("port: {}", port);
-                engineConfig.m_Port = static_cast<uint16_t>(port);
-                ++fieldOccurances[ConfigFields::Port];
+                ParseInt64FieldWithBounds(jsonObject.value(), jsonObjectKey, engineConfig.m_Port,
+                                          0, 65535, 0,
+                                          &fieldOccurances[ConfigFields::Port], " (auto)");
             }
             else if (jsonObjectKey == "mcp_keys_file")
             {
-                std::string_view mcpKeysFile;
-                if (jsonObject.value().get_string().get(mcpKeysFile) != simdjson::SUCCESS)
-                {
-                    LOG_CORE_ERROR("ConfigParser: '{}' must be a string", jsonObjectKey);
-                    continue;
-                }
-                engineConfig.m_McpKeysFilePath = std::string(mcpKeysFile);
-                LOG_CORE_INFO("mcp_keys_file: {}", engineConfig.m_McpKeysFilePath);
-                ++fieldOccurances[ConfigFields::McpKeysFile];
+                ParseStringField(jsonObject.value(), jsonObjectKey, engineConfig.m_McpKeysFilePath,
+                                 &fieldOccurances[ConfigFields::McpKeysFile]);
             }
             else if (jsonObjectKey == "session_timeout_hours")
             {
-                int64_t hours = 0;
-                if (jsonObject.value().get_int64().get(hours) != simdjson::SUCCESS)
-                {
-                    LOG_CORE_ERROR("ConfigParser: '{}' must be a number", jsonObjectKey);
-                    continue;
-                }
-                if (hours < 1 || hours > 168)
-                {
-                    LOG_CORE_WARN("session_timeout_hours {} out of range [1, 168], defaulting to 8", hours);
-                    hours = 8;
-                }
-                LOG_CORE_INFO("session_timeout_hours: {}", hours);
-                engineConfig.m_SessionTimeoutHours = static_cast<int>(hours);
-                ++fieldOccurances[ConfigFields::SessionTimeoutHours];
+                ParseInt64FieldWithBounds(jsonObject.value(), jsonObjectKey, engineConfig.m_SessionTimeoutHours,
+                                          1, 168, 8,
+                                          &fieldOccurances[ConfigFields::SessionTimeoutHours]);
             }
             else
             {
@@ -680,63 +681,33 @@ namespace AIAssistant
 
                 if (jsonObjectKey == "name")
                 {
-                    std::string_view name;
-                    if (field.value().get_string().get(name) != simdjson::SUCCESS)
-                    {
-                        LOG_CORE_ERROR("ConfigParser: API interface '{}' must be a string", jsonObjectKey);
-                        continue;
-                    }
-                    LOG_CORE_INFO("name: {}", name);
-                    apiInterface.m_Name = name;
-                    ++fieldOccurances[ConfigFields::InterfaceName];
+                    ParseStringField(field.value(), jsonObjectKey, apiInterface.m_Name,
+                                     &fieldOccurances[ConfigFields::InterfaceName],
+                                     "ConfigParser: API interface");
                 }
                 else if (jsonObjectKey == "description")
                 {
-                    std::string_view description;
-                    if (field.value().get_string().get(description) != simdjson::SUCCESS)
-                    {
-                        LOG_CORE_ERROR("ConfigParser: API interface '{}' must be a string", jsonObjectKey);
-                        continue;
-                    }
-                    LOG_CORE_INFO("description: {}", description);
-                    apiInterface.m_Description = description;
-                    ++fieldOccurances[ConfigFields::InterfaceDescription];
+                    ParseStringField(field.value(), jsonObjectKey, apiInterface.m_Description,
+                                     &fieldOccurances[ConfigFields::InterfaceDescription],
+                                     "ConfigParser: API interface");
                 }
                 else if (jsonObjectKey == "key_name")
                 {
-                    std::string_view keyName;
-                    if (field.value().get_string().get(keyName) != simdjson::SUCCESS)
-                    {
-                        LOG_CORE_ERROR("ConfigParser: API interface '{}' must be a string", jsonObjectKey);
-                        continue;
-                    }
-                    LOG_CORE_INFO("key_name: {}", keyName);
-                    apiInterface.m_KeyName = keyName;
-                    ++fieldOccurances[ConfigFields::InterfaceKeyName];
+                    ParseStringField(field.value(), jsonObjectKey, apiInterface.m_KeyName,
+                                     &fieldOccurances[ConfigFields::InterfaceKeyName],
+                                     "ConfigParser: API interface");
                 }
                 else if (jsonObjectKey == "url")
                 {
-                    std::string_view url;
-                    if (field.value().get_string().get(url) != simdjson::SUCCESS)
-                    {
-                        LOG_CORE_ERROR("ConfigParser: API interface '{}' must be a string", jsonObjectKey);
-                        continue;
-                    }
-                    LOG_CORE_INFO("url: {}", url);
-                    apiInterface.m_Url = url;
-                    ++fieldOccurances[ConfigFields::Url];
+                    ParseStringField(field.value(), jsonObjectKey, apiInterface.m_Url,
+                                     &fieldOccurances[ConfigFields::Url],
+                                     "ConfigParser: API interface");
                 }
                 else if (jsonObjectKey == "model")
                 {
-                    std::string_view model;
-                    if (field.value().get_string().get(model) != simdjson::SUCCESS)
-                    {
-                        LOG_CORE_ERROR("ConfigParser: API interface '{}' must be a string", jsonObjectKey);
-                        continue;
-                    }
-                    LOG_CORE_INFO("model: {}", model);
-                    apiInterface.m_Model = model;
-                    ++fieldOccurances[ConfigFields::Model];
+                    ParseStringField(field.value(), jsonObjectKey, apiInterface.m_Model,
+                                     &fieldOccurances[ConfigFields::Model],
+                                     "ConfigParser: API interface");
                 }
                 else if (jsonObjectKey == "max_context_tokens")
                 {

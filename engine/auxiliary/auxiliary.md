@@ -2,8 +2,9 @@
 
 This document covers the **auxiliary module** of the JarvisAgent engine:
 
-- `file.h / file.cpp` — filesystem helper utilities  
-- `threadPool.h / threadPool.cpp` — wrapper around `BS::thread_pool`  
+- `file.h / file.cpp` — filesystem helper utilities
+- `sha256.h / sha256.cpp` — SHA-256 hex digest helper (single canonical impl shared by SigV4, MCP key hashing, adhoc slug derivation)
+- `threadPool.h / threadPool.cpp` — wrapper around `BS::thread_pool`
 - `TracyClient.cpp` — Tracy profiler client integration
 
 The descriptions below are based only on the actual JarvisAgent sources plus the upstream `BS::thread_pool` documentation.
@@ -137,7 +138,35 @@ See `application/file/README.md` for the use-site list (categorised by subsystem
 
 ---
 
-## 2. Thread Pool Wrapper (`auxiliary/threadPool.*`)
+## 2. SHA-256 Hex Helper (`auxiliary/sha256.*`)
+
+Namespace:
+
+```cpp
+namespace AIAssistant::EngineCore
+```
+
+### API
+
+```cpp
+std::string Sha256Hex(std::string_view data);
+```
+
+Returns the lowercase-hex SHA-256 digest of `data` (64 chars), or the empty string on the impossible OpenSSL-NULL path.  On NULL the helper itself emits a `LOG_CORE_ERROR("Sha256Hex: ...")` line so callers without run context still get a breadcrumb; subsystems with run/workflow context layer their own ERROR log on top of the empty return.
+
+The `std::string_view` input is load-bearing: SigV4 paths feed `SecureString::Get()` views containing STS session tokens, so a `std::string const&` parameter would force materialisation of mlock'd secret bytes onto the regular heap.
+
+### Callers
+
+- `engine/curlWrapper/awsSigV4.cpp::Sign` — canonical-request hash.
+- `application/web/mcpKeyManager.cpp` — MCP key + enrollment-token hashing.
+- `application/workflow/adhocWorkflowManager.cpp::SanitizeUserSlug` — slug-disambiguation suffix.
+
+A SHA-256 known-answer self-test (`EngineCore::Sha256Hex("") == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"`) runs at server start via `awsSigV4.cpp::RunSelfTest`.
+
+---
+
+## 3. Thread Pool Wrapper (`auxiliary/threadPool.*`)
 
 Namespace:
 
@@ -238,7 +267,7 @@ std::vector<std::thread::id> ThreadPool::GetThreadIDs() const;
 
 ---
 
-## 3. Tracy Profiler Integration (`auxiliary/TracyClient.cpp`)
+## 4. Tracy Profiler Integration (`auxiliary/TracyClient.cpp`)
 
 `TracyClient.cpp` is the standard single‑translation‑unit integration recommended by the Tracy profiler:
 
@@ -257,6 +286,7 @@ There is **no JarvisAgent‑specific logic** in this file; it simply makes the T
 The auxiliary module provides:
 
 - Cross‑platform filesystem helpers used throughout the engine (`file.*`), including the project's single atomic-write path `AtomicWriteFile`.
+- The single canonical SHA-256 hex helper (`sha256.*`) shared by SigV4 signing, MCP key hashing, and adhoc slug disambiguation.
 - A thin, synchronized wrapper around `BS::thread_pool` for engine task execution (`threadPool.*`).
 - A one‑stop integration point for the Tracy profiler (`TracyClient.cpp`).
 

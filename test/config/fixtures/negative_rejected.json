@@ -1,0 +1,27 @@
+{
+    "_comment": "Negative values for RejectNegative-policy fields. Expected: each negative field logs ERROR 'is negative (<v>), ignoring; configChecker will assign default' and the field stays at its struct default. The INFO line precedes the ERROR per pre-refactor ordering.",
+    "_expected_errors": [
+        "ConfigParser: 'max threads' is negative (-1), ignoring; configChecker will assign default",
+        "ConfigParser: 'max file size in kB' is negative (-5), ignoring; configChecker will assign default",
+        "ConfigParser: 'max inflight ai calls' is negative (-100), ignoring; configChecker will assign default",
+        "ConfigParser: 'python engines' is negative (-2), ignoring; configChecker will assign default",
+        "ConfigParser: 'API index' is negative (-1), ignoring; configChecker will assign default"
+    ],
+
+    "queue folder": "queue",
+    "workflows folder": "workflows",
+    "max threads": -1,
+    "max file size in kB": -5,
+    "max inflight ai calls": -100,
+    "python engines": -2,
+    "API index": -1,
+    "API interfaces": [
+        {
+            "name": "api.openai.com/gpt-4.1/API1",
+            "url": "https://api.openai.com/v1/chat/completions",
+            "model": "gpt-4.1",
+            "API": "API1",
+            "key_name": "openai"
+        }
+    ]
+}

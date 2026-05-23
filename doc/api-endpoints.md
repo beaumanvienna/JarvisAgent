@@ -557,7 +557,7 @@ Submit a JCWF canvas for one-shot execution without permanent registration. Requ
 
 The run dispatches through the standard `WorkflowRuntimeManager`. Monitor via `GET /api/workflow-runs/<runId>`. AI calls are capped per run by `max_ai_calls_per_jcwf` in `config.json` (0 = unlimited).
 
-**Folder layout:** adhoc runs are staged under `_adhoc/<user_slug>/<timestamp>_<counter>_del-<delete-at>/`. `user_slug` is derived from the MCP key's `user` field (`[A-Za-z0-9._@-]`, other characters collapsed to `_`, capped at 64 bytes) so authorisation for artifact retrieval can be enforced by filesystem path prefix as well as in the handler.
+**Folder layout:** adhoc runs are staged under `_adhoc/<user_slug>/<timestamp>_<counter>_del-<delete-at>/`. `user_slug` is derived from the MCP key's `user` field in two stages: a character-collapsed body (`[A-Za-z0-9._@-]`, other characters collapsed to `_`, body capped at 55 bytes) followed by `_<8 hex chars of SHA-256(original_user)>` so distinct users never share a slug even when their names collapse identically (e.g. `bob+admin@x.com` and `bob_admin@x.com`). Authorisation is enforced on the original user identity (`m_User` in `meta.json`); the slug is purely a filesystem-naming primitive whose hash suffix keeps per-user filesystem paths distinct.
 
 **`ai_call` tasks.** Set each `ai_call` task's `working_directory` to a queue-relative path — e.g. `"../../queue/<task_id>"`. This is resolved relative to the run's workflow base directory (`_adhoc/<user>/<run>/workflows/_adhoc_.../`), so queue-binding files land in `_adhoc/<user>/<run>/queue/<task_id>/`. The runtime registers the adhoc run's queue folder with the file watcher at stage time, so these files trigger the normal AI dispatch pipeline. See `doc/JC_Workflow_Specification.md` §3.3.6 for the queue-binding format and §3.3.6.3 for `file_outputs` semantics on `ai_call` (Pattern A: `outputs` slot for downstream JCWF wiring; Pattern B: `file_outputs` with a destination path for terminal delivery).
 
@@ -576,7 +576,7 @@ Authorization: operator can read own runs; admin can read any run (cross-user re
   "ok": true,
   "runId": "adhoc_20260418T174752_0006",
   "owner": "alice@company.com",
-  "owner_slug": "alice@company.com",
+  "owner_slug": "alice@company.com_a1b2c3d4",
   "terminal": true,
   "retention": {
     "policy": "ttl_1h",

@@ -135,9 +135,14 @@ namespace AIAssistant
 
         // Pure function — pulled into the public API so unit tests can exercise it
         // without spinning up the full manager. Maps an MCP user string (e.g.
-        // "alice@company.com") to a filesystem-safe slug that's used as the first
-        // directory segment under _adhoc/. Allowed characters: [A-Za-z0-9._@-];
-        // everything else is collapsed to '_'. Length capped at 64 bytes.
+        // "alice@company.com") to a filesystem-safe slug used as the first
+        // directory segment under _adhoc/. Shape: `<body>_<8 hex chars of
+        // SHA-256(original_user)>`. Body: allowed characters [A-Za-z0-9._@-];
+        // everything else collapsed to '_'; body capped at 55 bytes so the
+        // total slug stays ≤ 64. The hash is over the ORIGINAL user (pre-
+        // collapse) so distinct users that collapse to the same body still
+        // get distinct slugs. Authorisation runs on the user identity, not
+        // this slug — the slug is purely for filesystem naming.
         static std::string SanitizeUserSlug(std::string const& user);
 
     private:

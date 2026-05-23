@@ -56,11 +56,17 @@ namespace AIAssistant
         // Save current providers to an encrypted file.
         bool Save(std::filesystem::path const& keysFilePath, std::string_view masterPassword);
 
-        // Load providers from a plaintext JSON file (development only).
+#ifdef J9T_STUDIO
+        // Load providers from a plaintext JSON file.  Studio editions only —
+        // the production Engine binary rejects plaintext credential storage
+        // at link time (this declaration is `#ifdef`-stripped + the lone
+        // production caller in `engine.cpp` is gated by the same macro).
         bool LoadPlaintext(std::filesystem::path const& keysFilePath);
 
-        // Save current providers to a plaintext JSON file (development only).
+        // Save current providers to a plaintext JSON file.  Studio-only,
+        // same rationale as LoadPlaintext.
         bool SavePlaintext(std::filesystem::path const& keysFilePath);
+#endif
 
         // Backward compatibility: create a single "openai" provider from OPENAI_API_KEY env var.
         // endpoint, model, and apiType are taken from the existing config.json API interface.
@@ -74,9 +80,11 @@ namespace AIAssistant
         KeyLoadStatus GetKeyLoadStatus() const { return m_KeyLoadStatus; }
         void SetKeyLoadStatus(KeyLoadStatus status) { m_KeyLoadStatus = status; }
 
-        // Store the keys file path so Unlock() can use it at runtime
-        void SetKeysFilePath(std::filesystem::path const& path) { m_KeysFilePath = path; }
-        std::filesystem::path const& GetKeysFilePath() const { return m_KeysFilePath; }
+        // Store the keys file path so Unlock() can use it at runtime.  The
+        // path is read under m_KeysFilePathMutex from `Unlock` to close the
+        // pre-existing TOCTOU between fs::exists and Load.
+        void SetKeysFilePath(std::filesystem::path const& path);
+        std::filesystem::path GetKeysFilePath() const;
 
         // Run a callback with the held master password as a std::string_view.
         // Returns true if a master password is held (callback was invoked) and
@@ -178,7 +186,16 @@ namespace AIAssistant
         // or by `CredentialFactory::CloneAndPatch` for partial-update flows).
         bool AddCredential(std::string const& name, std::unique_ptr<ICredential> cred);
         bool RemoveProvider(std::string const& name);
-        void SetDefaultProvider(std::string const& name);
+
+        // Set the default provider by name.  Returns false (and logs) on
+        // empty name or unknown provider — callers that explicitly want to
+        // clear the default use `ClearDefaultProvider()` so the intent is
+        // visible in the diff and a hand-edit accident can't silently wipe
+        // the default by passing through an empty string.
+        [[nodiscard]] bool SetDefaultProvider(std::string const& name);
+
+        // Explicitly clear the default-provider selection.
+        void ClearDefaultProvider();
 
         // Atomic read-modify-write — looks up `name`, invokes `mutator(existing)` under
         // unique_lock, stores the returned credential in place.  Mutator receives
@@ -256,6 +273,13 @@ namespace AIAssistant
         mutable std::shared_mutex m_Mutex;
 
         KeyLoadStatus m_KeyLoadStatus{KeyLoadStatus::NoKeysFile};
+
+        // m_KeysFilePath is set at startup (from config.json) and is rarely
+        // mutated at runtime, but a concurrent `SetKeysFilePath` between
+        // `Unlock`'s fs::exists check and the subsequent `Load` would race.
+        // Dedicated mutex keeps the cost off the credential-map m_Mutex
+        // (which is hotly read by every dispatch).
+        mutable std::shared_mutex m_KeysFilePathMutex;
         std::filesystem::path m_KeysFilePath;
 
         // Master password held in mlock-locked memory after Unlock succeeds.

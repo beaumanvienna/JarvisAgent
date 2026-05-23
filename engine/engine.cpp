@@ -177,7 +177,11 @@ int engine(int argc, char* argv[])
                           keysFilePathAbsolute.string());
         }
 
-        // Try plaintext keys.json (development convenience)
+#ifdef J9T_STUDIO
+        // Try plaintext keys.json — Studio editions only.  Production
+        // Engine builds strip both the call site and the declaration so a
+        // plaintext keystore can't be loaded even if one is present on
+        // disk.
         if (!keysLoaded && std::filesystem::exists(plaintextKeysPathAbsolute))
         {
             keysLoaded = keyManager.LoadPlaintext(plaintextKeysPathAbsolute);
@@ -186,6 +190,7 @@ int engine(int argc, char* argv[])
                 keyManager.SetKeyLoadStatus(KeyManager::KeyLoadStatus::Ok);
             }
         }
+#endif
 
         // Fall back to OPENAI_API_KEY environment variable (bootstrap convenience).
         // We only consider this fallback when there is NO encrypted keys file at

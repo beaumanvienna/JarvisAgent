@@ -61,10 +61,12 @@ namespace AIAssistant
         constexpr long kMaxDownloadBytes = 100ll * 1024 * 1024;
 
         // Filesystem-safe filter.m_Id allowlist: alphanumeric + `._-`, no `/`,
-        // no `..`, capped at 64 bytes.  Matches AdhocWorkflowManager::
-        // SanitizeUserSlug's character set for cross-component consistency.
-        // Used in WriteItemFile to defend against a hostile JCWF putting `..`
-        // in filter.m_Id and escaping `<workflowBaseDir>/<filter.m_Id>/`.
+        // no `..`, capped at 64 bytes.  Same character class as the body of
+        // AdhocWorkflowManager::SanitizeUserSlug (which also appends a hex
+        // SHA-256 suffix, but the hex chars are a strict subset of this
+        // allowlist, so cross-component filesystem-safety holds).  Used in
+        // WriteItemFile to defend against a hostile JCWF putting `..` in
+        // filter.m_Id and escaping `<workflowBaseDir>/<filter.m_Id>/`.
         bool IsValidFilesystemId(std::string const& id)
         {
             if (id.empty() || id.size() > 64) return false;

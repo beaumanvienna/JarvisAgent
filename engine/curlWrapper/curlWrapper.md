@@ -151,7 +151,7 @@ struct QueryData
     long m_TimeoutMs{0};                        // 0 = no timeout; >0 = max transfer time in ms
     std::unordered_map<std::string, std::string> m_Params{}; // Per-style auxiliary non-secret fields (e.g. SigV4 reads "service" with default "bedrock"); secret material lives in typed credential pointers, not this map
 
-    // Typed-credential snapshot (Sitting 6).  Populated at submit time when AuthStyle is AwsSigV4;
+    // Typed-credential snapshot.  Populated at submit time when AuthStyle is AwsSigV4;
     // null for the other styles which read m_ApiKey directly.  shared_ptr to a deep copy taken
     // under KeyManager's lock so the request's view of the credential is stable across concurrent
     // RemoveProvider / SetDefaultProvider mutations.

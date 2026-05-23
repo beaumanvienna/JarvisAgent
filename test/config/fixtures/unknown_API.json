@@ -1,0 +1,20 @@
+{
+    "_comment": "Unknown API enum value. ConfigParser logs ERROR 'unknown API API7 in interface (expected API1-API6); interface will be marked InvalidAPI and skipped by configChecker' and sets m_InterfaceType=InvalidAPI. Since this is the only interface, ConfigChecker rejects with 'config error: invalid API interface configuration (index 0, count 1)' — j9t stays alive but config is not ok.",
+    "_expected_errors": [
+        "ConfigParser: unknown API 'API7' in interface",
+        "config error: invalid API interface configuration"
+    ],
+
+    "queue folder": "queue",
+    "workflows folder": "workflows",
+
+    "API interfaces": [
+        {
+            "name": "test/API7",
+            "url": "https://api.example.com/v1/chat",
+            "model": "test-model",
+            "API": "API7",
+            "key_name": "test-key"
+        }
+    ]
+}
