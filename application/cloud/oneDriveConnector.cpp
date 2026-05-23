@@ -29,6 +29,7 @@
 #include "engine.h"
 #include "keys/keyManager.h"
 #include "keys/oauthTokenManager.h"
+#include "curlWrapper/curlSlistHelper.h"
 #include "curlWrapper/curlWrapper.h"
 #include "cloud/cloudTaskExecutor.h"
 #include "cloud/connectorHttp.h"
@@ -50,8 +51,8 @@ namespace AIAssistant
         }
 
         auto& oauthManager = Core::g_Core->GetOAuthTokenManager();
-        std::string accessToken = oauthManager.GetAccessToken(connection.m_KeyName, errorMessage);
-        if (accessToken.empty())
+        credentials.m_AuthType = CloudAuthType::OAuth2;
+        if (!oauthManager.GetAccessToken(connection.m_KeyName, credentials.m_Token, errorMessage))
         {
             if (errorMessage.empty())
             {
@@ -59,9 +60,6 @@ namespace AIAssistant
             }
             return false;
         }
-
-        credentials.m_AuthType = CloudAuthType::OAuth2;
-        credentials.m_Token = std::move(accessToken);
         return true;
     }
 
@@ -132,7 +130,7 @@ namespace AIAssistant
             return std::unexpected(ConnectorError::Make(ConnectorErrorCode::CredentialMissing, std::move(credErr)));
         }
 
-        if (ICloudTaskExecutor::ContainsCrlf(credentials.m_Token))
+        if (ICloudTaskExecutor::ContainsCrlf(credentials.m_Token.Get()))
         {
             ConnectorHttp::IncrementCredentialCrlfRejection();
             LOG_SECURITY_WARN("[security] onedrive_test_bearer_crlf_rejected connection='{}'", connection.m_Name);
@@ -157,9 +155,9 @@ namespace AIAssistant
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
         ConnectorHttp::ApplyHardenedDefaults(curl, url);
 
-        std::string authHeader = "Authorization: Bearer " + credentials.m_Token;
         struct curl_slist* headers = nullptr;
-        headers = curl_slist_append(headers, authHeader.c_str());
+        SecureString authScratch;
+        AppendSecretHeader(headers, "Authorization: Bearer ", credentials.m_Token, authScratch);
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
 
         CURLcode res = curl_easy_perform(curl);

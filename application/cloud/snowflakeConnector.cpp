@@ -35,6 +35,7 @@
 #include "keys/credential.h"
 #include "keys/keyManager.h"
 #include "keys/jwtGenerator.h"
+#include "curlWrapper/curlSlistHelper.h"
 #include "curlWrapper/curlWrapper.h"
 
 namespace AIAssistant
@@ -148,9 +149,9 @@ namespace AIAssistant
             return false;
         }
 
-        std::string jwt =
-            JwtGenerator::GenerateSnowflakeJwt(accountIt->second, userIt->second, privateKeyPem, errorMessage);
-        if (jwt.empty())
+        credentials.m_AuthType = CloudAuthType::JwtRsa;
+        if (!JwtGenerator::GenerateSnowflakeJwt(accountIt->second, userIt->second, privateKeyPem,
+                                                  credentials.m_Token, errorMessage))
         {
             if (errorMessage.empty())
             {
@@ -158,9 +159,6 @@ namespace AIAssistant
             }
             return false;
         }
-
-        credentials.m_AuthType = CloudAuthType::JwtRsa;
-        credentials.m_Token = std::move(jwt);
         return true;
     }
 
@@ -190,8 +188,8 @@ namespace AIAssistant
         }
         // Reject CR/LF in the JWT before splicing into the Authorization header
         // (parallel to the executor's check).
-        if (credentials.m_Token.find('\r') != std::string::npos ||
-            credentials.m_Token.find('\n') != std::string::npos)
+        if (credentials.m_Token.Get().find('\r') != std::string::npos ||
+            credentials.m_Token.Get().find('\n') != std::string::npos)
         {
             ConnectorHttp::IncrementCredentialCrlfRejection();
             LOG_SECURITY_WARN("[security] snowflake_test_jwt_crlf_rejected connection='{}'", connection.m_Name);
@@ -264,8 +262,8 @@ namespace AIAssistant
         ConnectorHttp::ApplyHardenedDefaults(curl, url);
 
         struct curl_slist* headers = nullptr;
-        std::string authHeader = "Authorization: Bearer " + credentials.m_Token;
-        headers = curl_slist_append(headers, authHeader.c_str());
+        SecureString authScratch;
+        AppendSecretHeader(headers, "Authorization: Bearer ", credentials.m_Token, authScratch);
         headers = curl_slist_append(headers, "Content-Type: application/json");
         headers = curl_slist_append(headers, "Accept: application/json");
         headers = curl_slist_append(headers, "X-Snowflake-Authorization-Token-Type: KEYPAIR_JWT");

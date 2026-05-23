@@ -156,9 +156,10 @@ namespace AIAssistant
             queryData.m_AwsCredential != nullptr)
         {
             std::vector<std::string> capturedHeaders;
+            SecureString capturedSecretHeader;  // SigV4 leaves this empty; included for the interface contract.
             std::string signErrMsg;
             auto const& signer = IAuthSigner::Get(queryData.m_AuthStyle);
-            if (signer.Apply(queryData, capturedHeaders, signErrMsg))
+            if (signer.Apply(queryData, capturedHeaders, capturedSecretHeader, signErrMsg))
             {
                 std::lock_guard<std::mutex> guard(CapturedMutex());
                 auto& ring = CapturedRing();

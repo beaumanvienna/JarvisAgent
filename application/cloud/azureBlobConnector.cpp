@@ -32,6 +32,7 @@
 #include "keys/keyManager.h"
 #include "keys/oauthTokenManager.h"
 #include "log/secretRedactor.h"
+#include "curlWrapper/curlSlistHelper.h"
 #include "curlWrapper/curlWrapper.h"
 #include "cloud/cloudTaskExecutor.h"
 #include "cloud/connectorHttp.h"
@@ -56,8 +57,8 @@ namespace AIAssistant
         {
             // Azure AD OAuth2 — use OAuthTokenManager
             auto& oauthManager = Core::g_Core->GetOAuthTokenManager();
-            std::string accessToken = oauthManager.GetAccessToken(connection.m_KeyName, errorMessage);
-            if (accessToken.empty())
+            credentials.m_AuthType = CloudAuthType::OAuth2;
+            if (!oauthManager.GetAccessToken(connection.m_KeyName, credentials.m_Token, errorMessage))
             {
                 if (errorMessage.empty())
                 {
@@ -65,9 +66,6 @@ namespace AIAssistant
                 }
                 return false;
             }
-
-            credentials.m_AuthType = CloudAuthType::OAuth2;
-            credentials.m_Token = std::move(accessToken);
             return true;
         }
 
@@ -84,11 +82,11 @@ namespace AIAssistant
             {
                 if (auto const* api = dynamic_cast<ApiKeyCredential const*>(&cred))
                 {
-                    credentials.m_SecretKey = std::string(api->m_ApiKey.Get());
+                    credentials.m_SecretKey.Set(api->m_ApiKey.Get());
                 }
                 else if (auto const* basic = dynamic_cast<BasicAuthCredential const*>(&cred))
                 {
-                    credentials.m_SecretKey = std::string(basic->m_Password.Get());
+                    credentials.m_SecretKey.Set(basic->m_Password.Get());
                 }
                 else
                 {
@@ -107,7 +105,7 @@ namespace AIAssistant
             return false;
         }
 
-        if (credentials.m_SecretKey.empty())
+        if (credentials.m_SecretKey.IsEmpty())
         {
             errorMessage = "Credential '" + connection.m_KeyName + "' has empty Azure Storage account key";
             return false;
@@ -118,7 +116,7 @@ namespace AIAssistant
         // so the redactor's dedupe makes this a no-op today.  Kept so a future code path
         // that bypasses KeyManager (e.g. Azure SAS pulled from connection.m_Params) still
         // gets its transient secret scrubbed from logs.
-        SecretRedactor::Get().AddSecret(credentials.m_SecretKey);
+        SecretRedactor::Get().AddSecret(credentials.m_SecretKey.Get());
 
         // Account name from connection params
         auto accountIt = connection.m_Params.find("account_name");
@@ -186,7 +184,7 @@ namespace AIAssistant
         }
 
         if (credentials.m_AuthType == CloudAuthType::OAuth2 &&
-            ICloudTaskExecutor::ContainsCrlf(credentials.m_Token))
+            ICloudTaskExecutor::ContainsCrlf(credentials.m_Token.Get()))
         {
             ConnectorHttp::IncrementCredentialCrlfRejection();
             LOG_SECURITY_WARN("[security] azure_blob_test_bearer_crlf_rejected connection='{}'", connection.m_Name);
@@ -224,7 +222,8 @@ namespace AIAssistant
         }
         else if (credentials.m_AuthType == CloudAuthType::OAuth2)
         {
-            headers = curl_slist_append(headers, ("Authorization: Bearer " + credentials.m_Token).c_str());
+            [[maybe_unused]] SecureString authScratch_inline;
+AppendSecretHeader(headers, "Authorization: Bearer ", credentials.m_Token, authScratch_inline);
             headers = curl_slist_append(headers, "x-ms-version: 2024-11-04");
         }
 

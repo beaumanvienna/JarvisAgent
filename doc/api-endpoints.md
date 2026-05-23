@@ -222,7 +222,7 @@ Healthy values during an active workflow: drains keep up with pings (one drain p
   ]
 }
 ```
-`interface_names` (added Sitting 7 / Workstream C, 2026-05-15) lists each distinct interface name referenced by the workflow's `ai_call` tasks.  Empty string in the array means "system default provider" (the task didn't pin a `provider` field).  Computed once at workflow-load time from `WorkflowDefinition::m_RequiredAiProviders`.  The dashboard's `WorkflowsPanel` cross-references this against the active `ai-call-failed` alert map to paint a red `⚠` glyph on rows whose interfaces are degraded.  Omitted entirely when the workflow has no `ai_call` tasks.
+`interface_names` lists each distinct interface name referenced by the workflow's `ai_call` tasks.  Empty string in the array means "system default provider" (the task didn't pin a `provider` field).  Computed once at workflow-load time from `WorkflowDefinition::m_RequiredAiProviders`.  The dashboard's `WorkflowsPanel` cross-references this against the active `ai-call-failed` alert map to paint a red `⚠` glyph on rows whose interfaces are degraded.  Omitted entirely when the workflow has no `ai_call` tasks.
 
 Sub-workflows loaded from a container also appear in the list with `is_sub_workflow: true`, `parent_workflow_id`, and `container_folder`.
 
@@ -856,7 +856,7 @@ Reloads `config.json` from disk, updating in-memory AI interfaces and API index.
 ## Providers — Health snapshot — Both editions (admin only)
 
 ### GET /api/providers/health
-Per-interface health snapshot driving the dashboard's "AI Health" LED + click-through popover (Sitting 8 / Workstream D, 2026-05-15).  Joins the configured `api_interfaces[]` list with `AiRequestPool::m_HealthPerInterface` (last-error + counters + cap-pin timestamp) and `CurlMultiDispatcher`'s per-`quota_key` AIMD controller cap state.  One entry per configured interface; entries for interfaces that haven't dispatched yet render with `current_cap: -1`.
+Per-interface health snapshot driving the dashboard's "AI Health" LED + click-through popover.  Joins the configured `api_interfaces[]` list with `AiRequestPool::m_HealthPerInterface` (last-error + counters + cap-pin timestamp) and `CurlMultiDispatcher`'s per-`quota_key` AIMD controller cap state.  One entry per configured interface; entries for interfaces that haven't dispatched yet render with `current_cap: -1`.
 
 Fetched by the dashboard on mount + every 5s poll tick + immediately on receipt of a `cap-changed` WebSocket message.
 
@@ -1310,7 +1310,7 @@ Broadcasts are wrapped in a batch envelope before reaching the client: `{"type":
 | `ai-call-started` | An ai_call task has begun dispatch. Fields: `prob` (PROB file name), `interface` (user-configured interface label from `config.json`). |
 | `ai-call-completed` | An ai_call task succeeded. Fields: `prob`, `interface_name` (user-configured label — lets the dashboard auto-clear `ai-call-failed` alerts keyed by the same interface), `input_tokens`, `output_tokens`, `total_tokens`, `finish_reason`. |
 | `ai-call-failed` | An ai_call task failed (transport error, HTTP error, or provider-side error body).  Fields: `prob`, `error_kind` (`AiError::Kind` ordinal), `http_status`, `error_message`, `provider_error_code` (raw — e.g. `"insufficient_quota"`), `provider_error_type` (raw — e.g. `"insufficient_quota"`), `category` (string-serialized `ProviderErrorCategory` — `"Unknown"` / `"BillingExhausted"` / `"ThrottleRateLimit"` / `"AuthFailure"` / `"ServiceOverload"` / `"ModelNotFound"` / `"InvalidRequest"`), `retry_after_seconds` (int, **only present when the provider sent a `Retry-After` header**), `interface_name` (user-configured label).  UI consumers should branch on `category` rather than the raw provider strings so the wire schema stays stable across providers. |
-| `cap-changed` | Payload-free wake signal (added Sitting 8 / Workstream D, 2026-05-15).  Dispatcher fires this whenever a `RateLimitController::m_CurrentConcurrencyCap` mutates on an observation — receiver refetches `GET /api/providers/health` for authoritative state.  Bounded broadcast rate: only on actual cap mutation, not every observation.  Sub-second LED updates without polling. |
+| `cap-changed` | Payload-free wake signal.  Dispatcher fires this whenever a `RateLimitController::m_CurrentConcurrencyCap` mutates on an observation — receiver refetches `GET /api/providers/health` for authoritative state.  Bounded broadcast rate: only on actual cap mutation, not every observation.  Sub-second LED updates without polling. |
 | *(broadcast)* | Any JSON string queued via `Broadcast()` / `BroadcastJSON()` is drained to all clients on the next `ping` / `workflow-runs-request` / `chat` message. |
 
 ---
@@ -1377,7 +1377,7 @@ Tests the connection using the `ICloudConnector::TestConnection()` method for th
 **Response (400):** `{ "ok": false, "error": "test_failed", "code": "network_error", "message": "S3 test failed: Could not connect to server" }`
 **Response (400):** `{ "ok": false, "error": "no_connector", "message": "No connector registered for type 'xyz'" }`
 
-The `code` field on `test_failed` responses (Sitting 7b) is the lowercase-snake form of `ConnectorErrorCode` — one of `invalid_config` / `invalid_endpoint` / `credential_missing` / `credential_invalid` / `oauth_error` / `network_error` / `auth_failure` / `http_error` / `unknown_error`.  Stable identifiers the dashboard switches on for remediation copy.  The breaker records the same code via `CloudCircuitBreaker::RecordFailure`; it surfaces as `last_failure_code` on the per-connection entry of `/api/status::connection_health`.
+The `code` field on `test_failed` responses is the lowercase-snake form of `ConnectorErrorCode` — one of `invalid_config` / `invalid_endpoint` / `credential_missing` / `credential_invalid` / `oauth_error` / `network_error` / `auth_failure` / `http_error` / `unknown_error`.  Stable identifiers the dashboard switches on for remediation copy.  The breaker records the same code via `CloudCircuitBreaker::RecordFailure`; it surfaces as `last_failure_code` on the per-connection entry of `/api/status::connection_health`.
 
 ### POST /api/connections/save
 Serializes all connections to `connections.json` in the launch directory.  The write is atomic (tmp-file + rename) — on a 5xx response the existing `connections.json` is left unchanged.

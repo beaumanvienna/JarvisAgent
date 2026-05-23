@@ -24,6 +24,8 @@
 #pragma once
 
 #include <string>
+
+#include "keys/secureString.h"
 #include <vector>
 
 #include "cloud/cloudConnector.h"
@@ -57,7 +59,7 @@ namespace AIAssistant
         static std::string BuildImapUrl(CloudConnection const& connection);
 
         // Perform a single IMAP command via libcurl and return the response body.
-        static bool ImapCommand(std::string const& url, std::string const& username, std::string const& password,
+        static bool ImapCommand(std::string const& url, std::string const& username, SecureString const& password,
                                 std::string const& customRequest, std::string& responseBody,
                                 std::string& errorMessage, bool useSsl);
 

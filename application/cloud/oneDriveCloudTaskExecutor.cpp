@@ -33,6 +33,7 @@
 #include "cloud/oneDriveCloudTaskExecutor.h"
 #include "cloud/oneDriveConnector.h"
 #include "cloud/connectorHttp.h"
+#include "curlWrapper/curlSlistHelper.h"
 #include "curlWrapper/curlWrapper.h"
 #include "json/jsonHelper.h"
 #include "workflow/taskPathResolver.h"
@@ -82,12 +83,12 @@ namespace AIAssistant
         return true;
     }
 
-    static bool GraphRequest(std::string const& method, std::string const& url, std::string const& bearerToken,
+    static bool GraphRequest(std::string const& method, std::string const& url, SecureString const& bearerToken,
                              std::string& responseBody, long& httpCode,
                              char const* uploadData = nullptr, size_t uploadSize = 0,
                              std::string const& contentType = {})
     {
-        if (ICloudTaskExecutor::ContainsCrlf(bearerToken))
+        if (ICloudTaskExecutor::ContainsCrlf(bearerToken.Get()))
         {
             ConnectorHttp::IncrementCredentialCrlfRejection();
             LOG_SECURITY_WARN("[security] onedrive_bearer_crlf_rejected");
@@ -136,8 +137,8 @@ namespace AIAssistant
         }
 
         struct curl_slist* headers = nullptr;
-        std::string authHeader = "Authorization: Bearer " + bearerToken;
-        headers = curl_slist_append(headers, authHeader.c_str());
+        SecureString authScratch;
+        AppendSecretHeader(headers, "Authorization: Bearer ", bearerToken, authScratch);
         if (!contentType.empty())
         {
             headers = curl_slist_append(headers, ("Content-Type: " + contentType).c_str());
@@ -153,10 +154,10 @@ namespace AIAssistant
     }
 
     // Helper: download a file from Graph API to disk
-    static bool GraphDownload(std::string const& url, std::string const& bearerToken, std::string const& outputPath,
+    static bool GraphDownload(std::string const& url, SecureString const& bearerToken, std::string const& outputPath,
                               std::string& errorMessage)
     {
-        if (ICloudTaskExecutor::ContainsCrlf(bearerToken))
+        if (ICloudTaskExecutor::ContainsCrlf(bearerToken.Get()))
         {
             ConnectorHttp::IncrementCredentialCrlfRejection();
             LOG_SECURITY_WARN("[security] onedrive_bearer_crlf_rejected (download)");
@@ -192,8 +193,8 @@ namespace AIAssistant
         ConnectorHttp::ApplyExecutorRedirectDefaults(curl, url);
 
         struct curl_slist* headers = nullptr;
-        std::string authHeader = "Authorization: Bearer " + bearerToken;
-        headers = curl_slist_append(headers, authHeader.c_str());
+        SecureString authScratch;
+        AppendSecretHeader(headers, "Authorization: Bearer ", bearerToken, authScratch);
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
 
         CURLcode res = curl_easy_perform(curl);

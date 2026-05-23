@@ -34,6 +34,7 @@
 #include "cloud/googleSheetsCloudTaskExecutor.h"
 #include "cloud/googleSheetsConnector.h"
 #include "cloud/connectorHttp.h"
+#include "curlWrapper/curlSlistHelper.h"
 #include "curlWrapper/curlWrapper.h"
 #include "json/jsonHelper.h"
 #include "workflow/taskPathResolver.h"
@@ -232,17 +233,15 @@ namespace AIAssistant
         };
         using WriteFunc = size_t (*)(void*, size_t, size_t, void*);
 
-        // For API key auth, append to URL; for OAuth, use Bearer header
-        bool useApiKeyParam = (credentials.m_AuthType == CloudAuthType::BearerToken &&
-                               connection.m_AuthType != CloudAuthType::OAuth2);
-        std::string finalUrl = url;
-        if (useApiKeyParam)
-        {
-            finalUrl += (finalUrl.find('?') != std::string::npos ? "&" : "?");
-            finalUrl += "key=" + credentials.m_Token;
-        }
+        // API-key auth uses the X-Goog-Api-Key HTTP header (semantically equivalent
+        // to a ?key=<token> URL parameter, but the header form keeps the secret out
+        // of the URL); OAuth uses Authorization: Bearer.  Both flow through
+        // AppendSecretHeader so the secret bytes never appear in a std::string heap
+        // allocation between SecureString and curl_slist_append.
+        bool const useApiKeyHeader = (credentials.m_AuthType == CloudAuthType::BearerToken &&
+                                      connection.m_AuthType != CloudAuthType::OAuth2);
 
-        curl_easy_setopt(curl, CURLOPT_URL, finalUrl.c_str());
+        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
         curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, method.c_str());
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, static_cast<WriteFunc>(writeCallback));
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseBody);
@@ -257,10 +256,14 @@ namespace AIAssistant
         }
 
         struct curl_slist* headers = nullptr;
-        if (!useApiKeyParam)
+        SecureString authScratch;
+        if (useApiKeyHeader)
         {
-            std::string authHeader = "Authorization: Bearer " + credentials.m_Token;
-            headers = curl_slist_append(headers, authHeader.c_str());
+            AppendSecretHeader(headers, "X-Goog-Api-Key: ", credentials.m_Token, authScratch);
+        }
+        else
+        {
+            AppendSecretHeader(headers, "Authorization: Bearer ", credentials.m_Token, authScratch);
         }
         headers = curl_slist_append(headers, "Accept: application/json");
         if (!requestBody.empty())

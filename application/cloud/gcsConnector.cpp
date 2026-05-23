@@ -35,6 +35,7 @@
 #include "keys/credential.h"
 #include "keys/jwtGenerator.h"
 #include "keys/keyManager.h"
+#include "curlWrapper/curlSlistHelper.h"
 #include "curlWrapper/curlWrapper.h"
 #include "cloud/cloudTaskExecutor.h"
 #include "cloud/connectorHttp.h"
@@ -66,13 +67,13 @@ namespace AIAssistant
         return kDefaultGcsEndpoint;
     }
 
-    bool GcsConnector::ExchangeJwtForAccessToken(std::string const& jwt, std::string const& endpoint,
-                                                  std::string& accessToken, std::string& errorMessage)
+    bool GcsConnector::ExchangeJwtForAccessToken(SecureString const& jwt, std::string const& endpoint,
+                                                  SecureString& accessToken, std::string& errorMessage)
     {
         // For fake-gcs-server (local testing), skip token exchange — use JWT directly as bearer token
         if (endpoint != kDefaultGcsEndpoint)
         {
-            accessToken = jwt;
+            accessToken.Set(jwt.Get());
             return true;
         }
 
@@ -83,7 +84,13 @@ namespace AIAssistant
             return false;
         }
 
-        std::string postBody = "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=" + jwt;
+        // Build the form-urlencoded body directly into a SecureString — the JWT is
+        // secret-bearing (auth-credential until expiry).  CURLOPT_POSTFIELDS does NOT
+        // copy by default; the SecureString stays in scope through curl_easy_perform
+        // below.
+        SecureString postBody;
+        postBody.Build({"grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=",
+                         jwt.Get()});
 
         std::string responseBody;
         auto writeCallback = [](void* contents, size_t size, size_t nmemb, void* userp) -> size_t
@@ -96,7 +103,8 @@ namespace AIAssistant
 
         curl_easy_setopt(curl, CURLOPT_URL, kGoogleTokenUrl);
         curl_easy_setopt(curl, CURLOPT_POST, 1L);
-        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, postBody.c_str());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, postBody.CStr());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(postBody.Size()));
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, static_cast<WriteFunc>(writeCallback));
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseBody);
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
@@ -152,7 +160,7 @@ namespace AIAssistant
             return false;
         }
 
-        accessToken = std::string(tokenSv);
+        accessToken.Set(tokenSv);
         return true;
     }
 
@@ -175,7 +183,7 @@ namespace AIAssistant
                 if (now < it->second.m_ExpiresAt)
                 {
                     credentials.m_AuthType = CloudAuthType::OAuth2;
-                    credentials.m_Token = it->second.m_AccessToken;
+                    credentials.m_Token.Set(it->second.m_AccessToken.Get());
                     return true;
                 }
             }
@@ -237,8 +245,8 @@ namespace AIAssistant
                       << R"(,"exp":)" << exp << "}";
         std::string payloadJson = payloadStream.str();
 
-        std::string jwt = JwtGenerator::Generate(payloadJson, privateKeyPem, errorMessage);
-        if (jwt.empty())
+        SecureString jwt;
+        if (!JwtGenerator::Generate(payloadJson, privateKeyPem, jwt, errorMessage))
         {
             if (errorMessage.empty())
             {
@@ -247,26 +255,29 @@ namespace AIAssistant
             return false;
         }
 
-        // Exchange JWT for access token
+        // Exchange JWT for access token — both the JWT input and the access-token output
+        // are SecureString, so the secret bytes never appear in a plain std::string heap
+        // allocation across this call.
         std::string endpoint = BuildEndpointUrl(connection);
-        std::string accessToken;
+        SecureString accessToken;
         if (!ExchangeJwtForAccessToken(jwt, endpoint, accessToken, errorMessage))
         {
             return false;
         }
 
-        // Cache the token
+        // Cache the token.  CachedToken::m_AccessToken is SecureString (non-copyable),
+        // so the cache entry is built in-place and move-assigned into the map.
         {
             std::lock_guard<std::mutex> lock(m_CacheMutex);
             CachedToken cached;
-            cached.m_AccessToken = accessToken;
+            cached.m_AccessToken.Set(accessToken.Get());
             cached.m_ExpiresAt = std::chrono::steady_clock::now() +
                                  std::chrono::seconds(kTokenLifetimeSeconds - kTokenRefreshMarginSeconds);
             m_TokenCache[connection.m_KeyName] = std::move(cached);
         }
 
         credentials.m_AuthType = CloudAuthType::OAuth2;
-        credentials.m_Token = std::move(accessToken);
+        credentials.m_Token.Set(accessToken.Get());
         return true;
     }
 
@@ -303,7 +314,7 @@ namespace AIAssistant
             return std::unexpected(ConnectorError::Make(ConnectorErrorCode::CredentialMissing, std::move(credErr)));
         }
 
-        if (ICloudTaskExecutor::ContainsCrlf(credentials.m_Token))
+        if (ICloudTaskExecutor::ContainsCrlf(credentials.m_Token.Get()))
         {
             ConnectorHttp::IncrementCredentialCrlfRejection();
             LOG_SECURITY_WARN("[security] gcs_test_bearer_crlf_rejected connection='{}'", connection.m_Name);
@@ -330,7 +341,8 @@ namespace AIAssistant
         ConnectorHttp::ApplyHardenedDefaults(curl, url);
 
         struct curl_slist* headers = nullptr;
-        headers = curl_slist_append(headers, ("Authorization: Bearer " + credentials.m_Token).c_str());
+        [[maybe_unused]] SecureString authScratch_inline;
+AppendSecretHeader(headers, "Authorization: Bearer ", credentials.m_Token, authScratch_inline);
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
 
         CURLcode res = curl_easy_perform(curl);

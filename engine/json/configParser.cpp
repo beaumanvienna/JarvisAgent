@@ -841,9 +841,9 @@ namespace AIAssistant
                         continue;
                     }
                     LOG_CORE_INFO("API: {}", api);
-                    // Legacy "Test" api_type — migrated to is_mock flag in
-                    // Foundation Sitting 2.  Reject with explicit migration
-                    // guidance so the operator knows what to change.
+                    // Legacy "Test" api_type — superseded by the is_mock flag.
+                    // Reject with explicit migration guidance so the operator
+                    // knows what to change.
                     if (api == "Test")
                     {
                         LOG_CORE_ERROR("ConfigParser: api_type 'Test' has been removed; migrate this interface to "
@@ -865,9 +865,8 @@ namespace AIAssistant
                 }
                 else if (jsonObjectKey == "is_mock")
                 {
-                    // Foundation Sitting 1: parse-but-don't-act.  Dispatch
-                    // selection on this flag wires in Sitting 2 alongside
-                    // MockTransport.  Fixture-path containment + size cap +
+                    // Dispatch selection on this flag routes to MockTransport
+                    // instead of LiveTransport.  Fixture-path containment + size cap +
                     // status/header allowlist enforced at consume time.
                     bool value = false;
                     if (field.value().get_bool().get(value) == simdjson::SUCCESS)

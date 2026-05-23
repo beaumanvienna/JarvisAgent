@@ -24,6 +24,7 @@
 #include "curlWrapper/credValidation.h"
 #include "engine.h"
 #include "keys/credential.h"
+#include "keys/scopedSecretBytes.h"
 
 #include <openssl/crypto.h>
 #include <openssl/hmac.h>
@@ -43,37 +44,6 @@ namespace AIAssistant
     {
         constexpr char kAlgorithm[] = "AWS4-HMAC-SHA256";
 
-        // RAII wrapper that zeros its buffer via OPENSSL_cleanse on scope exit.
-        // Wraps the intermediate signing-key material derived from the AWS
-        // secret_access_key (kSecret, kDate, kRegion, kService, kSigning) so the
-        // secret-derived bytes don't linger on the heap after Sign() returns.
-        // Same posture as the master-password KEK wrapping in keyEncryption.cpp
-        // via ScopedKey<N>; this is the std::vector variant.
-        //
-        // OPENSSL_cleanse uses memory barriers to prevent the compiler from
-        // dead-store-eliminating the zero — std::memset would be optimised away.
-        struct ScopedSecretBytes
-        {
-            std::vector<unsigned char> m_Data;
-
-            ScopedSecretBytes() = default;
-            explicit ScopedSecretBytes(std::vector<unsigned char>&& v) : m_Data(std::move(v)) {}
-
-            ScopedSecretBytes(ScopedSecretBytes&&) noexcept = default;
-            ScopedSecretBytes& operator=(ScopedSecretBytes&&) noexcept = default;
-
-            ScopedSecretBytes(ScopedSecretBytes const&) = delete;
-            ScopedSecretBytes& operator=(ScopedSecretBytes const&) = delete;
-
-            ~ScopedSecretBytes()
-            {
-                if (!m_Data.empty())
-                {
-                    OPENSSL_cleanse(m_Data.data(), m_Data.size());
-                }
-            }
-        };
-
         std::string ToHex(unsigned char const* data, size_t len)
         {
             static char const* hex = "0123456789abcdef";
@@ -88,8 +58,11 @@ namespace AIAssistant
 
         // Returns the hex digest, or empty string on OpenSSL failure (rare —
         // SHA256 only returns NULL on impossible argument conditions).  Caller
-        // detects failure by checking output length / emptiness.
-        std::string Sha256Hex(std::string const& data)
+        // detects failure by checking output length / emptiness.  string_view input
+        // lets the caller hand in a SecureString::Get() view (e.g. the canonical
+        // request body when it contains the STS session token) without a std::string
+        // materialisation step.
+        std::string Sha256Hex(std::string_view data)
         {
             unsigned char hash[SHA256_DIGEST_LENGTH];
             unsigned char const* result = SHA256(reinterpret_cast<unsigned char const*>(data.data()), data.size(), hash);
@@ -262,38 +235,64 @@ namespace AIAssistant
             // SHA256 failure — leave Authorization empty so Apply() detects and rejects.
             return out;
         }
-        out.m_SecurityToken = in.m_SessionToken;
+        out.m_SecurityToken.Set(in.m_SessionToken.Get());
 
         // Canonical headers: lowercase name + ':' + trimmed value + '\n', sorted by name.
-        std::map<std::string, std::string> headerMap;
-        headerMap["host"] = TrimSpace(out.m_Host);
-        headerMap["x-amz-content-sha256"] = out.m_ContentSha256;
-        headerMap["x-amz-date"] = out.m_AmzDate;
-        if (!in.m_SessionToken.empty())
+        // The header set is fixed (host, x-amz-content-sha256, x-amz-date, and optionally
+        // x-amz-security-token) and the alphabetical sort order is deterministic, so we
+        // hand-build the canonical-headers string in the exact std::map sort order rather
+        // than going through std::map<string,string>.  The session-token VALUE (when
+        // present) is the only secret field; canonicalHeaders is built into a SecureString
+        // (mlock'd, zero-on-destruct) so the secret bytes don't sit in a heap-resident
+        // std::string for the duration of the Sign() call.
+        std::string const trimmedHost = TrimSpace(out.m_Host);
+        bool const hasSessionToken = !in.m_SessionToken.IsEmpty();
+
+        SecureString canonicalHeaders;
+        if (hasSessionToken)
         {
-            headerMap["x-amz-security-token"] = in.m_SessionToken;
+            canonicalHeaders.Build({
+                "host:", trimmedHost, "\n",
+                "x-amz-content-sha256:", out.m_ContentSha256, "\n",
+                "x-amz-date:", out.m_AmzDate, "\n",
+                "x-amz-security-token:", in.m_SessionToken.Get(), "\n",
+            });
+        }
+        else
+        {
+            canonicalHeaders.Build({
+                "host:", trimmedHost, "\n",
+                "x-amz-content-sha256:", out.m_ContentSha256, "\n",
+                "x-amz-date:", out.m_AmzDate, "\n",
+            });
         }
 
-        std::string canonicalHeaders;
-        std::string signedHeaders;
-        for (auto const& [k, v] : headerMap)
-        {
-            canonicalHeaders += k + ":" + v + "\n";
-            if (!signedHeaders.empty()) signedHeaders += ';';
-            signedHeaders += k;
-        }
+        // signedHeaders is just the sorted header-name list (semicolon-joined).  All names
+        // are public on the wire — std::string is the right type.
+        std::string const signedHeaders =
+            hasSessionToken ? "host;x-amz-content-sha256;x-amz-date;x-amz-security-token"
+                             : "host;x-amz-content-sha256;x-amz-date";
 
-        std::string const canonicalRequest =
-            in.m_Method + "\n" +
-            UriEncode(url.m_Path, false) + "\n" +
-            CanonicalQuery(url.m_Query) + "\n" +
-            canonicalHeaders + "\n" +
-            signedHeaders + "\n" +
-            out.m_ContentSha256;
+        // canonicalRequest contains canonicalHeaders, so when the session token is present
+        // canonicalRequest carries the secret too.  Build it as a SecureString so the
+        // request string itself is mlock'd + zero-on-destruct.  Sha256Hex accepts a
+        // string_view so canonicalRequest.Get() feeds the hash function directly
+        // without materialising.
+        std::string const uriEncoded = UriEncode(url.m_Path, false);
+        std::string const canonicalQuery = CanonicalQuery(url.m_Query);
+        SecureString canonicalRequest;
+        canonicalRequest.Build({
+            in.m_Method, "\n",
+            uriEncoded, "\n",
+            canonicalQuery, "\n",
+            canonicalHeaders.Get(), "\n",
+            signedHeaders, "\n",
+            out.m_ContentSha256,
+        });
 
         std::string const credentialScope = dateStamp + "/" + in.m_Region + "/" + in.m_Service + "/aws4_request";
 
-        std::string const canonicalRequestHash = Sha256Hex(canonicalRequest);
+        std::string const canonicalRequestHash = Sha256Hex(canonicalRequest.Get());
         if (canonicalRequestHash.empty())
         {
             return out;
@@ -313,7 +312,19 @@ namespace AIAssistant
         //   kRegion  = HMAC(kDate,    region)
         //   kService = HMAC(kRegion,  service)
         //   kSigning = HMAC(kService, "aws4_request")
-        ScopedSecretBytes const kSecret{StringToBytes("AWS4" + in.m_SecretKey)};
+        //
+        // Build kSecret as a raw byte vector to avoid the std::string heap intermediate
+        // that "AWS4" + in.m_SecretKey would create — that string would contain the full
+        // raw secret on the heap until ScopedSecretBytes is constructed.
+        std::vector<unsigned char> kSecretBytes;
+        {
+            auto const prefix = std::string_view{"AWS4"};
+            auto const secret = in.m_SecretKey.Get();
+            kSecretBytes.reserve(prefix.size() + secret.size());
+            kSecretBytes.insert(kSecretBytes.end(), prefix.begin(), prefix.end());
+            kSecretBytes.insert(kSecretBytes.end(), secret.begin(), secret.end());
+        }
+        ScopedSecretBytes const kSecret{std::move(kSecretBytes)};
         ScopedSecretBytes const kDate{HmacSha256(kSecret.m_Data, dateStamp)};
         if (kDate.m_Data.empty()) return out;
         ScopedSecretBytes const kRegion{HmacSha256(kDate.m_Data, in.m_Region)};
@@ -374,7 +385,7 @@ namespace AIAssistant
             in.m_Url = "https://bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.claude-3-haiku-20240307-v1:0/invoke";
             in.m_Body = R"({"anthropic_version":"bedrock-2023-05-31","max_tokens":50,"messages":[{"role":"user","content":"hi"}]})";
             in.m_AccessKey = "AKIDEXAMPLE";
-            in.m_SecretKey = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
+            in.m_SecretKey.Set("wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY");
             in.m_Region = "us-east-1";
             in.m_Service = "bedrock";
             in.m_AmzDate = "20240101T120000Z";
@@ -427,7 +438,9 @@ namespace AIAssistant
         return ok;
     }
 
-    bool SigV4Signer::Apply(CurlWrapper::QueryData const& q, std::vector<std::string>& outHeaders,
+    bool SigV4Signer::Apply(CurlWrapper::QueryData const& q,
+                            std::vector<std::string>& publicHeaders,
+                            SecureString& secretHeader,
                             std::string& errorMessage) const
     {
         // Typed credential is mandatory on the SigV4 path — AiRequestPool populates
@@ -446,8 +459,8 @@ namespace AIAssistant
         in.m_Url = q.m_Url;
         in.m_Body = q.m_Data;
         in.m_AccessKey = q.m_AwsCredential->m_AccessKeyId;
-        in.m_SecretKey = std::string(q.m_AwsCredential->m_SecretAccessKey.Get());
-        in.m_SessionToken = std::string(q.m_AwsCredential->m_SessionToken.Get());
+        in.m_SecretKey.Set(q.m_AwsCredential->m_SecretAccessKey.Get());
+        in.m_SessionToken.Set(q.m_AwsCredential->m_SessionToken.Get());
         in.m_Region = q.m_AwsCredential->m_Region;
         // Mock paths (test_bedrock_sigv4) override the AmzDate from the fixture's
         // .meta.json so the captured Authorization matches a locked KAT value.
@@ -472,7 +485,7 @@ namespace AIAssistant
             errorMessage = "SigV4: AwsCredential::m_AccessKeyId is empty or whitespace";
             return false;
         }
-        if (IsBlank(in.m_SecretKey))
+        if (IsBlank(in.m_SecretKey.Get()))
         {
             errorMessage = "SigV4: secret_access_key is empty or whitespace";
             return false;
@@ -492,13 +505,16 @@ namespace AIAssistant
             errorMessage = "SigV4: OpenSSL HMAC/SHA256 primitive failed during signing";
             return false;
         }
-        outHeaders.push_back("Host: " + out.m_Host);
-        outHeaders.push_back("X-Amz-Date: " + out.m_AmzDate);
-        outHeaders.push_back("X-Amz-Content-Sha256: " + out.m_ContentSha256);
-        outHeaders.push_back("Authorization: " + out.m_Authorization);
-        if (!out.m_SecurityToken.empty())
+        publicHeaders.push_back("Host: " + out.m_Host);
+        publicHeaders.push_back("X-Amz-Date: " + out.m_AmzDate);
+        publicHeaders.push_back("X-Amz-Content-Sha256: " + out.m_ContentSha256);
+        publicHeaders.push_back("Authorization: " + out.m_Authorization);
+        if (!out.m_SecurityToken.IsEmpty())
         {
-            outHeaders.push_back("X-Amz-Security-Token: " + out.m_SecurityToken);
+            // X-Amz-Security-Token IS the raw STS session token on the wire.  Route through
+            // the SecureString secretHeader slot so the secret never appears in a plain
+            // std::string heap allocation between Sign() and curl_slist_append.
+            secretHeader.Format("X-Amz-Security-Token: ", out.m_SecurityToken.Get());
         }
         return true;
     }

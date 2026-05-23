@@ -146,7 +146,7 @@ struct QueryData
     // Auth + transport (used by both sync CurlWrapper::Query and async dispatcher)
     std::string m_Url;                          // API endpoint URL
     std::string m_Data;                         // JSON POST body
-    std::string m_ApiKey;                       // Static-header credential (Bearer / x-api-key / api-key / x-goog-api-key); ignored on the SigV4 path — see m_AwsCredential
+    SecureString m_ApiKey;                      // Static-header credential (Bearer / x-api-key / api-key / x-goog-api-key) held in mlock'd, zero-on-destruct memory; non-copyable (use QueryData::Clone() for the dispatcher's retry path).  SigV4 paths populate this with the public access_key_id (m_AwsCredential carries the secret material)
     AuthStyle m_AuthStyle{AuthStyle::Bearer};   // Authentication header style — selects the IAuthSigner
     long m_TimeoutMs{0};                        // 0 = no timeout; >0 = max transfer time in ms
     std::unordered_map<std::string, std::string> m_Params{}; // Per-style auxiliary non-secret fields (e.g. SigV4 reads "service" with default "bedrock"); secret material lives in typed credential pointers, not this map
@@ -174,6 +174,12 @@ struct QueryData
     int m_BaseRetryMs{-1};
 
     bool IsValid() const;
+
+    // Deep copy.  Default copy is deleted (m_ApiKey is SecureString, non-copyable
+    // by design — secret should not be in two heap allocations simultaneously
+    // without an explicit decision).  Used by the dispatcher's retry path which
+    // keeps a spare while the original moves into the transport.
+    QueryData Clone() const;
 };
 ```
 
@@ -194,7 +200,7 @@ enum class AuthStyle
 
 ### Validation
 
-`IsValid()` is a coarse pre-flight check: it returns `false` (and logs `LOG_CORE_ERROR`) if any of `m_Url`, `m_Data`, `m_ApiKey` is empty.  This is intentionally cheap and style-agnostic.  Style-specific validation (e.g. SigV4 requires `m_AwsCredential` non-null with non-empty `m_SecretAccessKey` and `m_Region`) lives inside `IAuthSigner::Apply()` and runs after `IsValid()` — a request that passes `IsValid()` may still be rejected by the signer with `QueryErrorCode::NoApiKey` if a style-specific field is missing.  Note that SigV4 paths skip the `m_ApiKey`-blank check inside `IsValid()` implicitly: `AiRequestPool::ResolveApiKey` populates `m_ApiKey` with the AWS access_key_id for legacy compatibility, but the actual signer reads `m_AwsCredential->m_AccessKeyId` directly.
+`IsValid()` is a coarse pre-flight check: it returns `false` (and logs `LOG_CORE_ERROR`) if any of `m_Url`, `m_Data` is empty or `m_ApiKey.IsEmpty()`.  This is intentionally cheap and style-agnostic.  Style-specific validation (e.g. SigV4 requires `m_AwsCredential` non-null with non-empty `m_SecretAccessKey` and `m_Region`) lives inside `IAuthSigner::Apply()` and runs after `IsValid()` — a request that passes `IsValid()` may still be rejected by the signer with `QueryErrorCode::NoApiKey` if a style-specific field is missing.  Note that SigV4 paths skip the `m_ApiKey`-blank check inside `IsValid()` implicitly: `AiRequestPool::ResolveApiKey` populates `m_ApiKey` with the AWS access_key_id (public per AWS conventions), but the actual signer reads `m_AwsCredential->m_AccessKeyId` directly.
 
 ---
 
@@ -205,8 +211,8 @@ enum class AuthStyle
 1. Checks `m_Initialized` — returns `QueryResult::Fail(CurlNotInitialized, …)` if not ready.
 2. Validates `queryData.IsValid()` — returns `QueryResult::Fail(InvalidQueryData, …)` on coarse pre-flight failure (empty URL / data / API key).
 3. Clears `m_ReadBuffer` so sequential queries on the same `CurlWrapper` don't concatenate (see Section 7).
-4. Calls `IAuthSigner::Get(m_AuthStyle).Apply(queryData, headers, errorMessage)` to produce auth headers per the selected style.  On signer rejection (empty / whitespace credential, SigV4 null `m_AwsCredential` or missing region, etc.) returns `QueryResult::Fail(NoApiKey, …)` and emits `LOG_CORE_ERROR("CurlWrapper::Query: auth signer rejected request url='...' quotaKey='...': ...")`.
-5. Builds a `CurlSlist` with the signer-produced auth headers + `Content-Type: application/json`.
+4. Calls `IAuthSigner::Get(m_AuthStyle).Apply(queryData, publicHeaders, secretHeader, errorMessage)` to produce auth headers per the selected style.  Output is split: `publicHeaders` (std::vector<std::string>) carries non-secret headers (Content-Type, version, signed-not-secret), `secretHeader` (caller-owned SecureString) holds the secret-bearing header for Bearer / x-api-key / x-goog-api-key / api-key (and SigV4 X-Amz-Security-Token when an STS session token is present).  On signer rejection (empty / whitespace credential, SigV4 null `m_AwsCredential` or missing region, etc.) returns `QueryResult::Fail(NoApiKey, …)` and emits `LOG_CORE_ERROR("CurlWrapper::Query: auth signer rejected request url='...' quotaKey='...': ...")`.
+5. Builds a `CurlSlist` with the signer-produced public headers + (when non-empty) the secret header appended via `AppendCStr(secretHeader.CStr())` so the secret bytes never appear in a `std::string` intermediate + `Content-Type: application/json`.
 6. Sets curl options:
    - `CURLOPT_URL`, `CURLOPT_HTTPHEADER`, `CURLOPT_POSTFIELDS`
    - `CURLOPT_HTTP_VERSION = CURL_HTTP_VERSION_2TLS` (HTTP/2 over ALPN; falls back to HTTP/1.1)
@@ -253,6 +259,7 @@ class CurlSlist
     ~CurlSlist() { curl_slist_free_all(m_List); }
 
     void Append(std::string const& str);
+    void AppendCStr(char const* str);   // for handing SecureString::CStr() to curl_slist_append without a std::string intermediate
     struct curl_slist* Get();
 };
 ```
@@ -261,6 +268,8 @@ Guarantees:
 
 - No leaks — destructor always frees the list.
 - Safe even if `curl_slist_append` fails partway through.
+
+For secret-bearing headers built from a `SecureString`, prefer the standalone helper `AppendSecretHeader(curl_slist*&, prefix, SecureString const&, SecureString& scratch)` in `engine/curlWrapper/curlSlistHelper.h` — single mlock'd allocation, no `std::string` intermediate, copy-and-swap exception safety.
 
 ---
 
@@ -339,7 +348,7 @@ curl.Clear();
 CurlWrapper::QueryData q;
 q.m_Url      = "https://api.openai.com/v1/chat/completions";
 q.m_Data     = R"({"model":"gpt-4.1","messages":[{"role":"user","content":"hi"}]})";
-q.m_ApiKey   = apiKey;                          // from encrypted keys file
+q.m_ApiKey.Set(apiKeyView);                     // SecureString; from encrypted keys file
 q.m_AuthStyle = CurlWrapper::AuthStyle::Bearer;
 q.m_TimeoutMs = 30000;                          // 30 s timeout
 

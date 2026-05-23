@@ -35,7 +35,7 @@ namespace AIAssistant
         // Centralised so a future signer addition automatically benefits.
         bool ValidateApiKey(CurlWrapper::QueryData const& q, char const* styleName, std::string& errorMessage)
         {
-            if (IsBlank(q.m_ApiKey))
+            if (IsBlank(q.m_ApiKey.Get()))
             {
                 errorMessage = std::string(styleName) + ": API key is empty or whitespace";
                 return false;
@@ -46,11 +46,11 @@ namespace AIAssistant
         class BearerSigner final : public IAuthSigner
         {
         public:
-            [[nodiscard]] bool Apply(CurlWrapper::QueryData const& q, std::vector<std::string>& h,
-                                     std::string& errorMessage) const override
+            [[nodiscard]] bool Apply(CurlWrapper::QueryData const& q, std::vector<std::string>& /*publicHeaders*/,
+                                     SecureString& secretHeader, std::string& errorMessage) const override
             {
                 if (!ValidateApiKey(q, "Bearer", errorMessage)) return false;
-                h.push_back("Authorization: Bearer " + q.m_ApiKey);
+                secretHeader.Format("Authorization: Bearer ", q.m_ApiKey.Get());
                 return true;
             }
         };
@@ -58,11 +58,11 @@ namespace AIAssistant
         class XGoogApiKeySigner final : public IAuthSigner
         {
         public:
-            [[nodiscard]] bool Apply(CurlWrapper::QueryData const& q, std::vector<std::string>& h,
-                                     std::string& errorMessage) const override
+            [[nodiscard]] bool Apply(CurlWrapper::QueryData const& q, std::vector<std::string>& /*publicHeaders*/,
+                                     SecureString& secretHeader, std::string& errorMessage) const override
             {
                 if (!ValidateApiKey(q, "XGoogApiKey", errorMessage)) return false;
-                h.push_back("x-goog-api-key: " + q.m_ApiKey);
+                secretHeader.Format("x-goog-api-key: ", q.m_ApiKey.Get());
                 return true;
             }
         };
@@ -70,19 +70,16 @@ namespace AIAssistant
         class AnthropicXApiKeySigner final : public IAuthSigner
         {
         public:
-            [[nodiscard]] bool Apply(CurlWrapper::QueryData const& q, std::vector<std::string>& h,
-                                     std::string& errorMessage) const override
+            [[nodiscard]] bool Apply(CurlWrapper::QueryData const& q, std::vector<std::string>& publicHeaders,
+                                     SecureString& secretHeader, std::string& errorMessage) const override
             {
                 if (!ValidateApiKey(q, "AnthropicXApiKey", errorMessage)) return false;
-                // Reserve before push so the two header pushes are effectively atomic
-                // (no reallocation between them; both succeed or neither does).  If
-                // bad_alloc fires on either string construction or the reserve, the
-                // caller's vector is unchanged because nothing was pushed yet.
-                std::string h1 = "x-api-key: " + q.m_ApiKey;
-                std::string h2 = "anthropic-version: 2023-06-01";
-                h.reserve(h.size() + 2);
-                h.push_back(std::move(h1));
-                h.push_back(std::move(h2));
+                // Build the secret header first (mlock'd buffer); only after that
+                // succeeds do we push the non-secret version header.  Order matters
+                // for the "all-or-nothing" promise — if Format throws bad_alloc the
+                // publicHeaders vector is still unmodified.
+                secretHeader.Format("x-api-key: ", q.m_ApiKey.Get());
+                publicHeaders.push_back("anthropic-version: 2023-06-01");
                 return true;
             }
         };
@@ -90,11 +87,11 @@ namespace AIAssistant
         class AzureApiKeySigner final : public IAuthSigner
         {
         public:
-            [[nodiscard]] bool Apply(CurlWrapper::QueryData const& q, std::vector<std::string>& h,
-                                     std::string& errorMessage) const override
+            [[nodiscard]] bool Apply(CurlWrapper::QueryData const& q, std::vector<std::string>& /*publicHeaders*/,
+                                     SecureString& secretHeader, std::string& errorMessage) const override
             {
                 if (!ValidateApiKey(q, "AzureApiKey", errorMessage)) return false;
-                h.push_back("api-key: " + q.m_ApiKey);
+                secretHeader.Format("api-key: ", q.m_ApiKey.Get());
                 return true;
             }
         };

@@ -25,6 +25,9 @@
 #include "jarvisAgent.h"
 #include "json/configParser.h"
 #include "json/configChecker.h"
+#ifdef J9T_HEAPSCAN_BUILD
+    #include "security/heapScan_test.h"
+#endif
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
@@ -269,6 +272,13 @@ int engine(int argc, char* argv[])
 
 #ifndef NDEBUG
     SigV4Signer::RunSelfTest();
+#endif
+
+#ifdef J9T_HEAPSCAN_BUILD
+    // Heap-scan audit: plant nonce secrets through each auth style, scan
+    // /proc/self/mem for residue, exit with PASS/FAIL.  Binary never reaches
+    // normal engine startup in audit builds.  See test/security/heapScan_test.cpp.
+    std::exit(AIAssistant::RunHeapScanAudit());
 #endif
 
     // create application Jarvis

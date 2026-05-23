@@ -35,6 +35,7 @@
 #include "cloud/azureBlobConnector.h"
 #include "cloud/azureSharedKeySigner.h"
 #include "cloud/connectorHttp.h"
+#include "curlWrapper/curlSlistHelper.h"
 #include "curlWrapper/curlWrapper.h"
 #include "json/jsonHelper.h"
 #include "workflow/taskPathResolver.h"
@@ -63,7 +64,8 @@ namespace AIAssistant
         }
         else if (credentials.m_AuthType == CloudAuthType::OAuth2)
         {
-            headers = curl_slist_append(headers, ("Authorization: Bearer " + credentials.m_Token).c_str());
+            [[maybe_unused]] SecureString authScratch_inline;
+AppendSecretHeader(headers, "Authorization: Bearer ", credentials.m_Token, authScratch_inline);
             headers = curl_slist_append(headers, "x-ms-version: 2024-11-04");
         }
         return headers;

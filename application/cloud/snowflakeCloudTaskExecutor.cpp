@@ -38,6 +38,7 @@
 #include "cloud/snowflakeCloudTaskExecutor.h"
 #include "cloud/snowflakeConnector.h"
 #include "cloud/connectorHttp.h"
+#include "curlWrapper/curlSlistHelper.h"
 #include "curlWrapper/curlWrapper.h"
 #include "json/jsonHelper.h"
 #include "workflow/taskPathResolver.h"
@@ -86,7 +87,7 @@ namespace AIAssistant
     }
 
     // Helper: perform an authenticated Snowflake REST API request
-    static bool SnowflakeRequest(std::string const& method, std::string const& url, std::string const& jwt,
+    static bool SnowflakeRequest(std::string const& method, std::string const& url, SecureString const& jwt,
                                  std::string& responseBody, long& httpCode,
                                  std::string const& requestBody = {})
     {
@@ -134,8 +135,8 @@ namespace AIAssistant
         }
 
         struct curl_slist* headers = nullptr;
-        std::string authHeader = "Authorization: Bearer " + jwt;
-        headers = curl_slist_append(headers, authHeader.c_str());
+        SecureString authScratch;
+        AppendSecretHeader(headers, "Authorization: Bearer ", jwt, authScratch);
         headers = curl_slist_append(headers, "Content-Type: application/json");
         headers = curl_slist_append(headers, "Accept: application/json");
         headers = curl_slist_append(headers, "X-Snowflake-Authorization-Token-Type: KEYPAIR_JWT");
@@ -265,7 +266,7 @@ namespace AIAssistant
         // ResolveCredentials produces the JWT via JwtGenerator which is
         // well-behaved, but a future credential type or renewal flow could
         // inject hostile bytes; check defensively.
-        if (ICloudTaskExecutor::ContainsCrlf(credentials.m_Token))
+        if (ICloudTaskExecutor::ContainsCrlf(credentials.m_Token.Get()))
         {
             taskState.m_LastErrorMessage = "Snowflake JWT contains CR/LF — refusing to send";
             taskState.m_State = TaskInstanceStateKind::Failed;

@@ -111,8 +111,7 @@ namespace AIAssistant
                 // replay) instead of LiveTransport (real curl).  Admin-only
                 // — same access surface as m_ApiKey; settable via config.json
                 // or authenticated admin REST endpoint.  Fixture path is
-                // ConfineUnderProjectRoot-gated at consume time.  Parsed in
-                // Foundation Sitting 1, dispatch selection wired in Sitting 2.
+                // ConfineUnderProjectRoot-gated at consume time.
                 bool m_IsMock{false};
                 std::string m_FixturePath;
             };

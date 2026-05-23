@@ -55,6 +55,16 @@ newoption {
     description = "Use clang + libc++ instead of gcc/libstdc++ (Linux only)."
 }
 
+-- SecureString-only HTTP-path audit (Sitting 8c).  Builds test/security/heapScan_test.cpp
+-- into the binary and routes engine.cpp through RunHeapScanAudit() before normal startup;
+-- the binary scans /proc/self/mem for planted nonce-secrets across every auth style shipped
+-- by 8a + 8b, then exits with a PASS/FAIL code.  Off by default — pre-1.0 audit artifact
+-- only, not a runtime feature.
+newoption {
+    trigger = "heapscan",
+    description = "Compile the SecureString heap-scan audit into the binary (pre-1.0 artifact)."
+}
+
 project "jarvisAgent"
     kind "ConsoleApp"
     language "C++"
@@ -123,6 +133,23 @@ project "jarvisAgent"
         "vendor/simdjson/simdjson.h",
         "vendor/date/src/tz.cpp",
     }
+
+    -- Heap-scan audit (Sitting 8c).  Only pulled in when --heapscan is set; the
+    -- production binary never compiles the audit code.  The audit's RunHeapScanAudit()
+    -- is invoked from engine.cpp under the same J9T_HEAPSCAN_BUILD #ifdef.
+    if _OPTIONS["heapscan"] then
+        defines { "J9T_HEAPSCAN_BUILD" }
+        files {
+            "test/security/heapScan_test.h",
+            "test/security/heapScan_test.cpp",
+            -- Cloud-side scenarios live in an isolated TU because application/cloud/
+            -- sigV4Signer.h defines AIAssistant::SigV4Signer which collides with the
+            -- engine signer of the same name in engine/curlWrapper/awsSigV4.h.  No TU
+            -- includes both headers.
+            "test/security/heapScan_cloud_scenarios.cpp",
+        }
+        print(">>> Heap-scan audit: ENABLED  (binary will run audit then exit)")
+    end
 
     -- Engine edition: drop Studio-only modules from the compile list.
     -- removefiles MUST come after files() — applying it earlier removes from an
@@ -234,6 +261,7 @@ project "jarvisAgent"
     {
         "engine/",
         "application/",
+        "test/",
         "vendor/",
         "vendor/spdlog/include",
         "vendor/curl/include",

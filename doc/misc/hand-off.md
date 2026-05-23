@@ -15,6 +15,547 @@ Keep entries self-contained — a fresh-context Claude should be able to read ju
 
 ---
 
+## 2026-05-22 (Sitting 8e — Close in-house SecureString residuals + structural-check audit scenario) → next session
+
+Same-day follow-on to 8d.  JC opened 8e to close the four in-house residuals a post-8d walkthrough surfaced (the audit-coverage matrix in the 8d hand-off entry listed them as "still open").  All four closed in this session; the 8c audit gained one new structural-check scenario; the existing SigV4 KAT held byte-identical through the canonical-request refactor.
+
+### What landed (working tree — JC handles commits)
+
+Four refactor parts (R1–R4) + audit extension.  Net diff scope on top of 8a/8b/8c/8d: 7 modified files + 0 new (all changes are inside files 8a–8d already touched).
+
+**R2 — `JwtGenerator::Generate` local `std::string jwt` → `SecureString::Build`.**  `engine/keys/jwtGenerator.cpp:194-203`: replaced the local `std::string jwt = signingInput + "." + Base64UrlEncode(signature); SecretRedactor::AddSecret(jwt); outJwt.Set(jwt)` block with `outJwt.Build({signingInput, ".", Base64UrlEncode(signature)}); SecretRedactor::Get().AddSecret(outJwt.Get())`.  `SecretRedactor::AddSecret` already takes `std::string_view` so the SecureString view feeds the redactor without a std::string materialisation step on our side.  No code-shape change to the signing input or signature derivation; just the final concat-and-write step.
+
+**R3 — `GcsConnector::ExchangeJwtForAccessToken` → `SecureString` in + out.**  Three components:
+- `gcsConnector.h`: signature changed from `(string const& jwt, string const& endpoint, string& accessToken, string& errMsg)` to `(SecureString const& jwt, string const& endpoint, SecureString& accessToken, string& errMsg)`.  `CachedToken::m_AccessToken` changed from `std::string` to `SecureString`.
+- `gcsConnector.cpp:70-158` (implementation): `accessToken = jwt` early-return branch becomes `accessToken.Set(jwt.Get())`.  Body build: `std::string postBody = "...assertion=" + jwt` becomes `SecureString postBody; postBody.Build({"grant_type=urn%3A...assertion=", jwt.Get()})`.  `curl_easy_setopt(curl, CURLOPT_POSTFIELDS, postBody.CStr())` + `CURLOPT_POSTFIELDSIZE`.  Response parser: `accessToken = std::string(tokenSv)` → `accessToken.Set(tokenSv)`.
+- `gcsConnector.cpp:160-275` (caller): `std::string accessToken` → `SecureString accessToken`; passes the SecureString jwt directly (drops the 8d.5 boundary `std::string(jwt.Get())` materialisation); `cached.m_AccessToken = accessToken` → `cached.m_AccessToken.Set(accessToken.Get())` (SecureString is non-copyable, set via .Set); `credentials.m_Token.Set(accessToken)` → `credentials.m_Token.Set(accessToken.Get())`; the cache lookup's `credentials.m_Token.Set(it->second.m_AccessToken)` → `.Set(it->second.m_AccessToken.Get())`.
+
+**R1 — OAuth refresh snapshots + `RefreshResult` → `SecureString`.**  Threaded SecureString deeper through the OAuth refresh round-trip, both directions:
+- `oauthTokenManager.h`: `RefreshResult::m_NewAccessToken` and `m_NewRefreshToken` changed from `std::string` to `SecureString`.  `RefreshToken(...)` signature: `string const& clientSecret, string const& refreshToken` → `SecureString const& clientSecret, SecureString const& refreshToken`.
+- `oauthTokenManager.cpp::CurlEscapedString` (anonymous-namespace RAII helper): constructor widened to take `std::string_view src` (so it can be constructed from `SecureString::Get()` views without a std::string materialisation step).
+- `oauthTokenManager.cpp::PerformRefresh` (the synchronous on-demand refresh path): the two secret-bearing snapshots `snapClientSecret` / `snapRefreshToken` changed from `std::string` to `SecureString`; populated via `.Set(entry.m_*.Get())` instead of `std::string(entry.m_*.Get())`.
+- `oauthTokenManager.cpp::RefreshLoop` (the background refresh thread): the inner `PendingRefresh` struct's `m_ClientSecret` / `m_RefreshToken` fields changed from `std::string` to `SecureString`.  The `std::vector<PendingRefresh>` still works (SecureString is move-only; `push_back(std::move(task))` is fine).
+- `oauthTokenManager.cpp::RefreshToken` (the network-call function): existing 8d.4 postBody Build calls updated to use `.view(secureString.Get())` instead of `.view(string)` for the SecureString-typed params.  The `if (!clientSecret.empty())` check became `if (!clientSecret.IsEmpty())`.  Response parser: `out.m_NewAccessToken = std::string(newAccessToken)` → `out.m_NewAccessToken.Set(newAccessToken)`; same for refresh token.
+- `oauthTokenManager.cpp::ApplyRefreshResult`: `entry.m_AccessToken.Set(result.m_NewAccessToken)` → `.Set(result.m_NewAccessToken.Get())`; same for refresh token.  The `!result.m_NewRefreshToken.empty()` check became `.IsEmpty()`.
+
+**R4 — Engine awsSigV4 canonical-headers via `SecureString::Build` (largest 8e item).**  Refactored the canonical-request assembly so the STS session token doesn't materialise into `std::map<std::string, std::string>` + `std::string` concat chains:
+- `engine/curlWrapper/awsSigV4.cpp::Sha256Hex` widened: `std::string const&` → `std::string_view` (so it can accept a `SecureString::Get()` view from the canonical-request buffer).
+- `Sign()` body: replaced `std::map<std::string, std::string> headerMap` + the loop that builds `std::string canonicalHeaders` / `std::string signedHeaders` with a hand-ordered two-branch `SecureString::Build({...})` call (the header set is fixed and alphabetical sort order is deterministic).  When the session token is present, the SecureString-built canonical-headers includes `"x-amz-security-token:" + sessionToken.Get() + "\n"` — but the assembled string lives in the mlock'd + zero-on-destruct SecureString rather than a heap-resident std::string.
+- `signedHeaders` (the sorted name list) stays `std::string` — all names are public on the wire.
+- `canonicalRequest` likewise rebuilt as `SecureString canonicalRequest; canonicalRequest.Build({method, "\n", uriEncoded, "\n", canonicalQuery, "\n", canonicalHeaders.Get(), "\n", signedHeaders, "\n", contentSha256})` — contains the session-token-bearing canonical-headers but in mlock'd memory.
+- `Sha256Hex(canonicalRequest.Get())` feeds the hash directly from the SecureString view; the hash output (non-secret) flows into the existing string-based stringToSign concat unchanged.
+
+**Audit extension:** `test/security/heapScan_test.cpp` gained one new scenario + a runtime knob:
+- `RunScenario` template grew a `bool skipChurn = false` parameter (default preserves 8c behaviour).  When true, the 64 MiB churn pad is skipped between scenario teardown and scan.
+- New `ScenarioEngineSigV4StructuralCheck` calls the same path as the existing `ScenarioEngineSigV4` but with `skipChurn=true`.  Logged as `engineSigV4(no-churn)`.  The shared exercise lambda was hoisted to namespace scope so both scenarios share it (one source of truth for the engine-SigV4 setup).
+- Existing `engineSigV4` path now passes through R4's new `SecureString::Build` canonical-request code.  Both with-churn and no-churn variants report 0/0 — R4 closed the residue structurally.
+
+### Doc sweep (same session)
+
+| Doc | Change |
+|---|---|
+| `doc/cyber security.md` | "SecureString-only HTTP path" bullets: `Build` description extended to mention canonical-request assembly (R4); Generator out-parameter bullet extended to mention `ExchangeJwtForAccessToken` + OAuth refresh round-trip threading.  "Architectural residue floors" intro rewritten to reflect 8d + 8e closing the in-house residuals.  "Empirical verification — heap-scan audit" retitled "(Sittings 8c + 8d + 8e)"; scenario table grew from 9 rows to 10 (added `engineSigV4(no-churn)`); observed-result snapshot updated to the post-8e state (9 PASS / 0 FAIL / 1 expected-residual). |
+| `CLAUDE.md` | SecureString discipline rule's tail paragraph: 8e closures appended alongside the 8d closures; structural-check audit scenario named. |
+| `doc/misc/pre-1_0_follow-ups.md` | Sitting 8e marked closed (close-out paragraph at the top of the entry).  Header sentence: "Sittings 8a + 8b + 8c + 8d + 8e closed 2026-05-22"; "8 sittings remain (9 + 10 + 11 + 12 + 13 + 14 + 15 + 16)" — including the Sitting 16 incidental-findings basket added at session end. |
+| `doc/misc/hand-off.md` | This entry. |
+
+Skipped by design (per `feedback_combined_doc_generated` / `feedback_audit_republish_end_of_domain`): `doc/combined*.md`, `doc/jarvisagent.1` / `.html`, jarvisCppCyberSecAudit / jarvisCppSafetyAudit JCWFs.  `application/cloud/README.md`, `engine/keys.md`, `engine/curlWrapper/curlWrapper.md`, `doc/cloud-integration.md` left as-is — their SecureString content is already steady-state after the 8a–8d sweeps and the R1–R4 changes don't introduce new public conventions worth documenting outside `CLAUDE.md` + `doc/cyber security.md`.
+
+### What's verified
+
+| Check | Result |
+|---|---|
+| Studio Debug build (`--clang --heapscan`) | clean (only pre-existing asio `-Wshadow`) |
+| Studio Debug build (`--clang`, no `--heapscan`) | NOT rebuilt this session.  R1–R4 are all in production-shipping code paths so the production build will compile; JC may want to verify once before commit. |
+| SigV4 startup self-test (locked Bedrock KAT signature) | **PASSED** — R4's canonical-request refactor is byte-identical to the pre-refactor bytes.  This is the critical regression check: any byte-level drift in canonical-request assembly would break the signature derivation and AWS would reject with `SignatureDoesNotMatch`.  Self-test passing confirms R4 didn't introduce drift. |
+| Audit binary smoke + deep — all 10 scenarios | **9 PASS** (must-be-zero) + **1 PASS** (known residual, libcurl strdup floor at heap address) + **0 FAIL**.  `engineSigV4(no-churn)` reports 0/0 — empirical proof that R4 closed the canonical-headers residue STRUCTURALLY, not via allocator churn.  All other scenarios unchanged from 8d's close-out snapshot. |
+| Engine Debug / Release / Studio Release | NOT rebuilt this session.  R1–R4 touch shared headers (oauthTokenManager.h, jwtGenerator.h, gcsConnector.h, awsSigV4.cpp internals) so Engine should pick up the changes cleanly on a fresh build.  JC will want a full 4-target rebuild before committing the bundle. |
+| Live connection tests (OAuth refresh / Snowflake / GCS / Bedrock STS) | NOT exercised this session — the audit-build binary `std::exit`s before normal startup, so live smokes would require a separate `--clang` non-heapscan rebuild + server start.  Per 8e's plan-doc Acceptance section: OAuth refresh round-trip (any configured provider), Snowflake connection test, GCS connection test, Bedrock SigV4 KAT (test/dispatch/test_bedrock_sigv4.py).  JC to exercise before considering 8e fully landed. |
+| Active edition at session end | `studio` per `.build-edition` |
+
+### Architecture notes for next-session-Claude
+
+- **`SecureString::Build` is now used at THREE distinct boundaries**: OAuth refresh POST body (8d.4), GCS token-exchange POST body (8e.R3), engine awsSigV4 canonical-headers + canonical-request assembly (8e.R4).  The pattern generalised cleanly — any multi-piece secret-bearing string build site is a candidate for `Build` instead of `std::string` concat.
+- **`Sha256Hex` takes `std::string_view` now** (`engine/curlWrapper/awsSigV4.cpp`) — callers can pass `SecureString::Get()` views directly.  When extending the canonical-request build (e.g. adding a new x-amz-* header), the hash function won't force a std::string materialisation.
+- **`CurlEscapedString::view(fallback)` returns `std::string_view`** (added in 8d.4; unchanged in 8e but now relied upon by R1's SecureString-snapshot path).  Adding new url-encoded-body builders that need secret material: feed `escSomething.view(secret.Get())` into `SecureString::Build`.
+- **The shared `exerciseEngineSigV4` lambda in `heapScan_test.cpp`** is the single source of truth for the engine-SigV4 audit scenario.  Both `ScenarioEngineSigV4` (with churn) and `ScenarioEngineSigV4StructuralCheck` (no churn) call it.  When extending the engineSigV4 audit (e.g. testing a new SigV4 path), modify the lambda once; both scenarios pick up the change.
+- **`RunScenario`'s new `skipChurn` flag** is the convention for future structural-check variants of must-be-zero scenarios.  Default false preserves 8c behaviour; set true when the audit needs to prove "the residue is ABSENT", not "the residue evaporated".
+
+### Open items / next-session candidates
+
+Per `pre-1_0_follow-ups.md` after today's five closures (8a+8b+8c+8d+8e) plus the mid-session addition of Sitting 16 (incidental-findings basket), **8 sittings remain**: 9 + 10 + 11 + 12 + 13 + 14 + 15 + 16.
+
+- **Sitting 9 — `SanitizeUserSlug` collision fix + migration** is the next merge-gated stop.  Plan unchanged from yesterday's hand-off; full text at `pre-1_0_follow-ups.md` "Sitting 9".
+- **Sitting 16 — Incidental-findings basket** is the LAST stop before 1.0 tagging.  Seeded with three open items surfaced during 8a–8e: dual `SigV4Signer` classes (engine vs cloud duplication), `OAuthTokenManager::StoreTokens` `std::string const&` secret params, engine `awsSigV4::HmacSha256` `data` param consistency.  New items get added here as they surface during 9–15; closed individually in one pass before 1.0 tagging.  Full plan at `pre-1_0_follow-ups.md` "Sitting 16".
+
+Per the pre-1.0 closing-list policy: if anything pre-1.0-worthy surfaces during the remaining sittings, flag it immediately rather than silently deferring (basket / fold-in / explicit post-1.0 — JC decides per item).  Architectural floors (libcurl + libpq internal copies) and `QueryData::m_Data` body-path hardening are deferred to post-1.0 — explicitly out of pre-1.0 scope per `doc/cyber security.md` "Out-of-scope" subsection.
+
+### Gotchas next-session-Claude should know
+
+- **The full 8a/8b/8c/8d/8e bundle is large**: ~80+ modified files + 5 new files (curlSlistHelper.{h,cpp} from 8b, heapScan_test.{h,cpp} + heapScan_cloud_scenarios.cpp from 8c, scopedSecretBytes.h from 8d).  Suggested commit splits if JC wants them:
+    - (a) 8a — engine + AI dispatch SecureString refactor
+    - (b) 8b — cloud connectors + curlSlistHelper + HMAC signer threading
+    - (c) 8c — heap-scan audit module + premake hook
+    - (d) 8d — residual-leak closures (5 fixes) + audit flag flips + new OAuthPostBody scenario + scopedSecretBytes.h
+    - (e) 8e — in-house residual closures (R1+R2+R3+R4) + engineSigV4(no-churn) audit scenario
+    - (f) Docs (CLAUDE.md, cyber security.md, pre-1_0_follow-ups.md, hand-off.md)
+  Or one bundled commit.  JC's call.
+- **`SigV4Signer::RunSelfTest` is the critical regression check for R4**.  It runs at engine startup in debug builds (`engine.cpp:271` under `#ifndef NDEBUG`) and locks the AWS-published Bedrock-shape signature.  If a future refactor of canonical-request assembly drifts by even one byte, this test fails — that's the byte-level safety net for R4 and any future canonical-headers work.  Today's R4 changes passed it byte-identically.
+- **The clangd `std::expected` snapshot warning is permanent local-dev background** (per `feedback_cpp23_clang_libcxx`).  Ignore.  Surfaced on essentially every connector edit today.
+- **`engineSigV4(no-churn)` is the structural-check pattern.**  If a future audit run shows `engineSigV4` PASSing but `engineSigV4(no-churn)` FAILing, that's the signal that someone reintroduced a `std::string`-resident copy of canonical-request material — caught by the churn pad in the with-churn variant but exposed structurally by the no-churn variant.  Diagnostic shape worth remembering.
+
+### Files in working tree at session end
+
+8e delta on top of 8a/8b/8c/8d:
+
+```
+M CLAUDE.md
+M application/cloud/gcsConnector.{h,cpp}                  # 8e.R3
+M doc/cyber security.md
+M doc/misc/hand-off.md
+M doc/misc/pre-1_0_follow-ups.md
+M engine/curlWrapper/awsSigV4.cpp                         # 8e.R4
+M engine/keys/jwtGenerator.cpp                            # 8e.R2
+M engine/keys/oauthTokenManager.{h,cpp}                   # 8e.R1
+M test/security/heapScan_test.cpp                         # 8e.verify (skipChurn flag + structural-check scenario)
+```
+
+7 code files + 4 doc files touched today (no new files).  Combined with 8a/8b/8c/8d: ~80 modified + 5 new files for the full bundle.  Active edition: studio.
+
+---
+
+## 2026-05-22 (Sitting 8d — Square away SecureString residual leaks + audit flag flips + commit prep for 8a/8b/8c/8d) → next session
+
+Same-day follow-on to 8c.  JC proposed 8d after 8c's audit landed: now that we have a clean empirical regression net, close the five 8b-documented residual surfaces in one cohesive sitting rather than letting them drift as separate hardening tracks.  All five closed in this session; the 8c audit was extended with 2 flag flips + 1 new scenario; results held at 8 must-be-zero PASS + 1 architectural floor.
+
+### What landed (working tree — JC handles commits)
+
+5 fixes + audit extension + doc sweep.  Net diff scope on top of 8a/8b/8c: ~17 modified files + 1 new (`engine/keys/scopedSecretBytes.h`).
+
+**Part 2 — Google Sheets URL `?key=` → `X-Goog-Api-Key` header** (warm-up).  Two sites: `googleSheetsConnector.cpp:170` + `googleSheetsCloudTaskExecutor.cpp:243`.  Replaced `url += "&key=" + std::string(credentials.m_Token.Get())` with `AppendSecretHeader(headers, "X-Goog-Api-Key: ", credentials.m_Token, authScratch)`.  Google Sheets API accepts the header form as semantically equivalent to the URL-parameter form — no server-side behaviour change.  Variable renamed `useApiKeyParam` → `useApiKeyHeader` to match the new semantics.
+
+**Part 1 — Cloud HMAC `Sign()` scratch → `ScopedSecretBytes`.**  Created `engine/keys/scopedSecretBytes.h` as a shared header (extracted from the anonymous namespace in `engine/curlWrapper/awsSigV4.cpp`).  Ported the engine-side pattern to:
+- `application/cloud/sigV4Signer.{h,cpp}`: `HmacSha256` / `HmacSha256Hex` widened to accept `std::vector<unsigned char> const& key` (output stays byte vector / hex string respectively).  `Sign()` now builds `kSecret`/`kDate`/`kRegion`/`kService`/`kSigning` as byte-vectors wrapped in `ScopedSecretBytes` — the `std::string awsSecret = "AWS4" + secretKey.Get()` intermediate is gone.
+- `application/cloud/azureSharedKeySigner.{h,cpp}`: `HmacSha256` key parameter widened to `std::vector<unsigned char>`; `Base64Decode` return type changed from `std::string` to `std::vector<unsigned char>`.  `Sign()` decodes the account key into a `ScopedSecretBytes`-wrapped byte vector — the `std::string rawKey = Base64Decode(...)` intermediate is gone.
+- `engine/curlWrapper/awsSigV4.cpp`: removed the local `ScopedSecretBytes` definition; now `#include "keys/scopedSecretBytes.h"`.
+
+**Part 3 — Postgres conninfo → `PQconnectdbParams`.**  Replaced `BuildConnectionString(...) → std::string connStr; PQconnectdb(connStr.c_str())` with `BuildConnectParams(...) → struct ConnectParams; PQconnectdbParams(params.m_Keys.data(), params.m_Values.data(), 0)`.  The new struct holds `std::vector<std::string> m_NonSecretValues` (host/port/dbname/user/sslmode/connect_timeout) backing the non-secret pointers in `m_Values`, plus a direct `credentials.m_Password.CStr()` pointer in the password slot.  No `std::string` heap copy of the password outside libpq.  Two call sites updated: `postgresConnector.cpp::TestConnection` and `dbQueryCloudTaskExecutor.cpp::ExecuteCloud`.  The legacy `escape` lambda + `BuildConnectionString` are gone (libpq does its own value parsing under `PQconnectdbParams`).
+
+**Part 5 — Generator return-by-value → out-param SecureString.**  Three interface changes:
+- `OAuthTokenManager::GetAccessToken(keyName, errMsg) → std::string` → `[[nodiscard]] bool GetAccessToken(keyName, SecureString& outToken, errMsg)`.  Internal `m_AccessToken` SecureString contents now copy directly into the caller's SecureString via `outToken.Set(view)` — no std::string materialisation step.
+- `JwtGenerator::Generate(payload, key, errMsg) → std::string` → `[[nodiscard]] bool Generate(payload, key, SecureString& outJwt, errMsg)`.  Internally still builds the JWT as a local `std::string jwt` (for `SecretRedactor::Get().AddSecret(jwt)`), then copies into `outJwt` — the local `std::string jwt` is a bounded-by-`Generate()`-lifetime residual analogous to the 8b cloud-Sign() residuals, but the JWT bytes leave the function only via SecureString.  Tracked as a residual; not in 8d.5 scope to fix.
+- `JwtGenerator::GenerateSnowflakeJwt(...) → std::string` → `[[nodiscard]] bool GenerateSnowflakeJwt(..., SecureString& outJwt, errMsg)`.  Body is unchanged structurally — just forwards to `Generate` with the out-param.
+
+5 caller sweep across cloud connectors: `oneDriveConnector.cpp:54`, `azureBlobConnector.cpp:60`, `googleSheetsConnector.cpp:88`, `snowflakeConnector.cpp:153`, `gcsConnector.cpp:241`.  Each caller passes `credentials.m_Token` directly as the out-param; the prior `std::string accessToken = oauthManager.GetAccessToken(...); credentials.m_Token.Set(accessToken)` two-step is gone.  GCS is a partial update: `JwtGenerator::Generate` output flows into a local `SecureString jwt`, then materialised via `std::string(jwt.Get())` for `ExchangeJwtForAccessToken` (which still takes `std::string const&` — that helper's own postBody concat is a separate residual surface tracked alongside the OAuth refresh POST body in 8d.4).
+
+**Part 4 — OAuth POST body → `SecureString::Build`.**  Two extensions + one refactor:
+- `engine/keys/secureString.{h,cpp}`: added `void Build(std::initializer_list<std::string_view> pieces)` as the N-piece sibling of the existing 3-piece `Format(prefix, secret, suffix)`.  Same allocation posture (single mlock'd alloc + copy-and-swap on `bad_alloc`).  `Format` now forwards to `Build` so they share the allocator path.
+- `oauthTokenManager.cpp::CurlEscapedString`: added `std::string_view view(std::string_view fallback)` accessor returning a view of the libcurl-escaped buffer (or the caller-supplied fallback on escape failure) without `std::string` materialisation.
+- `oauthTokenManager.cpp::PerformRefresh`: builds `SecureString postBody` via `Build({...})` from the escaped views — confidential-client (with `client_secret`) and public-client (without) branches build with different piece counts.  Hands `postBody.CStr()` + `postBody.Size()` to `CURLOPT_POSTFIELDS` + `CURLOPT_POSTFIELDSIZE` (no-copy by default; `postBody` stays in scope through `curl_easy_perform` then `curl_easy_cleanup`).
+
+**Audit extensions:** `test/security/heapScan_test.cpp` got two flag flips + one new scenario:
+- `ScenarioCloudSigV4Sign` and `ScenarioAzureSharedKeySign`: `expectedResidual=true` → `false`.  Both now must report 0 hits or the audit FAILs.
+- New `ScenarioOAuthPostBody`: builds a `SecureString postBody` via `Build({...})` with the nonce planted in the `client_secret` slot, scans.  Expected: 0 / 0.
+
+### Doc sweep (same session)
+
+| Doc | Change |
+|---|---|
+| `doc/cyber security.md` | "SecureString-only HTTP path" bullets: added `SecureString::Build` next to `Format`, added generator-out-param bullet, harmonised the HMAC-signers description.  "Architectural residue floors" section rewritten — only 2 floors left (libcurl + libpq), 5 surfaces marked closed.  "Empirical verification — heap-scan audit" sub-section retitled "(Sittings 8c + 8d)", scenario table grew to 9 rows (8 must-be-zero + libcurl floor), observed-result snapshot updated to the post-8d state (8 pass / 0 fail / 1 expected-residual). |
+| `CLAUDE.md` | SecureString discipline rule updated: `Format` + `Build` both mentioned as canonical patterns (3-piece vs N-piece); `ScopedSecretBytes` shared header reference; "two architectural residue floors" replaces the old "irreducible residue floor is libcurl"; explicit close-out of the 5 8b-documented surfaces. |
+| `doc/misc/pre-1_0_follow-ups.md` | Sitting 8d marked closed (added a close-out paragraph at the top of the entry).  Header sentence updated: "Sittings 8a + 8b + 8c + 8d closed 2026-05-22"; "7 sittings remain (9 + 10 + 11 + 12 + 13 + 14 + 15)". |
+| `doc/misc/hand-off.md` | This entry. |
+
+Skipped by design (per `feedback_combined_doc_generated` / `feedback_audit_republish_end_of_domain`): `doc/combined*.md`, `doc/jarvisagent.1` / `.html`, jarvisCppCyberSecAudit / jarvisCppSafetyAudit JCWFs.  `engine/curlWrapper/curlWrapper.md` left as-is — its SecureString content already steady-state after the 8a doc sweep.
+
+### What's verified
+
+| Check | Result |
+|---|---|
+| Studio Debug build (`--clang --heapscan`) | clean (only pre-existing asio `-Wshadow`) |
+| Studio Debug build (`--clang`, no `--heapscan`) | NOT rebuilt this session — 8c verified it; today's changes are all in production code paths so production build should be unchanged in shape.  JC may want to rebuild the production binary once before commit to confirm. |
+| Audit binary smoke + deep — all 9 scenarios | 8 PASS (must-be-zero); 1 PASS (known residual, libcurl floor at heap address); 0 FAIL.  Scenarios 7 + 8 (cloud SigV4 + AzureSharedKey Sign) confirmed structurally clean after the flag flip — 0/0 hits with `expected_residual=false`.  New OAuthPostBody scenario PASSes — `SecureString::Build` verified end-to-end. |
+| Engine Debug / Release / Studio Release | NOT rebuilt this session.  Session focused on Studio Debug iteration with `--heapscan`.  JC will want a full 4-target rebuild before committing the bundle. |
+| Live connection tests (Google Sheets / Postgres / OneDrive / Azure Blob / Snowflake / GCS / S3) | NOT exercised this session — the audit-build binary `std::exit`s before normal startup, so live smokes would require a separate `--clang` non-heapscan rebuild + server start.  Per 8d's plan-doc Acceptance section, JC should run live connection tests against each touched cloud path before considering 8d landed. |
+| Active edition at session end | `studio` per `.build-edition` |
+
+### Architecture notes for next-session-Claude
+
+- **`engine/keys/scopedSecretBytes.h` is the shared definition.**  Both `engine/curlWrapper/awsSigV4.cpp` and the two cloud-side signers (`application/cloud/sigV4Signer.cpp`, `application/cloud/azureSharedKeySigner.cpp`) include it.  Don't redefine `ScopedSecretBytes` locally in any new file.  The pattern is `std::vector<unsigned char> m_Data` + `OPENSSL_cleanse` on destruct — sibling to `SecureString` (same posture, byte buffer instead of NUL-terminated string).
+- **`SecureString::Build({pieces...})` is the N-piece canonical pattern.**  Used for any form-urlencoded body or multi-field secret-bearing string.  `Format(prefix, secret, suffix)` is still the 3-piece variant and now internally forwards to `Build`.  Don't add `Append` — single-shot construction matches the SecureString lifetime model.  If you need to mutate a SecureString mid-life, that's a hint you should be building a new one with `Build` instead.
+- **`PQconnectdbParams` is the libpq entry point for new code.**  Always use parallel arrays; never concat a `password=` field into a conninfo string (the leak surface 8d closed).  `PostgresConnector::ConnectParams` is the in-house struct that bundles the keyword/value arrays + non-secret backing storage; reuse it instead of building parallel arrays inline.
+- **Generator out-param SecureString is the convention.**  When adding a new credential-producing function (OAuth, JWT, derived secrets), shape it as `[[nodiscard]] bool Foo(..., SecureString& out, std::string& errorMessage)` — never return secret material by value.  The 5 cloud-connector callers post-8d are the reference pattern.
+
+### Open items / next-session candidates
+
+Per `pre-1_0_follow-ups.md` after today's four closures (8a+8b+8c+8d), **7 sittings remain**: 9 + 10 + 11 + 12 + 13 + 14 + 15.
+
+- **Sitting 9 — `SanitizeUserSlug` collision fix + migration** is the next merge-gated stop.  Plan unchanged from yesterday's hand-off; full text at `pre-1_0_follow-ups.md` "Sitting 9".
+
+Residual hardening tracks (architectural floors — separate from 8d's scope, marked out-of-scope in `doc/cyber security.md`):
+
+- **libcurl `curl_slist_append` strdup floor** — would require forking libcurl.  Documented as expected-residual in the 8c audit.
+- **libpq `PQconnectdbParams` password copy** — analogous to libcurl floor.  Same library-fork-required posture.
+- **`QueryData::m_Data` request body** — Anthropic prompts and Bedrock SigV4-signed bodies pass through this `std::string` field.  Not credential material per se, but contains user PII / proprietary prompts in practice.  Separate hardening track outside 8a–8d's credential-leak scope.
+- **GCS `ExchangeJwtForAccessToken` postBody concat** — std::string concat with the JWT embedded.  Could be migrated to `SecureString::Build` using the same pattern as 8d.4 — small follow-on PR when someone next touches GCS.
+- **JwtGenerator local `std::string jwt`** — `Generate` builds the JWT as a local std::string before copying to the out-param SecureString.  Bounded by Generate() lifetime; same residual shape as the 8b cloud Sign() local std::strings were, before 8d.1 hardened them.  Could be eliminated by routing the concat through `SecureString::Build` directly.  Small follow-on; tracked.
+
+### Gotchas next-session-Claude should know
+
+- **The full 8a/8b/8c/8d bundle is large**: ~70+ modified files + 5 new files (curlSlistHelper.{h,cpp} from 8b, heapScan_test.{h,cpp} + heapScan_cloud_scenarios.cpp from 8c, scopedSecretBytes.h from 8d).  Suggested commit splits if JC wants them:
+    - (a) 8a — engine + AI dispatch SecureString refactor
+    - (b) 8b — cloud connectors + curlSlistHelper + HMAC signer threading
+    - (c) 8c — heap-scan audit module + premake hook
+    - (d) 8d — residual-leak closures (5 fixes) + audit flag flips + new OAuthPostBody scenario + scopedSecretBytes.h
+    - (e) Docs (CLAUDE.md, cyber security.md, pre-1_0_follow-ups.md, hand-off.md)
+  Or one bundled commit (the work IS one logical refactor's four slices).  JC's call.
+- **Audit re-run command is `premake5 gmake --clang --heapscan && make config=debug && ./bin/Debug/jarvisAgent-studio`.**  Binary `std::exit`s after the audit with rc 0 (PASS) or 1 (FAIL); grep `log/log.txt` for `HeapScan: AUDIT` to see the verdict.  After any change to the SecureString → curl_slist_append path, re-run the audit — it's the regression net for the SecureString-only invariant.
+- **The clangd `std::expected` snapshot warning is permanent local-dev background** (per `feedback_cpp23_clang_libcxx`).  Ignore.  Today's session surfaced it on essentially every cloud-connector edit; build always succeeds.
+- **`GetAccessToken` callers must initialise `credentials.m_AuthType` BEFORE the call**, not after.  Pre-8d the pattern was "compute accessToken, set credentials".  Post-8d the SecureString output goes directly into `credentials.m_Token` — if a caller forgets to set `m_AuthType` first and the call fails, the credentials object is in a partially-populated state.  The 5 cloud connectors all do this correctly; new callers should match.
+- **GCS partial update is intentional.**  `ExchangeJwtForAccessToken` still takes `std::string const& jwt` (postBody concat inside is its own residual surface — same shape as the OAuth refresh body before 8d.4).  The materialisation step at the boundary (`std::string(jwt.Get())`) is a documented residual; closing it requires either widening `ExchangeJwtForAccessToken` to SecureString or refactoring its postBody build to `SecureString::Build`.  Small follow-on PR; out of 8d scope.
+
+### Files in working tree at session end
+
+8d delta on top of 8a/8b/8c:
+
+```
+M CLAUDE.md
+M application/cloud/azureBlobConnector.cpp                # 8d.5
+M application/cloud/azureSharedKeySigner.{h,cpp}          # 8d.1
+M application/cloud/dbQueryCloudTaskExecutor.cpp          # 8d.3
+M application/cloud/gcsConnector.cpp                      # 8d.5 (partial)
+M application/cloud/googleSheetsCloudTaskExecutor.cpp     # 8d.2
+M application/cloud/googleSheetsConnector.cpp             # 8d.2 + 8d.5
+M application/cloud/oneDriveConnector.cpp                 # 8d.5
+M application/cloud/postgresConnector.{h,cpp}             # 8d.3
+M application/cloud/sigV4Signer.{h,cpp}                   # 8d.1
+M application/cloud/snowflakeConnector.cpp                # 8d.5
+M doc/cyber security.md
+M doc/misc/hand-off.md
+M doc/misc/pre-1_0_follow-ups.md
+M engine/curlWrapper/awsSigV4.cpp                         # 8d.1 (shared-header migration)
+M engine/keys/jwtGenerator.{h,cpp}                        # 8d.5
+M engine/keys/oauthTokenManager.{h,cpp}                   # 8d.4 + 8d.5
+M engine/keys/secureString.{h,cpp}                        # 8d.4 (Build added)
+M test/security/heapScan_test.cpp                         # 8d.verify (flag flips + new scenario)
++ engine/keys/scopedSecretBytes.h                         # 8d.1 (new shared header)
+```
+
+~20 files touched today + 1 new.  Combined with 8a/8b/8c: ~75 modified + 5 new files for the full bundle.  Active edition: studio.
+
+---
+
+## 2026-05-22 (Sitting 8c — heap-scan audit artifact + commit prep for 8a/8b/8c) → next session
+
+Continuation of the same day's 8a + 8b SecureString-only HTTP-path work.  JC asked to land 8c (the empirical verification artifact) before committing the bundle.  The audit binary is opt-in via `premake5 --heapscan` (sets `J9T_HEAPSCAN_BUILD`); production binaries carry zero audit code (both the engine.cpp call site and the audit module body are `#ifdef`-guarded).  Audit-build binary runs the audit after the existing SigV4 self-test and `std::exit()`s with PASS/FAIL — never reaches normal startup.
+
+### What landed (working tree — JC handles commits)
+
+3 new files + 4 modifications:
+
+**New files (audit module):**
+- `test/security/heapScan_test.h` — declares `int RunHeapScanAudit()`.  No-op stub returning 0 when `J9T_HEAPSCAN_BUILD` is undefined.
+- `test/security/heapScan_test.cpp` — 8-scenario harness + smoke/deep scanner.  Plants a deterministic 64-byte hex nonce per scenario (PRNG seed = scenario index, so a residue hit is attributable), drives the production auth-build path end-to-end, lets RAII tear everything down, churns 64 MiB through the allocator to flush fastbins/tcache, then walks `/proc/self/maps` + reads `/proc/self/mem` with `memmem` over each in-scope region.  Smoke = `[heap]` only; deep = `[heap]` + unnamed anon + `[anon:*]`.  `[stack*]` deliberately excluded — the scanner holds the search needle as a local while scanning, so any stack walk would always self-detect at the scanner's own frame.  Documented limitation in the file header.
+- `test/security/heapScan_cloud_scenarios.cpp` — isolated TU for the two cloud-side scenarios (`cloud::SigV4Signer::Sign` + `AzureSharedKeySigner::Sign`).  Both `cloud/sigV4Signer.h` and `engine/curlWrapper/awsSigV4.h` define `class SigV4Signer` in namespace `AIAssistant` — per 8b's architecture note, no TU includes both.  The main heapScan_test.cpp pulls in the engine signer for `ScenarioEngineSigV4`; cloud scenarios are routed through `HeapScanCloud::{ExerciseCloudSigV4Sign, ExerciseAzureSharedKeySign}` defined in this isolated TU and forward-declared in the main TU.
+
+**Modifications:**
+- `premake5.lua` — new `--heapscan` opt-in option; when set, adds `defines { "J9T_HEAPSCAN_BUILD" }` and includes the three test files in the project.  Also adds `"test/"` to `includedirs` so `#include "security/heapScan_test.h"` works the same way `engine/` / `application/` do as include roots.
+- `engine/engine.cpp` — `#ifdef J9T_HEAPSCAN_BUILD`-guarded include of `"security/heapScan_test.h"` and call site placed right after the existing `#ifndef NDEBUG SigV4Signer::RunSelfTest();` block.  The call is `std::exit(AIAssistant::RunHeapScanAudit())` so the audit-build binary never reaches normal engine startup.
+- `doc/cyber security.md` — new sub-section under "SecureString-only HTTP path" titled **Empirical verification — heap-scan audit (Sitting 8c)** covering method, smoke-vs-deep semantics, the documented `[stack*]` exclusion limitation, the 8-scenario table, the observed result snapshot at session close-out, and how to invoke.
+- `doc/misc/pre-1_0_follow-ups.md` — Sitting 8c marked closed; header sentence updated from "8 sittings remain (Sittings 8c + 9 + ... + 15)" to "7 sittings remain (Sittings 9 + ... + 15)"; 8a/8b/8c close-out paragraph at the end of the §Sitting 8 entry summarises 8c's touch points + observed result.
+- `engine/curlWrapper/curlWrapper.md` — usage example at line 351 fixed (`q.m_ApiKey = apiKey` would no longer compile post-8a since `m_ApiKey` is non-copyable `SecureString`); now uses `q.m_ApiKey.Set(apiKeyView)`.  No other curlWrapper.md changes — the SecureString discipline was already integrated during 8a.
+- `CLAUDE.md` — one-line addition at the end of the SecureString discipline rule pointing to `test/security/heapScan_test.cpp` as the empirical verification artifact + invocation instructions.
+
+### Doc sweep — bundled
+
+| Doc | Change |
+|---|---|
+| `CLAUDE.md` | One-line tail addition to the SecureString discipline rule: "Empirical verification: `test/security/heapScan_test.cpp` plants a nonce ... opt-in via `premake5 gmake --heapscan` ... re-run after touching anything in the SecureString → `curl_slist_append` path." |
+| `doc/cyber security.md` | New "Empirical verification — heap-scan audit (Sitting 8c)" sub-section under "SecureString-only HTTP path".  Covers method, smoke-vs-deep semantics, `[stack*]` exclusion rationale, 8-scenario table, observed result snapshot, invocation instructions.  Sits between the "Known residual leaks" list and the "CurlMultiDispatcher Security" subsection. |
+| `doc/misc/pre-1_0_follow-ups.md` | 8c entry marked closed; remaining-sittings count updated 8 → 7; Sitting 8 close-out paragraph extended with the 8c summary. |
+| `doc/misc/hand-off.md` | This entry. |
+| `engine/curlWrapper/curlWrapper.md` | Usage example syntax fix (the only non-8a/8b/8c-touch in the file was already current). |
+
+Skipped by design:
+- `doc/combined*.md` — JCWF-generated per `feedback_combined_doc_generated`; never hand-edit.
+- `doc/jarvisagent.1` / `.html` — pandoc-generated, regen on release.
+- `doc/architecture.md`, `doc/jarvisagent.md` — unchanged this session; the SecureString discipline reference already lands in CLAUDE.md and `doc/cyber security.md`, the natural homes per `feedback_doc_routing`.
+- Audit republish (jarvisCpp{CyberSec,Safety}Audit JCWFs) — per `feedback_audit_republish_end_of_domain`, those are end-of-domain JC-triggered runs with Sonnet 4.6, not per-sitting.
+
+### What's verified
+
+| Check | Result |
+|---|---|
+| Studio Debug build (`--clang`, no `--heapscan`) | clean (only pre-existing asio `-Wshadow`) |
+| Studio Debug build (`--clang --heapscan`) | clean |
+| Audit binary smoke + deep — all 8 scenarios | 5/5 must-be-zero PASS; `AppendSecretHeader` 1 hit (libcurl strdup floor, expected); cloud SigV4 + AzureSharedKey Sign() residuals evaporated under churn (stronger result than 8b documented).  `AUDIT PASSED` → exit 0. |
+| Stack-mapping exclusion | confirmed correct.  Pre-fix: every deep scan showed exactly 1 hit at `0x7ffc...` (main-stack canonical address).  Post-fix (excluding `[stack*]` from MappingIsInScope): all 5 must-be-zero scenarios drop to 0/0 hits. |
+| Engine Debug / Release / Studio Release | NOT rebuilt this session.  Session focus was 8c only; the 8a + 8b code was already verified clean across all 4 targets in those sittings.  `premake5 gmake --clang --heapscan` only generates Studio Debug build artifacts for this session.  JC may want to do a clean 4-target rebuild before committing the bundle to confirm 8a+8b+8c lands cleanly. |
+| Active edition at session end | `studio` per `.build-edition` |
+
+### Architecture notes for next-session-Claude
+
+- **Audit module compile gating is two-layered.**  Outer gate: `J9T_HEAPSCAN_BUILD` define controlled by premake `--heapscan`.  Inner gate: every audit cpp's body sits inside `#ifdef J9T_HEAPSCAN_BUILD` (with the production-stub variant in the `#else` branch returning 0).  Belt-and-suspenders — premake only includes the files when the option is set, but the internal guard means if a future refactor adds them to the file glob unconditionally, the absence of the define still produces a clean no-op build.
+- **Stack-mapping exclusion is intrinsic to the scanner design.**  Any in-process heap scanner that holds its search needle as a stack-resident local will self-detect on a `[stack]` walk.  Documented in both the cpp file header and `doc/cyber security.md`.  A future external-process scanner (separate test runner attaching to a live j9t PID via `/proc/<pid>/mem`) would need `kernel.yama.ptrace_scope=0` (or `CAP_SYS_PTRACE`); explicit non-goal for 8c — pre-1.0 audit artifact, not CI gate.
+- **Scenario seeds are stable across runs.**  PRNG seed = scenario index (`0x10000001` for Bearer, etc.).  A hit reported in scenario N traces unambiguously to that scenario's code path — no cross-contamination from a stomped-and-reused slab carrying scenario M's bytes.
+- **The cloud Sign() residuals evaporating under churn is interesting** — stronger than 8b documented.  The 64 MiB churn pad displaces the bounded-by-Sign()-lifetime `std::string` slabs (`awsSecret` in cloud SigV4, `rawKey` in AzureSharedKey) before they can be observed.  Suggests the leak window is shorter than initially expected, though the architectural fix (harmonising the cloud signers to the engine-side `ScopedSecretBytes` pattern) is still worth landing as part of the "known residual leaks" hardening tracks documented in `doc/cyber security.md`.
+
+### Open items / next-session candidates
+
+Per `pre-1_0_follow-ups.md` after today's three closures and the mid-plan addition of Sitting 8d, **8 sittings remain**: 8d + 9 + 10 + 11 + 12 + 13 + 14 + 15.
+
+- **Sitting 8d — Square away SecureString residual leaks.**  Added 2026-05-22 to close the five residual-leak surfaces 8b documented and 8c's audit empirically confirmed are real but bounded.  Five parts: (1) cloud `Sign()` HMAC scratch — port engine-side `ScopedSecretBytes` pattern to `application/cloud/sigV4Signer.cpp` + `azureSharedKeySigner.cpp`; (2) Google Sheets URL `?key=` → `X-Goog-Api-Key` header swap (2 file-local changes); (3) Postgres conninfo → `PQconnectdbParams` parallel-array API (file-local); (4) OAuth refresh POST body → `SecureString` (extends `SecureString` with `Build(std::span<string_view const>)` + refactors `oauthTokenManager.cpp::PerformRefresh`); (5) generator return-by-value → out-parameter `SecureString&` (horizontal sweep across `OAuthTokenManager::GetAccessToken` + `JwtGenerator::GenerateSnowflakeJwt` + 5 caller sites).  Verification re-runs the 8c heap-scan audit with two new scenarios (OAuth POST body must-be-zero; Postgres params with libpq floor as new documented-residual) and flips cloud SigV4 + AzureSharedKey from `expected_residual=true` to `false`.  Effort ~12-16h.  Full plan at `pre-1_0_follow-ups.md` "Sitting 8d".
+- **Sitting 9 — `SanitizeUserSlug` collision fix + migration.**  Next merge-gated stop after 8d.  Adhoc layout `_adhoc/<user_slug>/<run>/` collides for distinct users whose names sanitise to the same slug (`"bob+admin@example.com"` and `"bob_admin@example.com"` both → `"bob_admin@example.com"`).  Fix: append `_<8 hex chars of SHA-256(original_user)>` to the sanitised slug.  Migration: existing `meta.json` files reference legacy slugs — read `owner_slug` from `meta.json` on enumeration, don't re-derive from `m_User`.  Small-medium (~half day).
+
+### Gotchas next-session-Claude should know
+
+- **Commit splits.**  Today's working tree (~50 modified files + 4 new) covers all three 8a + 8b + 8c slices.  Suggested splits if JC wants them:
+    - (a) 8a — `SecureString` helpers (`Format`, `CStr`) + `IAuthSigner` shape (publicHeaders / secretHeader split) + `QueryData::m_ApiKey` SecureString-ification + `Clone()` + 4-arg `Apply` call-site updates (engine + AI dispatch).
+    - (b) 8b — `CloudCredentials` type change (`m_Token` / `m_SecretKey` / `m_Password` → SecureString) + new `AppendSecretHeader` helper + 49 cloud connector / task executor / signer updates + `ContainsCrlf` widening to `string_view` + HMAC-input signer threading (AzureSharedKey + cloud SigV4 + engine awsSigV4).
+    - (c) 8c — `test/security/heapScan_test.{h,cpp}` + `heapScan_cloud_scenarios.cpp` + `premake5.lua` `--heapscan` option + `engine/engine.cpp` audit-call site.
+    - (d) Doc updates (CLAUDE.md, `doc/cyber security.md`, `engine/curlWrapper/curlWrapper.md`, `doc/misc/pre-1_0_follow-ups.md`, `doc/misc/hand-off.md`).
+  Or one bundled commit (the work IS one logical refactor's three slices).  JC's call.
+- **`premake5 --heapscan` is non-default by design.**  CI does NOT compile the audit code; it remains a pre-1.0 one-shot artifact + a "re-run after touching the auth-build path" regression net.  When CI does build with `--heapscan`, the binary `std::exit`s after the audit; CI grep `log/log.txt` for `AUDIT PASSED` (exit 0) vs `AUDIT FAILED` (exit 1).  If a future sitting wants to add a CI job that runs the audit, the contract is: a clean exit 0 means the SecureString-only HTTP-path invariant holds for every shipping auth style.
+- **The clangd `expected` warning is permanent local-dev background.**  Every Edit on a `.cpp` may show a `no template named 'expected' in namespace 'std'` diagnostic from clangd's libc++ snapshot.  Per `feedback_cpp23_clang_libcxx` — ignore; build (clang + libc++ via `--clang`) is fine; the clangd warning is from a different stdlib snapshot.  Today this surfaced when I added the `#include "security/heapScan_test.h"` line to engine.cpp — the clangd cache hadn't refreshed includedirs from the new premake regen.  Re-running `premake5 gmake --clang --heapscan` regenerates compile_commands.json and the warning clears after clangd reloads (sometimes needs an editor restart).
+- **Two distinct `SigV4Signer` classes still exist** under the same `AIAssistant` namespace — one in `engine/curlWrapper/awsSigV4.{h,cpp}` (Bedrock AI dispatch via `IAuthSigner`) and one in `application/cloud/sigV4Signer.{h,cpp}` (S3 connector path).  No TU includes both headers.  8c had to work around this by isolating the cloud-side scenarios in a separate TU (`heapScan_cloud_scenarios.cpp`); the main `heapScan_test.cpp` only pulls in the engine signer.  Same architectural note 8b's hand-off called out — still worth a future refactor that merges them (the engine one is the keeper — it has `ScopedSecretBytes` for HMAC intermediates that the cloud sibling lacks).  Not in 8c scope; called out for the next time someone touches either file.
+
+### Files in working tree at session end
+
+```
+M CLAUDE.md
+M application/cloud/README.md
+M application/cloud/*.{cpp,h}                          # 8b — ~24 files
+M application/workflow/aiRequestPool.cpp               # 8a
+M application/workflow/filter/polarionClient.{h,cpp}   # 8b
+M doc/architecture.md
+M doc/cyber security.md
+M doc/misc/hand-off.md
+M doc/misc/pre-1_0_follow-ups.md
+M engine/curlWrapper/authSigner.{h,cpp}                # 8a
+M engine/curlWrapper/awsSigV4.{h,cpp}                  # 8a + 8b
+M engine/curlWrapper/curlMultiDispatcher.cpp           # 8a
+M engine/curlWrapper/curlWrapper.{h,cpp,md}            # 8a
+M engine/curlWrapper/liveTransport.cpp                 # 8a
+M engine/curlWrapper/mockTransport.cpp                 # 8a
+M engine/engine.cpp                                    # 8c (audit call site)
+M engine/keys/secureString.{h,cpp}                     # 8a
+M premake5.lua                                         # 8c (--heapscan)
++ engine/curlWrapper/curlSlistHelper.{h,cpp}           # 8b (new)
++ test/security/heapScan_test.{h,cpp}                  # 8c (new)
++ test/security/heapScan_cloud_scenarios.cpp           # 8c (new)
+```
+
+Three new test-security files + two new curlWrapper helpers + ~50 modifications.  Active edition: studio.
+
+---
+
+## 2026-05-22 (Sitting 8b — SecureString-only cloud connectors + SigV4 input phase) → next session
+
+Same-day follow-on to 8a (entry directly below).  JC asked to continue with 8b after 8a wrapped.  All cloud connectors + workflow-filter polarionClient + AzureSharedKeySigner + cloud-side SigV4Signer + engine-side awsSigV4 input phase + the X-Amz-Security-Token output now route secrets through `SecureString` end-to-end.  The "no plain `std::string` between credential and `curl_slist_append`" invariant is now codified across the full HTTP surface, not just the AI-dispatch slice 8a covered.
+
+### What landed (working tree — JC handles commits)
+
+49 files modified + 2 new (`engine/curlWrapper/curlSlistHelper.{h,cpp}`).  Net: +624 / -248 lines.  Big single sitting — the original "Medium ~1 day" estimate in the pre-1.0 plan undercounted; today's run came in around ~3 hours of focused work.
+
+1. **`CloudCredentials` (`application/cloud/cloudConnector.h:51`)** now holds secrets in `SecureString`:
+    - `m_Token` (Bearer/OAuth/JWT) → `SecureString`
+    - `m_SecretKey` (SigV4 secret) → `SecureString`
+    - `m_Password` (BasicAuth) → `SecureString`
+    - `m_AccessKeyId`, `m_Username` stay `std::string` (public per provider conventions).  The struct is non-copyable (SecureString deletes copy); movable.  All ~20 `ResolveCredentials()` writer sites across the 13 connectors now use `.Set(view)` instead of `std::string(view)`.
+2. **`AppendSecretHeader` helper (`engine/curlWrapper/curlSlistHelper.{h,cpp}`)** — new file.  Signature: `void AppendSecretHeader(curl_slist*& list, std::string_view prefix, SecureString const& secret, SecureString& scratch)`.  Internally `scratch.Format(prefix, secret.Get())` + `curl_slist_append(list, scratch.CStr())` — single mlock'd allocation, secret bytes never appear in a `std::string` heap allocation.  Returns `bool` (not `[[nodiscard]]` — internal `LOG_CORE_CRITICAL` on failure matches the existing `headers = curl_slist_append(headers, ...)` ignore-return-value pattern).  Used at ~22 sites across cloud connectors, cloud task executors, workflow-filter polarionClient.
+3. **All ~22 inline `"Authorization: Bearer " + token` sites refactored** to call `AppendSecretHeader` with a `SecureString scratch` local.  Two patterns collapsed: the two-line `std::string authHeader = "Bearer "+ token; curl_slist_append(headers, authHeader.c_str())` form and the single-line embedded `curl_slist_append(headers, ("Bearer "+token).c_str())` form.  Replaced via `perl -i -0777` multiline substitutions to keep the diff mechanical and reviewable.
+4. **Helper function signatures threaded SecureString**:
+    - `polarionClient` (`workflow/filter/polarionClient.{h,cpp}`) — 8 public methods (HttpGet / HttpRequest / HttpDownloadFile / HttpUploadFile / UpdateWorkItem / CreateWorkItem / UploadAttachment / DownloadAttachment / FetchLinkedWorkItems) take `SecureString const& bearerToken`.  Internal `FetchAll` builds a `SecureString bearerToken` locally via `.Set` on the WithCredential callback.
+    - `gitHubCloudTaskExecutor::GitHubRequest`, `oneDriveCloudTaskExecutor::GraphRequest` + `::GraphDownload`, `gcsCloudTaskExecutor::GcsRequest` + `::GcsDownload`, `slackCloudTaskExecutor::PerformSlackRequest`, `snowflakeCloudTaskExecutor::SnowflakeRequest`, `redmineCloudTaskExecutor::RedmineRequest`, `s3CloudTaskExecutor::S3Request` + `::S3Download` — all take `SecureString const&` for the bearing-token / api-key / jwt / accessToken / secretKey parameter (param names preserved per file convention).
+    - `emailConnector::ImapCommand` + `emailCloudTaskExecutor::ImapCommand` — `password` parameter → `SecureString const&`.
+5. **HMAC-input signers threaded SecureString**:
+    - `application/cloud/azureSharedKeySigner.{h,cpp}`: `Sign(...std::string const& accountKey...)` → `SecureString const& accountKey`.  `HmacSha256` + `Base64Decode` widened to `std::string_view` for parameter-type compatibility.  `rawKey` (Base64-decoded secret bytes) inside `Sign()` is a residual `std::string` heap allocation — bounded by Sign() lifetime, flagged inline as known internal leak (full mitigation = SecureString-backed rawKey, deferred).
+    - `application/cloud/sigV4Signer.{h,cpp}`: `Sign(...std::string const& secretKey...)` → `SecureString const& secretKey`.  `HmacSha256` / `HmacSha256Hex` widened to `std::string_view`.  Builds `awsSecret = "AWS4" + secretKey.Get()` as a single std::string for the HMAC chain — same residual-internal-leak pattern as Azure (flagged inline).
+    - `engine/curlWrapper/awsSigV4.{h,cpp}`: `Inputs::m_SecretKey` + `Inputs::m_SessionToken` → `SecureString`; `SignedHeaders::m_SecurityToken` → `SecureString`.  Sign() builds `kSecret` as a raw `std::vector<unsigned char>` (no "AWS4" + secret intermediate string), then wraps in the existing `ScopedSecretBytes` for OPENSSL_cleanse-on-destruct.  Apply() routes the X-Amz-Security-Token header through the `secretHeader` output slot (when STS session token present) via `secretHeader.Format("X-Amz-Security-Token: ", out.m_SecurityToken.Get())`.  The X-Amz-Security-Token used to flow through `publicHeaders` as a plain std::string — fixed today.
+6. **`ContainsCrlf` (`cloud/cloudTaskExecutor.h:57`)** widened from `std::string const&` to `std::string_view` — strictly more permissive (accepts both `std::string` and the views from `SecureString::Get()`).  All 15+ call sites now pass `credentials.m_Token.Get()` style.
+7. **Curl-PASSWORD-CStr sites**: `emailConnector.cpp:288`, `emailCloudTaskExecutor.cpp:647`, `jiraCloudTaskExecutor.cpp:187` — `credentials.m_Password.c_str()` → `.CStr()`.  Direct hand-off to libcurl's `CURLOPT_PASSWORD` without `std::string` intermediate.
+
+### Documented residual leaks (deferred, not 8b scope)
+
+Each site has an inline comment explaining the leak + why deferred:
+- **Google Sheets URL-embedded key** (`googleSheetsConnector.cpp:171`, `googleSheetsCloudTaskExecutor.cpp:244`): `url += "&key=" + std::string(credentials.m_Token.Get())` — secret in URL query string.  Distinct fix surface (URL escaping vs. header build).
+- **PostgreSQL connection-string password** (`postgresConnector.cpp:277`): `connStr += " password=" + escape(std::string(credentials.m_Password.Get()))` — libpq takes a single conninfo string, password is part of it.  Would need a parameter-array PQconnectdbParams alternative.
+- **OAuth refresh-token POST body** — `client_secret` materialised into form-urlencoded body for the token endpoint.  Same body-path concern as `QueryData::m_Data`.
+- **AzureSharedKeySigner `rawKey`** — Base64-decoded secret in `std::string` inside Sign() lifetime.
+- **Cloud SigV4Signer `awsSecret`** — `"AWS4" + secret_access_key` as `std::string` inside Sign() lifetime.  The engine awsSigV4 sibling uses a byte-vector approach; harmonising the two would close this.
+- **Upstream generator return values** — `OAuthTokenManager::GetAccessToken` and `JwtGenerator::GenerateSnowflakeJwt` return `std::string`.  Connectors immediately `.Set(view)` into the SecureString `m_Token`, so the std::string lives only until `ResolveCredentials()` returns — but it IS a heap-resident copy of the secret during that window.  Same hardening tier as the OAuth-POST-body item: fixing requires changing the generator interfaces to fill a caller-owned `SecureString&`.
+
+### Doc sweep (same session)
+
+| Doc | Change |
+|---|---|
+| `CLAUDE.md` | SecureString discipline rule expanded: adds `CloudCredentials::m_Token`/`m_SecretKey`/`m_Password`, `AppendSecretHeader` as the canonical helper for inline auth-header builds, HMAC-input signer pattern, X-Amz-Security-Token via secretHeader for SigV4 with session token, and the documented-residual-leak list. |
+| `doc/misc/pre-1_0_follow-ups.md` | Sitting 8a + 8b marked closed; close-out paragraph summarises the 8b touch points + verified smoke surfaces.  Remaining-sittings count: 8 (was 10). |
+| `doc/misc/hand-off.md` | This entry. |
+| `application/cloud/cloudConnector.h` (inline doc) | `CloudCredentials` struct comment explains the SecureString invariant + how to populate/consume. |
+| `engine/curlWrapper/curlSlistHelper.h` (inline doc) | Helper docstring covers the use case, lifetime contract, and why prefix is a public string_view. |
+
+Skipped by design: `doc/cyber security.md` (will get a comprehensive update once Sitting 8c lands with the heap-scan artifact); `doc/combined*.md` (JCWF-generated); `doc/jarvisagent.1` / `.html` (pandoc-generated).
+
+### What's verified
+
+| Check | Result |
+|---|---|
+| Studio Debug build | clean (only the pre-existing asio `-Wshadow`) |
+| Studio Release build | clean |
+| Engine Debug build | clean (had to `make clean config=debug` after switching to `--engine --clang` per the 8a lesson) |
+| Engine Release build | clean |
+| Active edition at session end | `studio` per `.build-edition` |
+| AI Bearer (8a re-verify) | `POST /api/settings/ai-interfaces/test {"index":0}` → OpenAI gpt-4.1 `ok=true latency=1414ms` |
+| Connector: GitHub (Bearer, real api.github.com) | `POST /api/connections/my-github/test` → `ok=true` |
+| Connector: Polarion (Bearer, local mock at :18080) | `POST /api/connections/my-polarion/test` → `ok=true` |
+| Connector: Slack (Bearer, real slack.com) | `POST /api/connections/my-slack/test` → `ok=true` |
+| Connector: Jira (BasicAuth, real atlassian) | `POST /api/connections/my-jira/test` → `ok=true` — exercises `credentials.m_Password.CStr()` path through `CURLOPT_PASSWORD` |
+| Connector: Azure Blob (Shared Key, local azurite) | `POST /api/connections/my-azure-blob/test` → `ok=true` — exercises `AzureSharedKeySigner::Sign(..., credentials.m_SecretKey, ...)` |
+| Log check | zero `ERROR` / `CRITICAL` / `auth signer rejected` / `crlf` lines during the smoke run |
+| Shutdown | `POST /api/shutdown` → clean exit, ~0ms drain, no watchdog lines |
+
+PolarionClient::FetchAll (workflow-filter path with SecureString bearerToken local) NOT exercised — no polarion-filter workflow configured locally.  Compile-time guarantee (signature change) covers it; runtime verification needs a polarion workflow.  S3 + GCS + Snowflake + OneDrive connector tests not exercised — same compile-time-guarantee story; no local mock standing for those.
+
+### Architecture notes for next-session-Claude
+
+- **`AppendSecretHeader` is the canonical pattern for "build secret-bearing header and append to curl slist".**  Every cloud connector / task executor follows it.  New sites do the same — never write `"prefix: " + secret.Get()` as a std::string concat.  Caller owns the `SecureString scratch`; one scratch can be reused for multiple AppendSecretHeader calls in the same scope (it gets reformatted each call).
+- **Two distinct `SigV4Signer` classes exist** under the same namespace `AIAssistant` — one in `engine/curlWrapper/awsSigV4.{h,cpp}` (AWS Bedrock AI path via IAuthSigner) and one in `application/cloud/sigV4Signer.{h,cpp}` (S3 connector path).  They don't conflict because no TU includes both headers.  Today's 8b work hardened both; if a future refactor merges them (good idea — duplicate canonical-request logic), pick the engine one as the keeper (it has `ScopedSecretBytes` for HMAC intermediates that the cloud one lacks).
+- **Helper function pattern when a class method takes a bearer token**: change `std::string const& bearerToken` → `SecureString const& bearerToken` in both header + cpp; inside the body use `AppendSecretHeader(headers, "Authorization: Bearer ", bearerToken, authScratch)`.  `polarionClient.cpp` is the reference for 4+ methods sharing the same param.  Don't introduce a new variable name — match the existing parameter name (bearerToken / accessToken / token / jwt / apiKey) for symmetry with the rest of the file.
+- **`ContainsCrlf` now takes `std::string_view`** — call as `ContainsCrlf(credentials.m_Token.Get())` for SecureString, or `ContainsCrlf(plain_string)` for `std::string`.  The widened signature is strictly more permissive.
+- **`SecureString::Format` is one-shot per call** (already in CLAUDE.md, restating).  Used as a scratch buffer in `AppendSecretHeader` — each call replaces previous contents.  Don't try to "accumulate" into a scratch.
+
+### Open items / next-session candidates
+
+**8 sittings remain**: 8c + 9 + 10 + 11 + 12 + 13 + 14 + 15.
+
+- **Sitting 8c — heap-scan audit artifact.**  Dual-mode test at `test/security/heapScan_test.cpp`: smoke variant for CI (single-shot, main arena scan post-drop) + deep variant `J9T_HEAPSCAN_DEEP=1` requiring `CAP_SYS_PTRACE` (one-shot pre-1.0 audit artifact).  Covers all 4 static-header signers + each connector path + SigV4 (both engine and cloud).  Now has 49+ touch sites worth of changes to validate against; the artifact gives JC a single-pager "no secret survives in heap" assertion to attach to the pre-1.0 security review.
+- **Residual-leak follow-ups (post-8c, opportunistic)**: harmonise cloud SigV4 to use the engine's `ScopedSecretBytes` pattern; SecureString-back the AzureSharedKeySigner `rawKey`; rewrite Google Sheets URL-embedded key to a header-only path (provider supports both); migrate postgres password to a parameter-array conninfo.  Each is a small targeted PR.
+- **Sitting 9 — `SanitizeUserSlug` collision fix + migration** is the next merge-gated stop.
+
+### Gotchas next-session-Claude should know
+
+- **Premake regen needed for new .cpp**: `engine/curlWrapper/curlSlistHelper.cpp` is a new file.  `premake5 gmake --clang` had to be re-run before building.  Already done in this session; future-Claude landing on this branch in a fresh checkout would need to re-run premake before `make`.  Per `feedback_premake_regen_for_new_cpp`.
+- **Diff is large** (49 files + 2 new) but mechanically uniform.  Suggested commit splits if JC wants them:
+    - (a) `SecureString` helpers + `IAuthSigner` shape + `QueryData::m_ApiKey` type + AI-dispatch resolvers (this is the 8a slice — already prepared for one commit per the 8a hand-off).
+    - (b) `CloudCredentials` type change + `AppendSecretHeader` helper + 49 cloud connector / task executor / signer updates (the 8b slice).
+    - (c) Doc updates (CLAUDE.md, pre-1_0_follow-ups, hand-off).
+  Or one bundled commit with the doc updates folded in.  JC's call.
+- **The `ContainsCrlf` signature widening to `std::string_view`** is technically a backwards-compatible API change but it's a sweep across the entire cloud surface.  Anything outside cloud that wraps the result of `ContainsCrlf` is unaffected (the boolean return is unchanged).  Worth a quick callout in the commit message.
+- **Sitting estimate again wrong** — pre-1.0 plan said 8b "~half day"; reality was a chunky session.  Real touch count was ~50 files, more than the "~22 inline sites" the plan named (which only counted the literal Bearer concats — didn't count helper-function signature changes, HMAC signer threading, secret-bearing-header-output for SigV4, ContainsCrlf widening cascade, AzureSharedKey signer, sigV4Signer.cpp/cloud-side variant).  8c should be smaller (test-only) but plan for ~half day not 1-2 hours.
+- **No regression on 8a** — re-verified the OpenAI Bearer AI path explicitly during the smoke (`index=0` test).  All four static-header signers (Bearer / x-goog / x-api-key / api-key) plus the SigV4 input phase changes integrated cleanly.
+
+### Files in working tree at session end
+
+49 modified files + 2 new (curlSlistHelper.{h,cpp}).  Full breakdown from `git diff --stat` available; major buckets:
+- 3 cloud-shared (cloudConnector.h, cloudTaskExecutor.h, cloudTaskExecutor.cpp)
+- 13 cloud connector .cpp files
+- 12 cloud task executor .cpp files
+- 4 cloud signers (azureSharedKeySigner.{h,cpp}, sigV4Signer.{h,cpp})
+- 4 engine curl wrapper (curlWrapper.{h,cpp}, awsSigV4.{h,cpp})
+- 2 engine SecureString (secureString.{h,cpp}) — touched by 8a, no further changes in 8b
+- 2 polarionClient (filter)
+- 1 aiRequestPool — touched by 8a
+- 3 CLAUDE.md / hand-off.md / pre-1_0_follow-ups.md
+
+---
+
+## 2026-05-22 (Sitting 8a — SecureString-only AI dispatch + Sitting 8 split 8a/8b/8c) → next session
+
+Session opened by JC's "ready to continue on the refactor?".  Reviewed yesterday's hand-off, confirmed Sitting 8 was next, did the exploration + Plan-agent red-team, drafted the plan at `~/.claude/plans/serialized-honking-sundae.md` (approved), then shipped Sitting 8a.
+
+**Headline finding from exploration** — the doc's original estimate ("9 connector sites, Medium ~1 day") was an undercount.  Real touch surface is ~31 sites across engine + AI dispatch + 9 cloud connectors + workflow filter + SigV4 input.  Plan agent flagged the right cut — 3 commits, not 1.  Followed: **8a (engine + AI dispatch) closed today**; **8b (cloud connectors + SigV4 input phase) and 8c (heap-scan audit artifact, not CI-gated) carved out** for separate sittings.
+
+### What landed (working tree — JC handles commits)
+
+`SecureString` extension + 8a refactor across 8 files; pre-1_0_follow-ups.md updated with the 8a/8b/8c split; CLAUDE.md gains a new discipline rule for SecureString-only HTTP paths.
+
+1. **`SecureString::Format(prefix, secretView, suffix)`** (`engine/keys/secureString.{h,cpp}`) — single allocation sized to fit all three pieces + trailing NUL; mlock + zero-on-replace via the existing `Release()`; copy-and-swap internally for strong exception safety (a `bad_alloc` mid-format leaves the prior contents intact).  Companion: `char const* CStr()` returns null-terminated `m_Buffer` (or `""` when empty); relies on the existing `Set()` trailing-NUL invariant (already in place at line 139 of the original `Set` impl; documented in the new header comments).
+2. **`IAuthSigner::Apply` signature change** (`engine/curlWrapper/authSigner.{h,cpp}`).  New shape: `bool Apply(QueryData const&, std::vector<std::string>& publicHeaders, SecureString& secretHeader, std::string& errorMessage)`.  Caller-owned `SecureString&` — no `optional`, no move into a vector slot, one fewer mlock syscall per request.  Refactored 4 static-header signers — BearerSigner / XGoogApiKeySigner / AnthropicXApiKeySigner / AzureApiKeySigner — each now calls `secretHeader.Format(prefix, q.m_ApiKey.Get())` instead of `h.push_back("prefix: " + q.m_ApiKey)`.  AnthropicXApiKey emits its `anthropic-version: 2023-06-01` into `publicHeaders` (non-secret); the order is Format-first so a Format throw leaves `publicHeaders` unmodified, preserving the "all-or-nothing" promise.  SigV4Signer (in `awsSigV4.{h,cpp}`) takes the new signature and leaves `secretHeader` empty — its Authorization is the HMAC signature (derived from but not containing the raw secret); X-Amz-Security-Token still flows through `publicHeaders` as `std::string` and is on the 8b punch list.
+3. **`QueryData::m_ApiKey` type change** (`engine/curlWrapper/curlWrapper.{h,cpp}`) — `std::string` → `SecureString`.  `IsValid()` switched from `.empty()` to `.IsEmpty()`.  Because `SecureString` deletes copy, `QueryData` is now non-copyable by default — added an explicit `QueryData QueryData::Clone() const` for the dispatcher's retry path (which legitimately needs a deep copy while the original moves into the transport).  `CurlMultiDispatcher::Submit` (`curlMultiDispatcher.cpp:80`) and the admit loop (`curlMultiDispatcher.cpp:440`) updated to `.Clone()`; existing `std::move` sites at lines 461 / 870 / 900 unchanged.  Added `CurlSlist::AppendCStr(char const*)` to take a `SecureString::CStr()` pointer to `curl_slist_append` without going through `std::string`.
+4. **Three `Apply` call sites updated** to the 4-arg signature: `CurlWrapper::Query` (`curlWrapper.cpp:297`), `LiveTransport::SetupEasyHandle` (`liveTransport.cpp:211`), `MockTransport::Submit` SigV4 capture path (`mockTransport.cpp:161`).  Each preallocates a stack-local `SecureString secretHeader`, conditionally appends `secretHeader.CStr()` to the curl slist when `!IsEmpty()`.
+5. **AI-dispatch resolver sites** (`application/workflow/aiRequestPool.cpp`).  `ResolveApiKey` return type changed from `std::string` to `SecureString` (NRVO holds since `SecureString` is move-constructible).  Internal `result.assign(view)` → `result.Set(view)`.  Local `apiKey` variables in the two QueryData-building sites (the dispatch path at line 1338 and the TestApiInterface path at line 2016) are now `SecureString`; both QueryData designated-initializer blocks use `.m_ApiKey = std::move(apiKey)`.  `apiKey.empty()` → `apiKey.IsEmpty()` at the empty-check sites.
+
+### Doc sweep (same session)
+
+| Doc | Change |
+|---|---|
+| `CLAUDE.md` | New discipline rule (lands above the `std::expected` rule, tenth bullet): "Secrets never materialise into a plain std::string between SecureString and curl_slist_append" — references SecureString::Format / CStr, the new IAuthSigner shape, QueryData::Clone, and the libcurl-strdup residue floor as the documented threat-model boundary. |
+| `doc/misc/pre-1_0_follow-ups.md` | Sitting 8 entry rewritten as 8a / 8b / 8c three-part plan with realistic scope (~31 touch sites, ~1.5 days total).  Header count updated: 10 sittings remain (was 8 — 8 split into 3).  Cross-ref to plan file added. |
+| `doc/misc/hand-off.md` | This entry. |
+| `engine/curlWrapper/curlWrapper.h` (inline doc) | `QueryData::m_ApiKey` comment explains the SecureString-only invariant + points to `doc/cyber security.md`. |
+| `engine/curlWrapper/authSigner.h` (inline doc) | New comment explaining the publicHeaders vs. secretHeader split + the "fail leaves outputs unchanged" promise. |
+| `engine/curlWrapper/awsSigV4.h` (inline doc) | Apply doc explains SigV4 keeps `secretHeader` empty because its Authorization is a signature, not the raw secret. |
+
+Skipped by design:
+- `doc/cyber security.md` — referenced from CLAUDE.md but not yet edited; will be touched when 8b lands (closes out the "no-std::string-secrets" guarantee across the full surface).
+- `doc/jarvisagent.1` / `.html` — pandoc-generated, regen on release.
+- `doc/combined*.md` — JCWF-generated per `feedback_combined_doc_generated`.
+- `engine/curlWrapper/curlWrapper.md` — internal subsystem doc; will be updated after 8b so it can describe the steady-state design instead of an intermediate one.
+
+### What's verified
+
+| Check | Result |
+|---|---|
+| Studio Debug build | clean (only the pre-existing asio `-Wshadow` warning) |
+| Studio Release build | clean |
+| Engine Debug build | clean (had to `make clean config=debug` once after the engine premake regen — leftover gcc objects from an accidental non-`--clang` regen step earlier; clean rebuild then matched fine) |
+| Engine Release build | clean |
+| Active edition at session end | `studio` per `.build-edition` |
+| End-to-end smoke (Bearer / OpenAI gpt-4.1) | `POST /api/settings/ai-interfaces/test {"index":0}` → `ok=true latency=1459ms`, HTTP/2 HTTP 200, full reply parsed |
+| End-to-end smoke (x-goog-api-key / Gemini native) | `index=5` → `ok=true latency=679ms`, HTTP/2 HTTP 200 |
+| End-to-end smoke (x-api-key / Anthropic claude-haiku-4-5) | `index=7` → `ok=true latency=909ms`, HTTP/2 HTTP 200 |
+| Shutdown | `POST /api/shutdown` → clean exit, total ~6ms from "Shutdown initiated" to "TerminalManager stopped", no watchdog lines |
+| Log check | zero `ERROR` / `CRITICAL` / `auth signer rejected` lines during the smoke run |
+
+`AzureApiKeySigner` (api-key header) not exercised in smoke because there's no Azure interface configured locally; the code path is structurally identical to BearerSigner (same `Format(prefix, view)` shape) so the three exercised signers cover the refactor.  SigV4 (Bedrock) not smoke-tested live — `awsSigV4.cpp:Apply` signature changed but the input-phase secret materialisation (lines 449-450) is unchanged; existing `SigV4Signer::RunSelfTest` known-answer test still runs at engine startup in Debug builds.
+
+### Architecture notes for next-session-Claude
+
+- **`SecureString::Format(prefix, view, suffix="")` is the canonical "build a secret-bearing string" pattern.**  Single allocation, mlock'd, NUL-terminated, strong exception safety.  Anywhere that previously built `prefix + view + suffix` as a `std::string` and handed it to libcurl: convert it to `SecureString::Format` + `CStr()`.  The 8b helper `AppendSecretHeader(curl_slist*&, prefix, SecureString const&, SecureString& scratch)` will codify this.
+- **`QueryData::Clone()` is the deliberate-copy escape hatch.**  Default copy is deleted (because `SecureString` is non-copyable by design — the secret should not be in two heap allocations simultaneously without an explicit decision).  When you genuinely need a deep copy of `QueryData` (only the dispatcher's retry path qualifies today), call `Clone()` and the contract is clear at the call site.  When a new field is added to `QueryData`, extend `Clone()` — there's no `[[clang::warn_unused]]` or `static_assert(sizeof(...))` enforcement (would be over-engineering for one site); rely on the symmetry of the impl + code review.
+- **The `IAuthSigner::Apply` "publicHeaders vs secretHeader" split is now codified.**  When adding a new auth style: if the secret bytes appear verbatim in the on-the-wire header → goes through `secretHeader` via `Format`; if the on-the-wire header is derived from but doesn't contain the secret (SigV4 signature, JWT-RSA bearer) → goes through `publicHeaders`.  Don't bypass `secretHeader` to "simplify"; that's exactly the leak Sitting 8a closed.
+- **Engine builds need `premake5 gmake --engine --clang` on this dev machine** (clang+libc++ via the `--clang` opt-in per `feedback_cpp23_clang_libcxx`).  Running `--engine` without `--clang` generates gcc/libstdc++ makefiles that produce objects which then fail to link against the libc++-linked binary, manifesting as `std::__cxx11::*` undefined references mixed with `std::__1::*` undefined references.  Cure: `make clean config=debug` then `premake5 gmake --engine --clang` then `make config=debug`.  Lesson worth a memory entry if it isn't already covered — `feedback_cpp23_clang_libcxx` mentions the rule but not this specific failure mode.
+
+### Open items / next-session candidates
+
+Per `pre-1_0_follow-ups.md` after today's split, **10 sittings remain**: 8b, 8c, 9, 10, 11, 12, 13, 14, 15 (and 8c is non-CI-gated audit artifact, so effectively 9 merge-gated sittings ahead).
+
+- **Sitting 8b — cloud connectors + workflow filter + SigV4 input phase.**  `CloudCredentials::m_Token`/`m_SecretKey` type change (`application/cloud/cloudConnector.h:51`); introduce `engine/curlWrapper/curlSlistHelper.{h,cpp}` `AppendSecretHeader(...)` helper; refactor ~22 inline `"Authorization: Bearer " + token` sites under `application/cloud/*.cpp` (representative paths in the plan file); fix `awsSigV4.cpp:449-450` SigV4 input phase (extend `ScopedSecretBytes` to input — already used for HMAC intermediates); polarionClient.cpp local-`bearerToken` variable type change (4 sites: lines 348/416/489/558).  Punch-list item from the Plan-agent red-team: `X-Amz-Security-Token` currently goes through `publicHeaders` as plain `std::string` in `awsSigV4.cpp:501` — should flow through a secret-bearing slot.  Probably an extension to the `IAuthSigner` contract (`std::vector<SecureString>& secretHeaders` instead of a single `SecureString& secretHeader`?  Or a separate `SecureString& aux1, & aux2` for SigV4?  Decide in 8b).
+- **Sitting 8c — heap-scan audit artifact.**  Dual-mode test at `test/security/heapScan_test.cpp`.  Smoke variant scans the test process's main heap arena post-drop (single-shot, no `/proc/self/mem`) and runs in CI; deep variant gated `J9T_HEAPSCAN_DEEP=1` walks `/proc/self/maps` + `/proc/self/mem` and requires `CAP_SYS_PTRACE` (Docker CI lacks this by default, so it's a one-shot pre-1.0 audit artifact — NOT a merge gate).  Cover all 4 static-header signers + each connector path + SigV4.
+
+### Gotchas next-session-Claude should know
+
+- **Diff scope on commit.**  Today's working tree spans engine + AI dispatch only — natural for one bundled commit or for two splits (a: SecureString helpers + IAuthSigner shape; b: QueryData type + Clone + resolver+dispatcher updates).  Doc changes (`CLAUDE.md`, `pre-1_0_follow-ups.md`, `hand-off.md`) ride with the code — no separate doc-only commit.
+- **`SecureString::Format` is one-shot per call.**  Calling `Format` twice on the same instance reallocates (existing buffer gets the wipe-and-free treatment via `Release()` before the new buffer takes over).  If a future use site wants to APPEND to a SecureString rather than replace, that's a new method (`Append(view)`); don't repurpose `Format` to detect "I'm being called twice in a row" and append.
+- **`QueryData::IsValid()` rejects empty `m_ApiKey` — including SigV4.**  Pre-fix the front-end check ran on a plain `m_ApiKey.empty()`; post-fix it's `m_ApiKey.IsEmpty()` on the SecureString.  SigV4 paths currently populate `m_ApiKey` with the (public) `AccessKeyId` (per `aiRequestPool.cpp:990`) so `IsValid` continues to pass.  Don't "simplify" SigV4 by leaving `m_ApiKey` empty — `IsValid` would reject the request before the signer ever sees it.  (Per-style validation inside `IAuthSigner::Apply` then re-checks the right thing for each style.)
+- **`X-Amz-Security-Token` still leaks a `std::string` heap allocation today.**  Sitting 8a confined scope to the four static-header signers + QueryData; SigV4's session-token output was deferred to 8b.  No regression from today — the leak existed before Sitting 8 began — but if 8b's first slice is "input phase" rather than "output", the session-token leak persists across 8a and into 8b's intermediate states.  Flag it in the 8b commit message if the slice ordering matters.
+- **The doc plan file at `~/.claude/plans/serialized-honking-sundae.md` is the authoritative scope artifact** (approved before code began).  Cross-referenced from `pre-1_0_follow-ups.md` Sitting 8 entry.  Don't re-derive the design choices in 8b/8c — the design rationale (Option A vs Option B; SecureString& vs optional<SecureString>&) is captured there.
+
+### Files in working tree at session end
+
+```
+M CLAUDE.md
+M application/workflow/aiRequestPool.cpp
+M doc/misc/hand-off.md
+M doc/misc/pre-1_0_follow-ups.md
+M engine/curlWrapper/authSigner.cpp
+M engine/curlWrapper/authSigner.h
+M engine/curlWrapper/awsSigV4.cpp
+M engine/curlWrapper/awsSigV4.h
+M engine/curlWrapper/curlMultiDispatcher.cpp
+M engine/curlWrapper/curlWrapper.cpp
+M engine/curlWrapper/curlWrapper.h
+M engine/curlWrapper/liveTransport.cpp
+M engine/curlWrapper/mockTransport.cpp
+M engine/keys/secureString.cpp
+M engine/keys/secureString.h
+```
+
+15 files modified.  All four build targets clean.  Active edition: studio.
+
+---
+
 ## 2026-05-21 (cancel-deadlock fix + `defaults.ai.*` fallback + cap-scaled budget + Sitting 15 plan) → next session
 
 Long session that started as a quick repro for a cancellation hang JC noticed yesterday running jarvisCppDocu on qwen-7b — and turned into three orthogonal fixes plus a follow-up plan for the cyber-sec gap the day exposed.  **Sitting 7 series remains fully complete** (7a + 7b + 7c per 2026-05-20); none of today's work overlapped with the API-shape sweep.  **Sitting 8 (SecureString-only HTTP) is still the next pre-1.0 follow-up** — was already the recommended next stop in the 2026-05-20 evening hand-off, and today's tangent didn't change that ordering.

@@ -26,6 +26,7 @@
 #include <string>
 #include <vector>
 
+#include "keys/secureString.h"
 #include "workflow/filter/filterEngine.h"
 
 namespace AIAssistant
@@ -60,20 +61,20 @@ namespace AIAssistant
         static constexpr long TIMEOUT_SECONDS = 30;
 
         // Perform a single HTTP GET with Bearer token auth and return the response body.
-        bool HttpGet(std::string const& url, std::string const& bearerToken, std::string& responseBody,
+        bool HttpGet(std::string const& url, SecureString const& bearerToken, std::string& responseBody,
                      std::string& errorMessage) const;
 
         // Perform an HTTP request with an arbitrary method + optional JSON body.
         // Used for PATCH (update) and POST (create) operations.
-        bool HttpRequest(std::string const& method, std::string const& url, std::string const& bearerToken,
+        bool HttpRequest(std::string const& method, std::string const& url, SecureString const& bearerToken,
                          std::string const& requestBody, std::string& responseBody, std::string& errorMessage) const;
 
         // Download a binary file from the given URL to a local path.
-        bool HttpDownloadFile(std::string const& url, std::string const& bearerToken,
+        bool HttpDownloadFile(std::string const& url, SecureString const& bearerToken,
                               std::string const& outputPath, std::string& errorMessage) const;
 
         // Upload a file as a multipart form attachment.
-        bool HttpUploadFile(std::string const& url, std::string const& bearerToken,
+        bool HttpUploadFile(std::string const& url, SecureString const& bearerToken,
                             std::string const& filePath, std::string const& fileName,
                             std::string& responseBody, std::string& errorMessage) const;
 
@@ -83,33 +84,33 @@ namespace AIAssistant
         // ----- Write-back: update work item fields -----
         // PATCH /rest/v1/projects/{project_id}/workitems/{work_item_id}
         bool UpdateWorkItem(std::string const& baseUrl, std::string const& projectId,
-                            std::string const& workItemId, std::string const& bearerToken,
+                            std::string const& workItemId, SecureString const& bearerToken,
                             std::string const& jsonApiPatchBody, std::string& responseBody,
                             std::string& errorMessage) const;
 
         // ----- Creation: create a new work item -----
         // POST /rest/v1/projects/{project_id}/workitems
         bool CreateWorkItem(std::string const& baseUrl, std::string const& projectId,
-                            std::string const& bearerToken, std::string const& jsonApiPostBody,
+                            SecureString const& bearerToken, std::string const& jsonApiPostBody,
                             std::string& responseBody, std::string& errorMessage) const;
 
         // ----- Attachments -----
         // GET /rest/v1/projects/{project_id}/workitems/{work_item_id}/attachments/{attachment_id}/content
         bool DownloadAttachment(std::string const& baseUrl, std::string const& projectId,
                                 std::string const& workItemId, std::string const& attachmentId,
-                                std::string const& bearerToken, std::string const& outputPath,
+                                SecureString const& bearerToken, std::string const& outputPath,
                                 std::string& errorMessage) const;
 
         // POST /rest/v1/projects/{project_id}/workitems/{work_item_id}/attachments
         bool UploadAttachment(std::string const& baseUrl, std::string const& projectId,
-                              std::string const& workItemId, std::string const& bearerToken,
+                              std::string const& workItemId, SecureString const& bearerToken,
                               std::string const& filePath, std::string const& fileName,
                               std::string& responseBody, std::string& errorMessage) const;
 
         // ----- Linked items / traceability -----
         // GET /rest/v1/projects/{project_id}/workitems/{work_item_id}/linkedworkitems
         bool FetchLinkedWorkItems(std::string const& baseUrl, std::string const& projectId,
-                                  std::string const& workItemId, std::string const& bearerToken,
+                                  std::string const& workItemId, SecureString const& bearerToken,
                                   std::string& responseBody, std::string& errorMessage) const;
 
     private:

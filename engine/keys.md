@@ -232,16 +232,19 @@ private:
 Consumer pattern (every cloud connector + every credential consumer):
 
 ```cpp
-std::string bearerToken;
+SecureString bearerToken;  // request-scoped mlock'd buffer; SecureString::Set copies bytes
+                           // into a fresh mlock'd region without going through std::string.
 bool const found = Core::g_Core->GetKeyManager().WithCredential(connection.m_KeyName,
     [&](ICredential const& cred)
     {
         auto const* api = dynamic_cast<ApiKeyCredential const*>(&cred);
         if (!api) { /* wrong type — fail closed, don't fall through to other types */ return; }
-        bearerToken.assign(api->m_ApiKey.Get());  // request-scoped plaintext copy
+        bearerToken.Set(api->m_ApiKey.Get());
     });
 if (!found) { /* not found */ }
-// use bearerToken in Authorization header for the duration of this HTTP request
+// Pass bearerToken to AppendSecretHeader(headers, "Authorization: Bearer ", bearerToken, scratch)
+// or hand SecureString::CStr() to libcurl directly (CURLOPT_PASSWORD etc.) — never concatenate
+// into a std::string. See doc/cyber security.md "SecureString-only HTTP path".
 ```
 
 The `dynamic_cast` cascade is allowlist-style: connectors that legitimately accept multiple
@@ -326,36 +329,13 @@ If absent, defaults to `"keys.json.enc"` in the working directory.
 
 ---
 
-## 8. CurlWrapper Changes
+## 8. CurlWrapper Integration
 
-### Current
+`CurlWrapper` no longer owns the credential.  The credential travels in the request through `CurlWrapper::QueryData::m_ApiKey` (a `SecureString`, mlock'd + zero-on-destruct, non-copyable).  The caller (`AiRequestPool` / `AiCallTaskExecutor` / `TestApiInterface`) resolves the provider via `KeyManager` (callback-scoped `WithCredential` / `WithDefaultCredential`), populates `QueryData::m_ApiKey.Set(view)`, and invokes `Query()`.
 
-```cpp
-// curlWrapper.h
-static std::string m_ApiKey;         // single global key
+Auth-header production is delegated to `IAuthSigner` (`engine/curlWrapper/authSigner.{h,cpp}`).  `Apply()` writes non-secret headers into a `std::vector<std::string>& publicHeaders` and the secret-bearing header (Bearer / x-api-key / x-goog-api-key / api-key, plus SigV4 X-Amz-Security-Token when an STS session token is present) into a caller-owned `SecureString& secretHeader` via `SecureString::Format(prefix, secret.Get())` — single mlock'd allocation, no `std::string` intermediate.  The transport layer (`CurlWrapper::Query` / `LiveTransport::SetupEasyHandle` / `MockTransport`) hands `secretHeader.CStr()` to `curl_slist_append` (or to `CurlSlist::AppendCStr`); libcurl's own `strdup` is the irreducible residue floor and is documented as outside the threat-model boundary.
 
-// curlWrapper.cpp constructor
-char* apiKeyEnv = std::getenv("OPENAI_API_KEY");
-
-// Query()
-headers.Append("Authorization: Bearer " + m_ApiKey);
-```
-
-### New
-
-```cpp
-// curlWrapper.h
-// Remove: static std::string m_ApiKey;
-
-// Query() signature change
-bool Query(QueryData const& queryData, std::string const& apiKey);
-
-// Query() implementation
-headers.Append("Authorization: Bearer " + apiKey);
-```
-
-The caller (`AiRequestPool` / `AiCallTaskExecutor`) resolves the provider via `KeyManager`,
-extracts the key, and passes it to `Query()`.
+For cloud connectors / workflow filters that build secret-bearing headers themselves (rather than going through `IAuthSigner`), the canonical helper is `AppendSecretHeader(curl_slist*&, prefix, SecureString const&, SecureString& scratch)` in `engine/curlWrapper/curlSlistHelper.h`.  See `doc/cyber security.md` "SecureString-only HTTP path" for the full discipline.
 
 ---
 
@@ -482,12 +462,12 @@ The selection is stored as `api_interface` on the task and preserved in `.jcwf` 
 6. ✅ `keys.json` and `keys.json.enc` added to `.gitignore`.
 7. ✅ `premake5.lua` updated.
 
-### Phase 2: Wire KeyManager into request pipeline — *partial*
+### Phase 2: Wire KeyManager into request pipeline — **DONE**
 
-8. ✅ `CurlWrapper::Query()` modified to accept an API key parameter.
-9. ⚠️ `AiCallTaskExecutor` — per-task `api_interface` stored in `.jcwf` but not yet resolved at dispatch time.
-10. ⚠️ Provider's key/endpoint not yet passed to `CurlWrapper::Query()` per interface.
-11. ⚠️ Static `m_ApiKey` still exists in CurlWrapper as fallback.
+8. ✅ `CurlWrapper::QueryData` carries the resolved credential via `SecureString m_ApiKey` (non-copyable).
+9. ✅ `AiCallTaskExecutor` + `AiRequestPool::Submit` resolve per-task `api_interface` and populate `QueryData::m_ApiKey.Set(view)` from the KeyManager callback.
+10. ✅ Provider's key/endpoint resolved per interface and threaded through `QueryData`.
+11. ✅ Legacy static `m_ApiKey` removed from CurlWrapper.
 
 ### Phase 3: Backend API — **DONE**
 

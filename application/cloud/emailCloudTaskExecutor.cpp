@@ -38,6 +38,7 @@
 #include "cloud/emailCloudTaskExecutor.h"
 #include "cloud/emailConnector.h"
 #include "cloud/connectorHttp.h"
+#include "curlWrapper/curlSlistHelper.h"
 #include "curlWrapper/curlWrapper.h"
 #include "json/jsonHelper.h"
 #include "workflow/taskPathResolver.h"
@@ -185,7 +186,7 @@ namespace AIAssistant
 
     // IMAP write callback and command/parse functions are now in EmailConnector.
     // Local aliases for brevity within this file.
-    static bool ImapCommand(std::string const& url, std::string const& username, std::string const& password,
+    static bool ImapCommand(std::string const& url, std::string const& username, SecureString const& password,
                             std::string const& customRequest, std::string& responseBody,
                             std::string& errorMessage, bool useSsl)
     {
@@ -643,7 +644,7 @@ namespace AIAssistant
 
         curl_easy_setopt(curl, CURLOPT_URL, smtpUrl.c_str());
         curl_easy_setopt(curl, CURLOPT_USERNAME, credentials.m_Username.c_str());
-        curl_easy_setopt(curl, CURLOPT_PASSWORD, credentials.m_Password.c_str());
+        curl_easy_setopt(curl, CURLOPT_PASSWORD, credentials.m_Password.CStr());
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, 60L);
 
         auto const& caBundle = CurlWrapper::GetCaBundlePath();

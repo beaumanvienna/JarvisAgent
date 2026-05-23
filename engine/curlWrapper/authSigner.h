@@ -22,6 +22,7 @@
 #pragma once
 
 #include "curlWrapper/curlWrapper.h"
+#include "keys/secureString.h"
 
 #include <string>
 #include <vector>
@@ -34,13 +35,27 @@ namespace AIAssistant
     // CurlWrapper::Query and CurlMultiDispatcher share auth handling without
     // either knowing about specific styles.
     //
-    // Output is a list of complete header strings ("Name: value"); each caller
-    // appends them to its own curl slist representation.
+    // Output is split:
+    //   - `publicHeaders`  — complete header strings ("Name: value") that contain
+    //                        no secret material (Content-Type, anthropic-version,
+    //                        SigV4's X-Amz-Date / Authorization derived-from-secret,
+    //                        etc.).
+    //   - `secretHeader`   — caller-owned SecureString that the signer fills via
+    //                        SecureString::Format() for static-header styles whose
+    //                        Authorization line contains the raw secret (Bearer,
+    //                        x-api-key, x-goog-api-key, api-key).  Empty on return
+    //                        means "no secret-bearing header to emit".  Routing
+    //                        secret-bearing headers through a SecureString keeps
+    //                        the credential in mlock'd / zero-on-destruct memory
+    //                        between IAuthSigner::Apply and curl_slist_append —
+    //                        no plain std::string heap allocation ever holds the
+    //                        secret.  See doc/cyber security.md "SecureString-
+    //                        only HTTP path".
     //
     // Apply returns false on validation failure (empty / whitespace credentials,
     // missing required SigV4 params, etc.) and populates errorMessage with a
-    // short human-readable description.  On false, outHeaders is unchanged so
-    // the caller cannot accidentally send a half-signed request.
+    // short human-readable description.  On false, publicHeaders and secretHeader
+    // are unchanged so the caller cannot accidentally send a half-signed request.
     //
     // The signer subsystem has no run context (no runId / workflowId), so it
     // does NOT emit the failure log — the caller (which has run context) is
@@ -51,7 +66,8 @@ namespace AIAssistant
     public:
         virtual ~IAuthSigner() = default;
         [[nodiscard]] virtual bool Apply(CurlWrapper::QueryData const& queryData,
-                                         std::vector<std::string>& outHeaders,
+                                         std::vector<std::string>& publicHeaders,
+                                         SecureString& secretHeader,
                                          std::string& errorMessage) const = 0;
 
         static IAuthSigner const& Get(CurlWrapper::AuthStyle style);

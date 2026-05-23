@@ -116,11 +116,10 @@ namespace AIAssistant
             ParseControlflow(simdjson::ondemand::value& jsonValue,
                              std::vector<ControlflowEdgeDef>& controlflowOut) const;
 
-        // Utility helpers — kept on the legacy `bool + std::string&` shape per
-        // the Sitting 7c scope decision (plan named only the Parse* methods
-        // and the Require* shape helpers; these utilities sit one layer below
-        // and don't carry useful category information).  Parser methods
-        // bridge their failures into typed `SimdjsonError` at the call site.
+        // Utility helpers — kept on the legacy `bool + std::string&` shape.
+        // They sit one layer below the typed-error Parse* methods and don't
+        // carry useful category information; parser methods bridge their
+        // failures into typed `SimdjsonError` at the call site.
         bool ExtractRawJson(simdjson::ondemand::value& element, std::string& rawJsonOut) const;
 
         bool ElementToString(simdjson::ondemand::value& element, std::string& output) const;

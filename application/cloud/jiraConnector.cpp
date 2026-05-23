@@ -29,6 +29,7 @@
 #include "engine.h"
 #include "keys/credential.h"
 #include "keys/keyManager.h"
+#include "curlWrapper/curlSlistHelper.h"
 #include "curlWrapper/curlWrapper.h"
 #include "cloud/cloudTaskExecutor.h"
 #include "cloud/connectorHttp.h"
@@ -69,12 +70,12 @@ namespace AIAssistant
                 {
                     credentials.m_AuthType = CloudAuthType::BasicAuth;
                     credentials.m_Username = basic->m_Username;
-                    credentials.m_Password = std::string(basic->m_Password.Get());
+                    credentials.m_Password.Set(basic->m_Password.Get());
                 }
                 else if (auto const* api = dynamic_cast<ApiKeyCredential const*>(&cred))
                 {
                     credentials.m_AuthType = CloudAuthType::BearerToken;
-                    credentials.m_Token = std::string(api->m_ApiKey.Get());
+                    credentials.m_Token.Set(api->m_ApiKey.Get());
                 }
                 else
                 {
@@ -114,7 +115,7 @@ namespace AIAssistant
         }
 
         if (credentials.m_AuthType != CloudAuthType::BasicAuth &&
-            ICloudTaskExecutor::ContainsCrlf(credentials.m_Token))
+            ICloudTaskExecutor::ContainsCrlf(credentials.m_Token.Get()))
         {
             ConnectorHttp::IncrementCredentialCrlfRejection();
             LOG_SECURITY_WARN("[security] jira_test_bearer_crlf_rejected connection='{}'", connection.m_Name);
@@ -143,12 +144,12 @@ namespace AIAssistant
         if (credentials.m_AuthType == CloudAuthType::BasicAuth)
         {
             curl_easy_setopt(curl, CURLOPT_USERNAME, credentials.m_Username.c_str());
-            curl_easy_setopt(curl, CURLOPT_PASSWORD, credentials.m_Password.c_str());
+            curl_easy_setopt(curl, CURLOPT_PASSWORD, credentials.m_Password.CStr());
         }
         else
         {
-            std::string authHeader = "Authorization: Bearer " + credentials.m_Token;
-            headers = curl_slist_append(headers, authHeader.c_str());
+            SecureString authScratch;
+            AppendSecretHeader(headers, "Authorization: Bearer ", credentials.m_Token, authScratch);
         }
         headers = curl_slist_append(headers, "Accept: application/json");
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);

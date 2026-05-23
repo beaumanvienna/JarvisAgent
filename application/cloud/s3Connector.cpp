@@ -62,12 +62,12 @@ namespace AIAssistant
                 if (auto const* aws = dynamic_cast<AwsCredential const*>(&cred))
                 {
                     credentials.m_AccessKeyId = aws->m_AccessKeyId;
-                    credentials.m_SecretKey   = std::string(aws->m_SecretAccessKey.Get());
+                    credentials.m_SecretKey.Set(aws->m_SecretAccessKey.Get());
                 }
                 else if (auto const* basic = dynamic_cast<BasicAuthCredential const*>(&cred))
                 {
                     credentials.m_AccessKeyId = basic->m_Username;
-                    credentials.m_SecretKey   = std::string(basic->m_Password.Get());
+                    credentials.m_SecretKey.Set(basic->m_Password.Get());
                 }
                 else if (auto const* api = dynamic_cast<ApiKeyCredential const*>(&cred))
                 {
@@ -76,7 +76,7 @@ namespace AIAssistant
                     if (colonPos != std::string_view::npos && colonPos > 0 && colonPos < apiKeyView.size() - 1)
                     {
                         credentials.m_AccessKeyId = std::string(apiKeyView.substr(0, colonPos));
-                        credentials.m_SecretKey   = std::string(apiKeyView.substr(colonPos + 1));
+                        credentials.m_SecretKey.Set(apiKeyView.substr(colonPos + 1));
                     }
                     else
                     {
@@ -101,7 +101,7 @@ namespace AIAssistant
             return false;
         }
 
-        if (credentials.m_AccessKeyId.empty() || credentials.m_SecretKey.empty())
+        if (credentials.m_AccessKeyId.empty() || credentials.m_SecretKey.IsEmpty())
         {
             errorMessage = "Credential '" + connection.m_KeyName + "' has empty access key or secret";
             return false;

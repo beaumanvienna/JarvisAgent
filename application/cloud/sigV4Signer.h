@@ -25,6 +25,10 @@
 
 #include <map>
 #include <string>
+#include <string_view>
+#include <vector>
+
+#include "keys/secureString.h"
 
 namespace AIAssistant
 {
@@ -47,13 +51,15 @@ namespace AIAssistant
         // url:          Full URL (e.g., "https://bucket.s3.us-east-1.amazonaws.com/key")
         // region:       AWS region (e.g., "us-east-1")
         // service:      AWS service name (always "s3" for S3)
-        // accessKeyId:  AWS access key ID
-        // secretKey:    AWS secret access key
+        // accessKeyId:  AWS access key ID (public per AWS conventions)
+        // secretKey:    AWS secret access key — SecureString so the bytes don't materialise
+        //               into a plain std::string heap allocation between CloudCredentials
+        //               and the HMAC chain.
         // payloadHash:  SHA-256 hex digest of the request body ("UNSIGNED-PAYLOAD" for streaming)
         // extraHeaders: Additional headers to include in the signature (e.g., Content-Type)
         static SignedRequest Sign(std::string const& method, std::string const& url, std::string const& region,
                                   std::string const& service, std::string const& accessKeyId,
-                                  std::string const& secretKey, std::string const& payloadHash,
+                                  SecureString const& secretKey, std::string const& payloadHash,
                                   std::map<std::string, std::string> const& extraHeaders = {});
 
         // Compute SHA-256 hex digest of data.
@@ -63,11 +69,20 @@ namespace AIAssistant
         static std::string const& EmptyPayloadHash();
 
     private:
-        // HMAC-SHA256(key, data) → raw bytes.
-        static std::string HmacSha256(std::string const& key, std::string const& data);
+        // HMAC-SHA256(key, data) → raw bytes in a std::vector<unsigned char>.  Key is
+        // accepted as a byte vector so the signing-key chain (kSecret → kDate → kRegion
+        // → kService → kSigning) propagates byte vectors that get wrapped in
+        // ScopedSecretBytes for OPENSSL_cleanse-on-destruct — no std::string heap
+        // intermediate ever holds the secret bytes.  Shared definition with the engine
+        // SigV4 signer at engine/keys/scopedSecretBytes.h.
+        static std::vector<unsigned char> HmacSha256(std::vector<unsigned char> const& key,
+                                                     std::string_view data);
 
-        // HMAC-SHA256(key, data) → hex string.
-        static std::string HmacSha256Hex(std::string const& key, std::string const& data);
+        // HMAC-SHA256(key, data) → hex string.  Used for the final signature output (the
+        // signature itself is public — goes into the Authorization header) where the
+        // hex serialisation is the wire format.
+        static std::string HmacSha256Hex(std::vector<unsigned char> const& key,
+                                         std::string_view data);
 
         // Parse URL into host, path, query components.
         struct UrlParts

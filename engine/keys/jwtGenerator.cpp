@@ -147,11 +147,11 @@ namespace AIAssistant
         return Base64UrlEncode(std::vector<uint8_t>(data.begin(), data.end()));
     }
 
-    std::string JwtGenerator::Generate(std::string const& payloadJson, std::string const& privateKeyPem,
-                                        std::string& errorMessage)
+    bool JwtGenerator::Generate(std::string const& payloadJson, std::string const& privateKeyPem,
+                                 SecureString& outJwt, std::string& errorMessage)
     {
         EvpPkeyPtr pkey = ParseAndValidateRsaPem(privateKeyPem, errorMessage);
-        if (!pkey) return {};
+        if (!pkey) return false;
 
         // Build the signing input: base64url(RS256_header).base64url(payload).
         // Header is fixed internally — no caller-supplied header that could lie about alg.
@@ -162,38 +162,43 @@ namespace AIAssistant
         if (!mdCtx)
         {
             errorMessage = "Failed to create EVP_MD_CTX";
-            return {};
+            return false;
         }
 
         if (EVP_DigestSignInit(mdCtx.get(), nullptr, EVP_sha256(), nullptr, pkey.get()) != 1)
         {
             errorMessage = "EVP_DigestSignInit failed";
-            return {};
+            return false;
         }
         if (EVP_DigestSignUpdate(mdCtx.get(), signingInput.data(), signingInput.size()) != 1)
         {
             errorMessage = "EVP_DigestSignUpdate failed";
-            return {};
+            return false;
         }
 
         size_t sigLen = 0;
         if (EVP_DigestSignFinal(mdCtx.get(), nullptr, &sigLen) != 1)
         {
             errorMessage = "EVP_DigestSignFinal (length query) failed";
-            return {};
+            return false;
         }
 
         std::vector<uint8_t> signature(sigLen);
         if (EVP_DigestSignFinal(mdCtx.get(), signature.data(), &sigLen) != 1)
         {
             errorMessage = "EVP_DigestSignFinal (sign) failed";
-            return {};
+            return false;
         }
         signature.resize(sigLen);
 
-        std::string jwt = signingInput + "." + Base64UrlEncode(signature);
-        SecretRedactor::Get().AddSecret(jwt);
-        return jwt;
+        // Build the JWT directly into the SecureString output via Build — no local
+        // std::string materialisation.  SecretRedactor::AddSecret takes std::string_view
+        // so the SecureString::Get() view feeds the redactor without a std::string copy
+        // on this side either (the redactor's internal store may copy; that's its own
+        // surface).
+        outJwt.Build({signingInput, ".", Base64UrlEncode(signature)});
+        SecretRedactor::Get().AddSecret(outJwt.Get());
+        return true;
     }
 
     std::string JwtGenerator::ComputePublicKeyFingerprint(std::string const& privateKeyPem, std::string& errorMessage)
@@ -243,14 +248,15 @@ namespace AIAssistant
         return "SHA256:" + b64;
     }
 
-    std::string JwtGenerator::GenerateSnowflakeJwt(std::string const& account, std::string const& user,
-                                                    std::string const& privateKeyPem, std::string& errorMessage)
+    bool JwtGenerator::GenerateSnowflakeJwt(std::string const& account, std::string const& user,
+                                             std::string const& privateKeyPem,
+                                             SecureString& outJwt, std::string& errorMessage)
     {
         // Compute public key fingerprint for the "sub" claim
         std::string fingerprint = ComputePublicKeyFingerprint(privateKeyPem, errorMessage);
         if (fingerprint.empty())
         {
-            return {};
+            return false;
         }
 
         // Uppercase account and user per Snowflake convention.
@@ -287,6 +293,6 @@ namespace AIAssistant
         payload << "\"exp\":" << expiry;
         payload << "}";
 
-        return Generate(payload.str(), privateKeyPem, errorMessage);
+        return Generate(payload.str(), privateKeyPem, outJwt, errorMessage);
     }
 } // namespace AIAssistant

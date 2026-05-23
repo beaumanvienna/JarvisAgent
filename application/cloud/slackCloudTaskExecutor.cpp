@@ -34,6 +34,7 @@
 #include "cloud/slackCloudTaskExecutor.h"
 #include "cloud/slackConnector.h"
 #include "cloud/connectorHttp.h"
+#include "curlWrapper/curlSlistHelper.h"
 #include "curlWrapper/curlWrapper.h"
 #include "file/pathConfinement.h"
 #include "json/jsonHelper.h"
@@ -76,7 +77,7 @@ namespace AIAssistant
 
     // Shared HTTP helper: performs a request to the Slack Web API with Bearer auth.
     // Returns true on CURLE_OK (httpCode set). On failure, populates taskState.m_LastErrorMessage.
-    static bool PerformSlackRequest(std::string const& url, std::string const& postBody, std::string const& token,
+    static bool PerformSlackRequest(std::string const& url, std::string const& postBody, SecureString const& token,
                                     std::string& responseBody, long& httpCode, TaskInstanceState& taskState,
                                     char const* contextLabel)
     {
@@ -102,8 +103,8 @@ namespace AIAssistant
         ConnectorHttp::ApplyHardenedDefaults(curl, url);
 
         struct curl_slist* headers = nullptr;
-        std::string authHeader = "Authorization: Bearer " + token;
-        headers = curl_slist_append(headers, authHeader.c_str());
+        SecureString authScratch;
+        AppendSecretHeader(headers, "Authorization: Bearer ", token, authScratch);
         headers = curl_slist_append(headers, "Content-Type: application/json; charset=utf-8");
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
 

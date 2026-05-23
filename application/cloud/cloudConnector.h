@@ -29,6 +29,7 @@
 #include <string_view>
 
 #include "cloud/connectorError.h"
+#include "keys/secureString.h"
 
 namespace AIAssistant
 {
@@ -48,14 +49,24 @@ namespace AIAssistant
     // the ICredential hierarchy (ApiKeyCredential, OAuthCredential, etc.). CloudCredentials
     // is what connectors produce after resolving and refreshing stored credentials into a
     // form ready for immediate use in HTTP headers / connection strings.
+    //
+    // m_Token / m_SecretKey / m_Password are SecureString: the secret never appears in a
+    // plain std::string heap allocation between the connector's ResolveCredentials() and
+    // libcurl's internal copy.  Populate with `.Set(view)`; read via `.Get()` (string_view)
+    // or `.CStr()` (NUL-terminated const char*); pass to curl through AppendSecretHeader
+    // (engine/curlWrapper/curlSlistHelper.h) for "Authorization: Bearer <secret>" headers
+    // or via curl_easy_setopt(CURLOPT_PASSWORD, secret.CStr()) for BasicAuth.  Non-copyable
+    // by design — std::string + non-copyable members makes CloudCredentials movable but
+    // not copyable; callers that need a duplicate should not need one (each request scope
+    // builds its own credentials).
     struct CloudCredentials
     {
         CloudAuthType m_AuthType{CloudAuthType::BearerToken};
-        std::string m_Token;       // Bearer/OAuth token or JWT
-        std::string m_AccessKeyId; // SigV4
-        std::string m_SecretKey;   // SigV4
-        std::string m_Username;    // BasicAuth
-        std::string m_Password;    // BasicAuth
+        SecureString m_Token;       // Bearer/OAuth token or JWT (secret)
+        std::string  m_AccessKeyId; // SigV4 access_key_id — public per AWS conventions
+        SecureString m_SecretKey;   // SigV4 secret_access_key (secret)
+        std::string  m_Username;    // BasicAuth username — non-secret (logged for audit)
+        SecureString m_Password;    // BasicAuth password (secret)
     };
 
     // Configuration for a named cloud connection (persisted in config.json).

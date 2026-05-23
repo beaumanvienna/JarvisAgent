@@ -54,7 +54,7 @@ namespace AIAssistant
         // behaviour is version-dependent; never rely on the library for a check
         // we can perform cheaply ourselves.  Public because some cloud executors
         // call this from file-local static helpers (not member functions).
-        static bool ContainsCrlf(std::string const& s);
+        static bool ContainsCrlf(std::string_view s);
 
     protected:
         // Subclasses implement this with the actual cloud operation.

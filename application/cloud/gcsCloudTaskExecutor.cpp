@@ -34,6 +34,7 @@
 #include "cloud/gcsCloudTaskExecutor.h"
 #include "cloud/gcsConnector.h"
 #include "cloud/connectorHttp.h"
+#include "curlWrapper/curlSlistHelper.h"
 #include "curlWrapper/curlWrapper.h"
 #include "json/jsonHelper.h"
 #include "workflow/taskPathResolver.h"
@@ -82,13 +83,13 @@ namespace AIAssistant
     }
 
     // Helper: perform GCS HTTP request with Bearer token auth
-    static bool GcsRequest(std::string const& method, std::string const& url, std::string const& accessToken,
+    static bool GcsRequest(std::string const& method, std::string const& url, SecureString const& accessToken,
                            std::string& responseBody, long& httpCode, std::string const& contentType = {},
                            char const* uploadData = nullptr, size_t uploadSize = 0)
     {
         // Reject CR/LF in the bearer token before splicing into the Authorization
         // header.  Same defensive check as the Snowflake JWT path.
-        if (ICloudTaskExecutor::ContainsCrlf(accessToken))
+        if (ICloudTaskExecutor::ContainsCrlf(accessToken.Get()))
         {
             ConnectorHttp::IncrementCredentialCrlfRejection();
             LOG_SECURITY_WARN("[security] gcs_bearer_crlf_rejected");
@@ -133,7 +134,8 @@ namespace AIAssistant
         }
 
         struct curl_slist* headers = nullptr;
-        headers = curl_slist_append(headers, ("Authorization: Bearer " + accessToken).c_str());
+        [[maybe_unused]] SecureString authScratch_inline;
+        AppendSecretHeader(headers, "Authorization: Bearer ", accessToken, authScratch_inline);
         if (!contentType.empty())
         {
             headers = curl_slist_append(headers, ("Content-Type: " + contentType).c_str());
@@ -149,11 +151,11 @@ namespace AIAssistant
     }
 
     // Helper: download GCS object to a file
-    static bool GcsDownload(std::string const& url, std::string const& accessToken, std::string const& outputPath,
+    static bool GcsDownload(std::string const& url, SecureString const& accessToken, std::string const& outputPath,
                             std::string& errorMessage)
     {
         // Reject CR/LF in the bearer token (parallel to GcsRequest).
-        if (ICloudTaskExecutor::ContainsCrlf(accessToken))
+        if (ICloudTaskExecutor::ContainsCrlf(accessToken.Get()))
         {
             ConnectorHttp::IncrementCredentialCrlfRejection();
             LOG_SECURITY_WARN("[security] gcs_bearer_crlf_rejected (download)");
@@ -186,7 +188,8 @@ namespace AIAssistant
         ConnectorHttp::ApplyHardenedDefaults(curl, url);
 
         struct curl_slist* headers = nullptr;
-        headers = curl_slist_append(headers, ("Authorization: Bearer " + accessToken).c_str());
+        [[maybe_unused]] SecureString authScratch_inline;
+        AppendSecretHeader(headers, "Authorization: Bearer ", accessToken, authScratch_inline);
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
 
         CURLcode res = curl_easy_perform(curl);

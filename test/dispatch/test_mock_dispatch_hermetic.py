@@ -9,9 +9,8 @@ network calls — MockTransport replays the fixture body through the real
 ReplyParserAPI1, exercising the dispatcher's full code path (AIMD admission,
 retry queue, parser dispatch).
 
-Replaces the pre-Sitting-2 `test_testinterface_hermetic.py` which exercised
-the now-removed TestInterface short-circuit.  See Foundation Sitting 2 of
-`doc/misc/ai-provider-error-visibility-dev-plan.md`.
+Supersedes the legacy `test_testinterface_hermetic.py` which exercised the
+now-removed TestInterface short-circuit.
 
 Runs against a live JarvisAgent instance (default https://localhost:8443).
 Requires an MCP admin key via --token or the J9T_TOKEN env var.

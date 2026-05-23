@@ -33,6 +33,7 @@
 #include "cloud/gitHubCloudTaskExecutor.h"
 #include "cloud/gitHubConnector.h"
 #include "cloud/connectorHttp.h"
+#include "curlWrapper/curlSlistHelper.h"
 #include "curlWrapper/curlWrapper.h"
 #include "file/pathConfinement.h"
 #include "json/jsonHelper.h"
@@ -172,7 +173,7 @@ namespace AIAssistant
         return result;
     }
 
-    static bool GitHubRequest(std::string const& method, std::string const& url, std::string const& token,
+    static bool GitHubRequest(std::string const& method, std::string const& url, SecureString const& token,
                               std::string& responseBody, long& httpCode, std::string const& requestBody = {})
     {
         CURL* curl = curl_easy_init();
@@ -208,8 +209,8 @@ namespace AIAssistant
         }
 
         struct curl_slist* headers = nullptr;
-        std::string authHeader = "Authorization: Bearer " + token;
-        headers = curl_slist_append(headers, authHeader.c_str());
+        SecureString authScratch;
+        AppendSecretHeader(headers, "Authorization: Bearer ", token, authScratch);
         headers = curl_slist_append(headers, "Accept: application/vnd.github+json");
         if (!requestBody.empty())
         {

@@ -21,6 +21,8 @@
 
 #pragma once
 
+#include "keys/secureString.h"
+
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -37,18 +39,27 @@ namespace AIAssistant
     class JwtGenerator
     {
     public:
-        // Generate an RS256-signed JWT for the given payload claims.
-        // The header `{"alg":"RS256","typ":"JWT"}` is built internally.
-        // privateKeyPem must be an RSA private key in PEM format (minimum 2048 bits).
-        // Returns the signed JWT string (header.payload.signature) or empty string on failure.
-        static std::string Generate(std::string const& payloadJson, std::string const& privateKeyPem,
-                                    std::string& errorMessage);
+        // Generate an RS256-signed JWT for the given payload claims.  Writes the
+        // signed JWT (header.payload.signature) into outJwt and returns true on
+        // success; returns false + populates errorMessage on failure.  The header
+        // `{"alg":"RS256","typ":"JWT"}` is built internally; privateKeyPem must be
+        // an RSA private key in PEM format (minimum 2048 bits).  Out-param
+        // SecureString (rather than return-by-value std::string) keeps the signed
+        // JWT — itself authentication-bearing material until expiry — in mlock'd,
+        // zero-on-destruct memory.
+        [[nodiscard]] static bool Generate(std::string const& payloadJson,
+                                            std::string const& privateKeyPem,
+                                            SecureString& outJwt,
+                                            std::string& errorMessage);
 
-        // Convenience: generate a Snowflake-specific JWT.
-        // Account and user are uppercased per Snowflake convention.
-        // The JWT has a 1-hour expiry.
-        static std::string GenerateSnowflakeJwt(std::string const& account, std::string const& user,
-                                                 std::string const& privateKeyPem, std::string& errorMessage);
+        // Convenience: generate a Snowflake-specific JWT.  Writes the signed JWT
+        // into outJwt and returns true on success.  Account and user are
+        // uppercased per Snowflake convention.  The JWT has a 1-hour expiry.
+        [[nodiscard]] static bool GenerateSnowflakeJwt(std::string const& account,
+                                                       std::string const& user,
+                                                       std::string const& privateKeyPem,
+                                                       SecureString& outJwt,
+                                                       std::string& errorMessage);
 
     private:
         static std::string Base64UrlEncode(std::vector<uint8_t> const& data);

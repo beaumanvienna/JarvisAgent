@@ -59,7 +59,7 @@ namespace AIAssistant
                 }
                 credentials.m_AuthType = CloudAuthType::BasicAuth;
                 credentials.m_Username = basic->m_Username;
-                credentials.m_Password = std::string(basic->m_Password.Get());
+                credentials.m_Password.Set(basic->m_Password.Get());
                 if (credentials.m_Username.empty())
                 {
                     errorMessage = "Credential '" + connection.m_KeyName + "' has no username for PostgreSQL";
@@ -226,8 +226,8 @@ namespace AIAssistant
         return true;
     }
 
-    std::string PostgresConnector::BuildConnectionString(CloudConnection const& connection,
-                                                          CloudCredentials const& credentials)
+    PostgresConnector::ConnectParams PostgresConnector::BuildConnectParams(
+        CloudConnection const& connection, CloudCredentials const& credentials)
     {
         std::string host;
         std::string port;
@@ -250,36 +250,54 @@ namespace AIAssistant
         // an invalid value never makes it into the connection string.
         std::string const sslmode = paramOrDefault("sslmode", "require");
 
-        // Build connection string — libpq keyword/value format.
-        // Use single-quote escaping for values that might contain special chars.
-        auto escape = [](std::string const& val) -> std::string
+        // libpq keyword/value arrays — PQconnectdbParams consumes parallel const char*
+        // arrays directly, no string assembly needed.  No escaping required either:
+        // PQconnectdbParams takes each value verbatim (the historical single-quote
+        // escaping was only necessary because PQconnectdb parses a single string
+        // with its own quoting rules — that parsing layer is now bypassed).
+        ConnectParams out;
+        bool const hasPassword = !credentials.m_Password.IsEmpty();
+        size_t const fieldCount = hasPassword ? 7 : 6;
+        out.m_NonSecretValues.reserve(fieldCount);
+        out.m_Keys.reserve(fieldCount + 1);
+        out.m_Values.reserve(fieldCount + 1);
+
+        auto appendNonSecret = [&](char const* keyword, std::string value)
         {
-            std::string out = "'";
-            for (char c : val)
-            {
-                if (c == '\\' || c == '\'')
-                {
-                    out += '\\';
-                }
-                out += c;
-            }
-            out += "'";
-            return out;
+            out.m_NonSecretValues.emplace_back(std::move(value));
+            out.m_Keys.push_back(keyword);
+            // Defer m_Values pointer capture until after the vector finishes growing.
         };
 
-        std::string connStr;
-        connStr += "host=" + escape(host);
-        connStr += " port=" + escape(port);
-        connStr += " dbname=" + escape(database);
-        connStr += " user=" + escape(credentials.m_Username);
-        if (!credentials.m_Password.empty())
-        {
-            connStr += " password=" + escape(credentials.m_Password);
-        }
-        connStr += " sslmode=" + escape(sslmode);
-        connStr += " connect_timeout=10";
+        appendNonSecret("host", host);
+        appendNonSecret("port", port);
+        appendNonSecret("dbname", database);
+        appendNonSecret("user", credentials.m_Username);
+        appendNonSecret("sslmode", sslmode);
+        appendNonSecret("connect_timeout", "10");
 
-        return connStr;
+        // Now that m_NonSecretValues is fully populated and won't reallocate, capture
+        // the c_str() pointers into m_Values.
+        for (auto const& v : out.m_NonSecretValues)
+        {
+            out.m_Values.push_back(v.c_str());
+        }
+
+        if (hasPassword)
+        {
+            // Password slot points directly at the SecureString's NUL-terminated buffer.
+            // libpq will copy internally into a PGconn-owned allocation (the libpq floor
+            // — outside our threat-model boundary).  Until then, the only heap copy of
+            // the password bytes is inside the SecureString itself.
+            out.m_Keys.push_back("password");
+            out.m_Values.push_back(credentials.m_Password.CStr());
+        }
+
+        // libpq requires NULL terminators on both arrays.
+        out.m_Keys.push_back(nullptr);
+        out.m_Values.push_back(nullptr);
+
+        return out;
     }
 
     std::expected<void, ConnectorError> PostgresConnector::TestConnection(CloudConnection const& connection)
@@ -325,8 +343,8 @@ namespace AIAssistant
             return std::unexpected(ConnectorError::Make(ConnectorErrorCode::CredentialMissing, std::move(credErr)));
         }
 
-        std::string connStr = BuildConnectionString(connection, credentials);
-        PGconn* conn = PQconnectdb(connStr.c_str());
+        ConnectParams const params = BuildConnectParams(connection, credentials);
+        PGconn* conn = PQconnectdbParams(params.m_Keys.data(), params.m_Values.data(), /*expand_dbname=*/0);
 
         if (PQstatus(conn) != CONNECTION_OK)
         {

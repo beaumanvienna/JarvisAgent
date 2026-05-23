@@ -23,11 +23,14 @@
 
 #include "cloud/azureSharedKeySigner.h"
 
+#include "keys/scopedSecretBytes.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <ctime>
 #include <sstream>
+#include <utility>
 #include <vector>
 
 #include <openssl/bio.h>
@@ -41,7 +44,8 @@ namespace AIAssistant
     // HMAC-SHA256 and Base64
     // =====================================================================
 
-    std::string AzureSharedKeySigner::HmacSha256(std::string const& key, std::string const& data)
+    std::string AzureSharedKeySigner::HmacSha256(std::vector<unsigned char> const& key,
+                                                 std::string_view data)
     {
         unsigned char result[EVP_MAX_MD_SIZE];
         unsigned int resultLen = 0;
@@ -70,7 +74,7 @@ namespace AIAssistant
         return encoded;
     }
 
-    std::string AzureSharedKeySigner::Base64Decode(std::string const& encoded)
+    std::vector<unsigned char> AzureSharedKeySigner::Base64Decode(std::string_view encoded)
     {
         BIO* b64 = BIO_new(BIO_f_base64());
         BIO* mem = BIO_new_mem_buf(encoded.data(), static_cast<int>(encoded.size()));
@@ -86,8 +90,8 @@ namespace AIAssistant
         {
             return {};
         }
-
-        return std::string(reinterpret_cast<char const*>(buffer.data()), static_cast<size_t>(decodedLen));
+        buffer.resize(static_cast<size_t>(decodedLen));
+        return buffer;
     }
 
     // =====================================================================
@@ -230,7 +234,7 @@ namespace AIAssistant
 
     AzureSharedKeySigner::SignedRequest AzureSharedKeySigner::Sign(std::string const& method, std::string const& url,
                                                                    std::string const& accountName,
-                                                                   std::string const& accountKey,
+                                                                   SecureString const& accountKey,
                                                                    std::map<std::string, std::string> const& extraHeaders,
                                                                    size_t contentLength)
     {
@@ -274,11 +278,16 @@ namespace AIAssistant
                                    CanonicalizedHeaders(allHeaders) +
                                    CanonicalizedResource(accountName, urlParts.m_Path, urlParts.m_Query);
 
-        // Decode the Base64-encoded account key to raw bytes
-        std::string rawKey = Base64Decode(accountKey);
+        // Decode the Base64-encoded account key into a byte vector wrapped in
+        // ScopedSecretBytes so OPENSSL_cleanse zeros the buffer on scope exit —
+        // including on throw from any subsequent operation.  Shared definition in
+        // engine/keys/scopedSecretBytes.h.
+        ScopedSecretBytes const rawKey{Base64Decode(accountKey.Get())};
 
-        // HMAC-SHA256 sign and Base64-encode the signature
-        std::string signature = Base64Encode(HmacSha256(rawKey, stringToSign));
+        // HMAC-SHA256 sign and Base64-encode the signature.  The HMAC output (the
+        // signature) is public on the wire, so the std::string intermediate inside
+        // the Base64Encode wrap is non-secret.
+        std::string signature = Base64Encode(HmacSha256(rawKey.m_Data, stringToSign));
 
         // Build output headers
         SignedRequest result;

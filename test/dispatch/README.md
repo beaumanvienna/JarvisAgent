@@ -16,9 +16,9 @@ export J9T_TOKEN=mcp_...                 # or pass --token on the CLI
 
 ### Offline / no live AI
 
-These tests drive the refactored dispatch end-to-end without any network
-call outside localhost.  `MockTransport` (Foundation Sitting 2, 2026-05-14)
-is used as the hermetic AI backend — the dispatcher routes calls whose
+These tests drive the dispatcher end-to-end without any network call outside
+localhost.  `MockTransport` is the hermetic AI backend — the dispatcher routes
+calls whose
 interface has `is_mock: true` through MockTransport's fixture-replay path
 instead of LiveTransport's real curl.  Crucially MockTransport feeds the
 response body through the **real** ReplyParserAPI{1..6}, AIMD controller,
@@ -38,7 +38,7 @@ python3 test/dispatch/test_cross_workflow_parallel.py      # cross-workflow conc
 python3 test/dispatch/test_rate_limit_observation_parse.py # §14 Tier A: per-provider strategy parser contract
 ```
 
-### Per-API parser-fault batteries (Foundation Sitting 3, 2026-05-15)
+### Per-API parser-fault batteries
 
 One thin driver per InterfaceType iterating over a 6-case fixture battery
 (success / billing-exhausted / rate-throttled / auth-failed / overloaded /
@@ -224,8 +224,8 @@ to a MockTransport interface backed by `fixtures/api1/utf8_heavy.json`
 emoji, accented Latin, math symbols, RTL Arabic + Hebrew, combining
 diacritics. ~420 tasks, ~16 s wall.
 
-`test_tui_stress_malformed_utf8.py` (Foundation Sitting 3, 2026-05-15)
-drives 14 distinct stress fixtures × 7 burst (≈98 concurrent dispatches)
+`test_tui_stress_malformed_utf8.py` drives 14 distinct stress fixtures × 7 burst
+(≈98 concurrent dispatches)
 spanning all 6 InterfaceTypes' `malformed_utf8.json` + `truncated_response.json`,
 plus `api1/ugly_csi_escapes.json` (real ESC / BEL / BS / CAN / SUB / OSC
 control bytes via JSON `\uXXXX` escapes) and `api1/ugly_real_world.json`
@@ -299,7 +299,7 @@ Note on InterfaceType mapping (authoritative per the code):
   math symbols, RTL Arabic + Hebrew, combining diacritics).  Drives the
   jarvisCpp-driven TUI byte-safety stress test.
 * `fixtures/api{1..6}/{golden_success,error_billing,error_throttle,error_auth,error_overload,malformed_utf8,truncated_response}.json`
-  — Foundation Sitting 3 per-API parser-fault battery.  Each error fixture
+  — per-API parser-fault battery.  Each error fixture
   pairs with a `.meta.json` sidecar setting `http_status` (and `Retry-After`
   on throttle / overload).  Body shapes match each provider's real response
   envelope: api1+api2+api6 use OpenAI shape; api3 uses Gemini envelope

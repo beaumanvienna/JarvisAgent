@@ -77,7 +77,7 @@ namespace AIAssistant
             if (!stopping)
             {
                 PendingRequest pending;
-                pending.m_QueryData = data;
+                pending.m_QueryData = data.Clone();
                 pending.m_Callback = std::move(callback);
                 m_Inbox.push(std::move(pending));
             }
@@ -437,7 +437,7 @@ namespace AIAssistant
             pd->m_RetryCount   = pending.m_RetryCount;
             pd->m_InterfaceType = pending.m_QueryData.m_InterfaceType;
             pd->m_Callback     = std::move(pending.m_Callback);
-            pd->m_QueryData    = pending.m_QueryData;  // copy for retry path
+            pd->m_QueryData    = pending.m_QueryData.Clone();  // deep copy (incl. SecureString) for retry path
             m_Active[id] = std::move(pd);
 
             if (!host.empty())

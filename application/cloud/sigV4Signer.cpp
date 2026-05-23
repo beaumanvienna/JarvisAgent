@@ -23,6 +23,8 @@
 
 #include "cloud/sigV4Signer.h"
 
+#include "keys/scopedSecretBytes.h"
+
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -68,20 +70,22 @@ namespace AIAssistant
         return hash;
     }
 
-    std::string SigV4Signer::HmacSha256(std::string const& key, std::string const& data)
+    std::vector<unsigned char> SigV4Signer::HmacSha256(std::vector<unsigned char> const& key,
+                                                       std::string_view data)
     {
-        unsigned char result[EVP_MAX_MD_SIZE];
+        std::vector<unsigned char> out(EVP_MAX_MD_SIZE);
         unsigned int resultLen = 0;
 
         HMAC(EVP_sha256(), key.data(), static_cast<int>(key.size()),
-             reinterpret_cast<unsigned char const*>(data.data()), data.size(), result, &resultLen);
+             reinterpret_cast<unsigned char const*>(data.data()), data.size(), out.data(), &resultLen);
 
-        return std::string(reinterpret_cast<char const*>(result), resultLen);
+        out.resize(resultLen);
+        return out;
     }
 
-    std::string SigV4Signer::HmacSha256Hex(std::string const& key, std::string const& data)
+    std::string SigV4Signer::HmacSha256Hex(std::vector<unsigned char> const& key, std::string_view data)
     {
-        std::string raw = HmacSha256(key, data);
+        std::vector<unsigned char> raw = HmacSha256(key, data);
 
         std::ostringstream hex;
         hex << std::hex << std::setfill('0');
@@ -255,7 +259,7 @@ namespace AIAssistant
 
     SigV4Signer::SignedRequest SigV4Signer::Sign(std::string const& method, std::string const& url,
                                                   std::string const& region, std::string const& service,
-                                                  std::string const& accessKeyId, std::string const& secretKey,
+                                                  std::string const& accessKeyId, SecureString const& secretKey,
                                                   std::string const& payloadHash,
                                                   std::map<std::string, std::string> const& extraHeaders)
     {
@@ -302,14 +306,32 @@ namespace AIAssistant
         std::string stringToSign =
             "AWS4-HMAC-SHA256\n" + amzDate + "\n" + credentialScope + "\n" + Sha256Hex(canonicalRequest);
 
-        // Step 4: Signing key (derived from secret)
-        std::string kDate = HmacSha256("AWS4" + secretKey, dateStamp);
-        std::string kRegion = HmacSha256(kDate, region);
-        std::string kService = HmacSha256(kRegion, service);
-        std::string kSigning = HmacSha256(kService, "aws4_request");
+        // Step 4: Signing key (derived from secret).  Each intermediate is wrapped in
+        // ScopedSecretBytes so OPENSSL_cleanse zeros the heap buffer on scope exit —
+        // including on throw from any subsequent operation.  Shared definition in
+        // engine/keys/scopedSecretBytes.h.
+        //
+        // Build kSecret as a raw byte vector ("AWS4" || secret_access_key) to avoid a
+        // std::string heap intermediate that would hold the full raw secret on the heap
+        // until ScopedSecretBytes is constructed.
+        std::vector<unsigned char> kSecretBytes;
+        {
+            auto const prefix = std::string_view{"AWS4"};
+            auto const secret = secretKey.Get();
+            kSecretBytes.reserve(prefix.size() + secret.size());
+            kSecretBytes.insert(kSecretBytes.end(), prefix.begin(), prefix.end());
+            kSecretBytes.insert(kSecretBytes.end(), secret.begin(), secret.end());
+        }
+        ScopedSecretBytes const kSecret{std::move(kSecretBytes)};
+        ScopedSecretBytes const kDate{HmacSha256(kSecret.m_Data, dateStamp)};
+        ScopedSecretBytes const kRegion{HmacSha256(kDate.m_Data, region)};
+        ScopedSecretBytes const kService{HmacSha256(kRegion.m_Data, service)};
+        ScopedSecretBytes const kSigning{HmacSha256(kService.m_Data, "aws4_request")};
 
-        // Step 5: Signature
-        std::string signature = HmacSha256Hex(kSigning, stringToSign);
+        // Step 5: Signature — hex-encoded HMAC of stringToSign using kSigning.  The
+        // signature itself is public (goes in the Authorization header) so std::string
+        // is the right output type.
+        std::string signature = HmacSha256Hex(kSigning.m_Data, stringToSign);
 
         // Step 6: Authorization header
         std::string authorization = "AWS4-HMAC-SHA256 Credential=" + accessKeyId + "/" + credentialScope +

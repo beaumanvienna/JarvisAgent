@@ -272,8 +272,8 @@ namespace AIAssistant
         }
     }
 
-    bool ICloudTaskExecutor::ContainsCrlf(std::string const& s)
+    bool ICloudTaskExecutor::ContainsCrlf(std::string_view s)
     {
-        return s.find('\r') != std::string::npos || s.find('\n') != std::string::npos;
+        return s.find('\r') != std::string_view::npos || s.find('\n') != std::string_view::npos;
     }
 } // namespace AIAssistant

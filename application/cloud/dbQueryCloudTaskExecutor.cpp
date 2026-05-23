@@ -290,9 +290,14 @@ namespace AIAssistant
         }
 
         // Connect to PostgreSQL.  RAII deleters release the handle on every
-        // exit path (early returns, exceptions, scope end).
-        std::string const connStr = PostgresConnector::BuildConnectionString(connection, credentials);
-        PgConnPtr conn(PQconnectdb(connStr.c_str()));
+        // exit path (early returns, exceptions, scope end).  PQconnectdbParams
+        // takes parallel keyword/value const char* arrays so the password slot
+        // points directly at SecureString::CStr() — no std::string heap copy of
+        // the secret outside libpq.  See PostgresConnector::ConnectParams.
+        PostgresConnector::ConnectParams const params =
+            PostgresConnector::BuildConnectParams(connection, credentials);
+        PgConnPtr conn(PQconnectdbParams(params.m_Keys.data(), params.m_Values.data(),
+                                          /*expand_dbname=*/0));
         if (!conn)
         {
             // libpq returns nullptr only on OOM (extremely rare).  Surface it

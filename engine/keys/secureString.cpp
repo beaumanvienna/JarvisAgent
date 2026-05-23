@@ -140,6 +140,55 @@ namespace AIAssistant
         m_Size = value.size();
     }
 
+    void SecureString::Format(std::string_view prefix, std::string_view secretView,
+                              std::string_view suffix)
+    {
+        Build({prefix, secretView, suffix});
+    }
+
+    void SecureString::Build(std::initializer_list<std::string_view> pieces)
+    {
+        size_t total = 0;
+        for (auto const& p : pieces)
+        {
+            total += p.size();
+        }
+        size_t const needed = total + 1; // trailing NUL so CStr() is well-defined
+
+        // Strong exception guarantee: assemble into a temporary mlock'd buffer
+        // first, then swap.  A bad_alloc inside the allocator leaves *this
+        // unchanged and the partial allocation is dropped.
+        char* tmpBuffer = static_cast<char*>(std::malloc(needed));
+        if (!tmpBuffer)
+        {
+            LOG_CORE_ERROR("SecureString::Build: allocation of {} bytes failed", needed);
+            return;
+        }
+        if (!LockMemory(tmpBuffer, needed))
+        {
+            // Non-fatal: we still have a valid buffer, it just may be swappable.
+            LOG_CORE_WARN("SecureString::Build: memory lock failed ({} bytes) — swap protection disabled",
+                          needed);
+        }
+        char* cursor = tmpBuffer;
+        for (auto const& p : pieces)
+        {
+            if (!p.empty())
+            {
+                std::memcpy(cursor, p.data(), p.size());
+                cursor += p.size();
+            }
+        }
+        *cursor = '\0';
+
+        // Wipe + munlock + free the prior buffer (Release), then take ownership
+        // of the freshly-built tmp.  Until this point *this was unchanged.
+        Release();
+        m_Buffer = tmpBuffer;
+        m_Capacity = needed;
+        m_Size = total;
+    }
+
     std::string_view SecureString::Get() const
     {
         if (!m_Buffer || m_Size == 0)
@@ -147,6 +196,14 @@ namespace AIAssistant
             return {};
         }
         return {m_Buffer, m_Size};
+    }
+
+    char const* SecureString::CStr() const
+    {
+        // m_Buffer is null when the SecureString has never held content.  Set()
+        // and Format() always write a trailing NUL at m_Buffer[m_Size], so when
+        // m_Buffer is non-null CStr() is safe to hand to C APIs even if Size()==0.
+        return m_Buffer ? m_Buffer : "";
     }
 
     void SecureString::Clear()

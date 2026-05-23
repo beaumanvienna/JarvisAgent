@@ -34,6 +34,7 @@
 #include "auxiliary/file.h"
 #include "core.h"
 #include "engine.h"
+#include "curlWrapper/curlSlistHelper.h"
 #include "curlWrapper/curlWrapper.h"
 #include "cloud/connectorHttp.h"
 #include "file/pathConfinement.h"
@@ -137,9 +138,10 @@ namespace AIAssistant
             return {};
         }
 
-        // Polarion PAT: api_key stores the Bearer token (Personal Access Token).  Materialise
-        // SecureString into request-scoped std::string for the HTTPS calls below.
-        std::string bearerToken;
+        // Polarion PAT: api_key stores the Bearer token (Personal Access Token).  Held in a
+        // request-scoped SecureString so the secret never touches a plain std::string heap
+        // allocation between KeyManager and curl_slist_append.
+        SecureString bearerToken;
         bool const found = Core::g_Core->GetKeyManager().WithCredential(source.m_KeyName,
             [&](ICredential const& cred)
             {
@@ -156,7 +158,7 @@ namespace AIAssistant
                                    "' is missing api_key (Bearer token)";
                     return;
                 }
-                bearerToken.assign(api->m_ApiKey.Get());
+                bearerToken.Set(api->m_ApiKey.Get());
             });
         if (!found)
         {
@@ -315,7 +317,7 @@ namespace AIAssistant
     // HttpGet — single GET request with Bearer token (PAT) auth
     // =================================================================
 
-    bool PolarionClient::HttpGet(std::string const& url, std::string const& bearerToken, std::string& responseBody,
+    bool PolarionClient::HttpGet(std::string const& url, SecureString const& bearerToken, std::string& responseBody,
                                  std::string& errorMessage) const
     {
         CURL* curl = curl_easy_init();
@@ -345,8 +347,8 @@ namespace AIAssistant
         ConnectorHttp::ApplyHardenedDefaults(curl, url);
 
         struct curl_slist* headers = nullptr;
-        std::string const authHeader = "Authorization: Bearer " + bearerToken;
-        headers = curl_slist_append(headers, authHeader.c_str());
+        SecureString authScratch;
+        AppendSecretHeader(headers, "Authorization: Bearer ", bearerToken, authScratch);
         headers = curl_slist_append(headers, "Accept: application/vnd.api+json");
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
 
@@ -383,7 +385,7 @@ namespace AIAssistant
     // =================================================================
 
     bool PolarionClient::HttpRequest(std::string const& method, std::string const& url,
-                                     std::string const& bearerToken, std::string const& requestBody,
+                                     SecureString const& bearerToken, std::string const& requestBody,
                                      std::string& responseBody, std::string& errorMessage) const
     {
         CURL* curl = curl_easy_init();
@@ -413,8 +415,8 @@ namespace AIAssistant
         ConnectorHttp::ApplyHardenedDefaults(curl, url);
 
         struct curl_slist* headers = nullptr;
-        std::string const authHeader = "Authorization: Bearer " + bearerToken;
-        headers = curl_slist_append(headers, authHeader.c_str());
+        SecureString authScratch;
+        AppendSecretHeader(headers, "Authorization: Bearer ", bearerToken, authScratch);
         headers = curl_slist_append(headers, "Content-Type: application/vnd.api+json");
         headers = curl_slist_append(headers, "Accept: application/vnd.api+json");
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
@@ -457,7 +459,7 @@ namespace AIAssistant
     // HttpDownloadFile — download binary content to a local file
     // =================================================================
 
-    bool PolarionClient::HttpDownloadFile(std::string const& url, std::string const& bearerToken,
+    bool PolarionClient::HttpDownloadFile(std::string const& url, SecureString const& bearerToken,
                                           std::string const& outputPath, std::string& errorMessage) const
     {
         CURL* curl = curl_easy_init();
@@ -486,8 +488,8 @@ namespace AIAssistant
         ConnectorHttp::ApplyHardenedDefaults(curl, url);
 
         struct curl_slist* headers = nullptr;
-        std::string const authHeader = "Authorization: Bearer " + bearerToken;
-        headers = curl_slist_append(headers, authHeader.c_str());
+        SecureString authScratch;
+        AppendSecretHeader(headers, "Authorization: Bearer ", bearerToken, authScratch);
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
 
         CURLcode res = curl_easy_perform(curl);
@@ -518,7 +520,7 @@ namespace AIAssistant
     // HttpUploadFile — multipart form upload
     // =================================================================
 
-    bool PolarionClient::HttpUploadFile(std::string const& url, std::string const& bearerToken,
+    bool PolarionClient::HttpUploadFile(std::string const& url, SecureString const& bearerToken,
                                         std::string const& filePath, std::string const& fileName,
                                         std::string& responseBody, std::string& errorMessage) const
     {
@@ -555,8 +557,8 @@ namespace AIAssistant
         ConnectorHttp::ApplyHardenedDefaults(curl, url);
 
         struct curl_slist* headers = nullptr;
-        std::string const authHeader = "Authorization: Bearer " + bearerToken;
-        headers = curl_slist_append(headers, authHeader.c_str());
+        SecureString authScratch;
+        AppendSecretHeader(headers, "Authorization: Bearer ", bearerToken, authScratch);
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
 
         CURLcode res = curl_easy_perform(curl);
@@ -593,7 +595,7 @@ namespace AIAssistant
     // =================================================================
 
     bool PolarionClient::UpdateWorkItem(std::string const& baseUrl, std::string const& projectId,
-                                        std::string const& workItemId, std::string const& bearerToken,
+                                        std::string const& workItemId, SecureString const& bearerToken,
                                         std::string const& jsonApiPatchBody, std::string& responseBody,
                                         std::string& errorMessage) const
     {
@@ -621,7 +623,7 @@ namespace AIAssistant
     // =================================================================
 
     bool PolarionClient::CreateWorkItem(std::string const& baseUrl, std::string const& projectId,
-                                        std::string const& bearerToken, std::string const& jsonApiPostBody,
+                                        SecureString const& bearerToken, std::string const& jsonApiPostBody,
                                         std::string& responseBody, std::string& errorMessage) const
     {
         if (!IsValidPolarionId(projectId))
@@ -648,7 +650,7 @@ namespace AIAssistant
 
     bool PolarionClient::DownloadAttachment(std::string const& baseUrl, std::string const& projectId,
                                             std::string const& workItemId, std::string const& attachmentId,
-                                            std::string const& bearerToken, std::string const& outputPath,
+                                            SecureString const& bearerToken, std::string const& outputPath,
                                             std::string& errorMessage) const
     {
         if (!IsValidPolarionId(projectId) || !IsValidPolarionId(workItemId) || !IsValidPolarionId(attachmentId))
@@ -688,7 +690,7 @@ namespace AIAssistant
     // =================================================================
 
     bool PolarionClient::UploadAttachment(std::string const& baseUrl, std::string const& projectId,
-                                          std::string const& workItemId, std::string const& bearerToken,
+                                          std::string const& workItemId, SecureString const& bearerToken,
                                           std::string const& filePath, std::string const& fileName,
                                           std::string& responseBody, std::string& errorMessage) const
     {
@@ -717,7 +719,7 @@ namespace AIAssistant
     // =================================================================
 
     bool PolarionClient::FetchLinkedWorkItems(std::string const& baseUrl, std::string const& projectId,
-                                              std::string const& workItemId, std::string const& bearerToken,
+                                              std::string const& workItemId, SecureString const& bearerToken,
                                               std::string& responseBody, std::string& errorMessage) const
     {
         if (!IsValidPolarionId(projectId) || !IsValidPolarionId(workItemId))

@@ -33,6 +33,7 @@
 #include "cloud/redmineCloudTaskExecutor.h"
 #include "cloud/redmineConnector.h"
 #include "cloud/connectorHttp.h"
+#include "curlWrapper/curlSlistHelper.h"
 #include "curlWrapper/curlWrapper.h"
 #include "file/pathConfinement.h"
 #include "json/jsonHelper.h"
@@ -130,7 +131,7 @@ namespace AIAssistant
         return s.substr(start);
     }
 
-    static bool RedmineRequest(std::string const& method, std::string const& url, std::string const& apiKey,
+    static bool RedmineRequest(std::string const& method, std::string const& url, SecureString const& apiKey,
                                std::string& responseBody, long& httpCode, std::string const& requestBody = {})
     {
         CURL* curl = curl_easy_init();
@@ -165,8 +166,8 @@ namespace AIAssistant
         }
 
         struct curl_slist* headers = nullptr;
-        std::string apiKeyHeader = "X-Redmine-API-Key: " + apiKey;
-        headers = curl_slist_append(headers, apiKeyHeader.c_str());
+        SecureString apiKeyScratch;
+        AppendSecretHeader(headers, "X-Redmine-API-Key: ", apiKey, apiKeyScratch);
         headers = curl_slist_append(headers, "Accept: application/json");
         if (!requestBody.empty())
         {

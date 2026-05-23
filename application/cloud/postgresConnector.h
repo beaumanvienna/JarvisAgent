@@ -25,6 +25,9 @@
 
 #include "cloud/cloudConnector.h"
 
+#include <string>
+#include <vector>
+
 namespace AIAssistant
 {
     // PostgreSQL database connector using the libpq C API.
@@ -91,8 +94,35 @@ namespace AIAssistant
         [[nodiscard]] static std::expected<void, ConnectorError>
             ValidatePostgresParams(CloudConnection const& connection);
 
-        // Build a libpq connection string from connection config + credentials.
-        static std::string BuildConnectionString(CloudConnection const& connection,
-                                                  CloudCredentials const& credentials);
+        // Output of BuildConnectParams.  Self-contained: holds the storage for the
+        // non-secret values (host, port, dbname, user, sslmode, connect_timeout) +
+        // the const char* arrays ready for libpq's PQconnectdbParams.  Password is
+        // routed directly from CloudCredentials::m_Password.CStr() into m_Values so
+        // the secret bytes never appear in a std::string heap allocation (libpq's
+        // own internal copy is the irreducible floor — same shape as libcurl's
+        // strdup floor).
+        //
+        // Caller invariant: keep BOTH this struct AND the source CloudCredentials
+        // alive for the duration of the PQconnectdbParams call.  Once PQfinish has
+        // been called on the resulting PGconn*, libpq has consumed everything and
+        // both this struct and the credentials may be destroyed.
+        struct ConnectParams
+        {
+            // Backing storage for the non-secret value strings.  The pointers in
+            // m_Values point into these std::strings, so this vector must outlive
+            // m_Values and must not be mutated after BuildConnectParams returns.
+            std::vector<std::string> m_NonSecretValues;
+            // libpq-shaped NULL-terminated arrays.  Pass m_Keys.data() + m_Values.data()
+            // to PQconnectdbParams.
+            std::vector<char const*> m_Keys;
+            std::vector<char const*> m_Values;
+        };
+
+        // Build libpq keyword/value arrays from connection config + credentials.  The
+        // password slot (when present) points directly at credentials.m_Password.CStr()
+        // so the secret bytes never materialise in a std::string heap allocation
+        // outside libpq.
+        static ConnectParams BuildConnectParams(CloudConnection const& connection,
+                                                CloudCredentials const& credentials);
     };
 } // namespace AIAssistant

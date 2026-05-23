@@ -25,6 +25,10 @@
 
 #include <map>
 #include <string>
+#include <string_view>
+#include <vector>
+
+#include "keys/secureString.h"
 
 namespace AIAssistant
 {
@@ -64,23 +68,32 @@ namespace AIAssistant
         // method:       HTTP method (GET, PUT, DELETE, HEAD)
         // url:          Full URL (e.g., "https://myaccount.blob.core.windows.net/container/blob")
         // accountName:  Azure Storage account name
-        // accountKey:   Azure Storage account key (Base64-encoded)
+        // accountKey:   Azure Storage account key (Base64-encoded, secret material) — held in
+        //               a SecureString so the secret bytes never appear in a plain std::string
+        //               heap allocation outside this signer's HMAC-SHA256 scratch buffers.
         // extraHeaders: Additional headers to include in the signature (e.g., x-ms-blob-type, Content-Type)
         // contentLength: Content-Length value for the request (0 for GET/DELETE/HEAD)
         static SignedRequest Sign(std::string const& method, std::string const& url,
-                                  std::string const& accountName, std::string const& accountKey,
+                                  std::string const& accountName, SecureString const& accountKey,
                                   std::map<std::string, std::string> const& extraHeaders = {},
                                   size_t contentLength = 0);
 
     private:
-        // HMAC-SHA256(key, data) → raw bytes. Key is raw bytes (not hex).
-        static std::string HmacSha256(std::string const& key, std::string const& data);
+        // HMAC-SHA256(key, data) → raw bytes.  Key is accepted as a byte vector so the
+        // caller can wrap the Base64-decoded secret in ScopedSecretBytes (zero-on-destruct
+        // via OPENSSL_cleanse) — no std::string heap intermediate holding the raw key.
+        // The output (the signature) is public on the wire, so std::string is the right
+        // return type.
+        static std::string HmacSha256(std::vector<unsigned char> const& key, std::string_view data);
 
         // Base64-encode raw bytes.
         static std::string Base64Encode(std::string const& data);
 
-        // Base64-decode a string to raw bytes.
-        static std::string Base64Decode(std::string const& encoded);
+        // Base64-decode a string to raw bytes.  Returns a byte vector (empty on decode
+        // failure) so the caller can wrap the decoded secret in ScopedSecretBytes for
+        // OPENSSL_cleanse-on-destruct — no std::string intermediate holds the raw key
+        // bytes between decode and HMAC.
+        static std::vector<unsigned char> Base64Decode(std::string_view encoded);
 
         // Parse URL into host, path, query components.
         struct UrlParts

@@ -206,9 +206,17 @@ namespace AIAssistant
         // local indication of the root cause.  Now the signer rejects locally and
         // we emit a structured ERROR with the request's CancelKey (= per-task ID)
         // for the dashboard's run analyzer.
-        std::vector<std::string> authHeaders;
+        //
+        // secretHeader lives on the stack until the lambda body exits.  curl_slist_append
+        // makes its own internal copy, so the SecureString can drop (and wipe its
+        // mlock'd buffer) immediately once the slist holds the value.  We retain
+        // secretHeader through the SetupEasyHandle scope; m_Headers ownership has
+        // already absorbed the string by the time we return.
+        std::vector<std::string> publicHeaders;
+        SecureString secretHeader;
         std::string authError;
-        if (!IAuthSigner::Get(req.m_QueryData.m_AuthStyle).Apply(req.m_QueryData, authHeaders, authError))
+        if (!IAuthSigner::Get(req.m_QueryData.m_AuthStyle).Apply(req.m_QueryData, publicHeaders, secretHeader,
+                                                                 authError))
         {
             errorKind = SetupError::AuthSigner;
             errorMessage = authError;
@@ -217,9 +225,13 @@ namespace AIAssistant
             curl_easy_cleanup(easy);
             return nullptr;
         }
-        for (auto const& h : authHeaders)
+        for (auto const& h : publicHeaders)
         {
             req.m_Headers = curl_slist_append(req.m_Headers, h.c_str());
+        }
+        if (!secretHeader.IsEmpty())
+        {
+            req.m_Headers = curl_slist_append(req.m_Headers, secretHeader.CStr());
         }
         req.m_Headers = curl_slist_append(req.m_Headers, "Content-Type: application/json");
 

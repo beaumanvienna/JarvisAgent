@@ -68,7 +68,7 @@ namespace AIAssistant
             return std::unexpected(ConnectorError::Make(ConnectorErrorCode::CredentialMissing, std::move(credErr)));
         }
 
-        if (ICloudTaskExecutor::ContainsCrlf(credentials.m_Token))
+        if (ICloudTaskExecutor::ContainsCrlf(credentials.m_Token.Get()))
         {
             ConnectorHttp::IncrementCredentialCrlfRejection();
             LOG_SECURITY_WARN("[security] polarion_test_pat_crlf_rejected connection='{}'", connection.m_Name);
@@ -123,7 +123,7 @@ namespace AIAssistant
                     return;
                 }
                 credentials.m_AuthType = CloudAuthType::BearerToken;
-                credentials.m_Token = std::string(api->m_ApiKey.Get());
+                credentials.m_Token.Set(api->m_ApiKey.Get());
             });
         if (!found)
         {

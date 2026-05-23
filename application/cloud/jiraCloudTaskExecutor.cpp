@@ -32,6 +32,7 @@
 #include "cloud/jiraCloudTaskExecutor.h"
 #include "cloud/jiraConnector.h"
 #include "cloud/connectorHttp.h"
+#include "curlWrapper/curlSlistHelper.h"
 #include "curlWrapper/curlWrapper.h"
 #include "file/pathConfinement.h"
 #include "json/jsonHelper.h"
@@ -183,12 +184,12 @@ namespace AIAssistant
         if (credentials.m_AuthType == CloudAuthType::BasicAuth)
         {
             curl_easy_setopt(curl, CURLOPT_USERNAME, credentials.m_Username.c_str());
-            curl_easy_setopt(curl, CURLOPT_PASSWORD, credentials.m_Password.c_str());
+            curl_easy_setopt(curl, CURLOPT_PASSWORD, credentials.m_Password.CStr());
         }
         else
         {
-            std::string authHeader = "Authorization: Bearer " + credentials.m_Token;
-            headers = curl_slist_append(headers, authHeader.c_str());
+            SecureString authScratch;
+            AppendSecretHeader(headers, "Authorization: Bearer ", credentials.m_Token, authScratch);
         }
         headers = curl_slist_append(headers, "Accept: application/json");
         if (!requestBody.empty())

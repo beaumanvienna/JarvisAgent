@@ -491,7 +491,7 @@ Other credential registration sites (outside the typed hierarchy):
 | MCP enrollment tokens (`enroll_…`) | `McpKeyManager::CreateEnrollment` |
 | MCP API keys (`mcp_…`) | `McpKeyManager::ActivateEnrollment`, `CreateBootstrapAdminKey`, `SelfRenew`, `Authenticate` (success-only) |
 | Webhook HMAC shared secrets | `TriggerEngine::AddWebhookTrigger` |
-| Azure Storage Shared Keys (transient `CloudCredentials::m_SecretKey`) | `AzureBlobConnector::ResolveCredentials` (defense-in-depth — KeyManager already registered the underlying SecureString) |
+| Azure Storage Shared Keys (`CloudCredentials::m_SecretKey`, now `SecureString`) | `AzureBlobConnector::ResolveCredentials` registers `m_SecretKey.Get()` (defense-in-depth — KeyManager already registered the underlying SecureString) |
 
 `KeyManager` calls `cred->RegisterSecrets()` from every mutation path: keystore load (`ParseProvidersJson`), REST `POST /api/settings/providers` (`AddCredential`), REST `PUT /api/settings/providers/<name>` (`ModifyCredential`), the OAuth callback (`UpsertCredential`), and the `OPENAI_API_KEY` environment fallback (`LoadFromEnvironment`).  Adding a new credential subtype requires extending the hierarchy AND providing a `RegisterSecrets()` override — the virtual call site is the single point that drives redactor wiring.
 
@@ -555,7 +555,7 @@ The MCP server is a standalone TypeScript sidecar communicating with j9t over st
 
 ### IAuthSigner Security
 
-The polymorphic `IAuthSigner` (`engine/curlWrapper/authSigner.{h,cpp}`) is the single auth-header production point for all AI-provider HTTP requests.  Every concrete signer (`BearerSigner`, `XGoogApiKeySigner`, `AnthropicXApiKeySigner`, `AzureApiKeySigner`, `SigV4Signer`) routes through the same `[[nodiscard]] bool Apply(QueryData, headers, errorMessage)` interface so security guarantees apply uniformly to OpenAI Chat / OpenAI Responses / Gemini / Anthropic / Azure OpenAI / AWS Bedrock without per-provider branching.
+The polymorphic `IAuthSigner` (`engine/curlWrapper/authSigner.{h,cpp}`) is the single auth-header production point for all AI-provider HTTP requests.  Every concrete signer (`BearerSigner`, `XGoogApiKeySigner`, `AnthropicXApiKeySigner`, `AzureApiKeySigner`, `SigV4Signer`) routes through the same `[[nodiscard]] bool Apply(QueryData const&, vector<string>& publicHeaders, SecureString& secretHeader, errorMessage)` interface so security guarantees apply uniformly to OpenAI Chat / OpenAI Responses / Gemini / Anthropic / Azure OpenAI / AWS Bedrock without per-provider branching.  `publicHeaders` carries non-secret headers (Content-Type, version, signed-not-secret); `secretHeader` is a caller-owned `SecureString` (mlock'd, zero-on-destruct) that the signer fills via `SecureString::Format(prefix, secret.Get())` so the secret never appears in a `std::string` heap allocation.  SigV4 emits its derived Authorization signature through `publicHeaders` (HMAC-SHA256 — derived from but not containing the raw secret) and routes the raw STS session token through `secretHeader` as `X-Amz-Security-Token` when present.  See "SecureString-only HTTP path" below for the full discipline across both AI dispatch and cloud connectors.
 
 - **Empty + whitespace credential rejection at the signer.**  Each `Apply` validates the credential is non-empty AND has at least one non-whitespace character via the `IsBlank` helper.  An accidentally-blank credential (`""` or `"   "` from a hand-edit of `keys.json` or a misconfigured env var) is caught locally — pre-fix, an unsigned/whitespace-signed request went out and bounced off the provider as an opaque 401, with no log line pointing at the root cause.  SigV4's three required fields (`access_key_id`, `secret_access_key`, `region`) are read from the typed `QueryData::m_AwsCredential` snapshot (Sitting 6) and validated independently so a missing region produces a different error than a missing secret.  The signer ALSO fails closed if `m_AwsCredential` itself is null on the SigV4 path — a defensive backstop in case a caller routes a request to SigV4 without populating the typed credential.
 - **No silent fallback in `IAuthSigner::Get`.**  Pre-fix the function ended with `return s_Bearer;` after the switch — anti-debugging armor that turned "added a new `AuthStyle` enum variant without updating `Get`" into "every request silently signs with Bearer."  Same pattern called out in CLAUDE.md's CurlMultiDispatcher silent-Bearer-fallback example.  Now throws `std::logic_error` with the unhandled style's integer value.  `-Wswitch` catches the missing case at compile time on most builds; this throw is the runtime backstop for the rest.
@@ -563,7 +563,106 @@ The polymorphic `IAuthSigner` (`engine/curlWrapper/authSigner.{h,cpp}`) is the s
   - `CurlWrapper::Query` (sync path) — emits `LOG_CORE_ERROR("CurlWrapper::Query: auth signer rejected request url='{}' quotaKey='{}': {}", ...)` and returns `QueryResult::Fail(QueryErrorCode::NoApiKey, ...)`.
   - `LiveTransport::SetupEasyHandle` (async path, hosted under `CurlMultiDispatcher`) — emits `LOG_CORE_ERROR("LiveTransport: auth signer rejected url='{}' cancelKey='{}' quotaKey='{}': {}", ...)`, cleans up the partially-initialised curl easy handle, and surfaces the rejection through the request callback via the dispatcher's deferred-completion path.
 - **Stateless singletons + `const Apply`.**  Each signer is a stateless singleton accessed via `IAuthSigner::Get(style)` returning `const IAuthSigner&`.  `Apply` is `const`, documenting the no-mutation invariant and allowing concurrent calls across worker threads with no internal synchronisation.
-- **AnthropicXApiKey two-header atomicity.**  The Anthropic signer pushes two headers (`x-api-key` + `anthropic-version: 2023-06-01`); pre-fix a `bad_alloc` between the two pushes would leave a request with the API key but no version.  Now the strings are constructed first, the vector is `reserve`'d to avoid mid-push reallocation, then both are moved in — both succeed or neither does.
+- **AnthropicXApiKey two-header atomicity.**  The Anthropic signer emits the `x-api-key` (secret) via `secretHeader.Format(...)` first; the non-secret `anthropic-version: 2023-06-01` only gets pushed into `publicHeaders` after the Format succeeds.  If `Format` throws `bad_alloc`, the caller's `publicHeaders` vector is still unmodified and `secretHeader` is unchanged (SecureString::Format uses copy-and-swap internally) — both succeed or neither does.
+
+### SecureString-only HTTP path
+
+Resolved credential material travels from `KeyManager` to `curl_slist_append` without ever materialising into a plain `std::string` heap allocation.  The path is:
+
+```
+KeyManager (ICredential::SecureString fields)
+   → ResolveApiKey / ResolveCredentials (SecureString.Set(view) into request-scope container)
+      → QueryData::m_ApiKey  (SecureString, mlock'd)
+      → CloudCredentials::m_Token / m_SecretKey / m_Password  (SecureString, mlock'd)
+         → IAuthSigner::Apply(...secretHeader)  /  AppendSecretHeader(curl_slist*, prefix, SecureString)
+            → SecureString::Format(prefix, secret.Get())  (single mlock'd allocation)
+               → curl_slist_append(list, secret.CStr())  (libcurl strdups internally)
+```
+
+The discipline is codified in CLAUDE.md.  Key invariants:
+
+- **`SecureString` is non-copyable by design** — copying a secret to two heap allocations simultaneously is an explicit decision.  `QueryData::Clone()` is the audited deep-copy hook (used only by the dispatcher's retry path which keeps a spare while the original moves into the transport).  `CloudCredentials` is non-copyable (move-only); each request scope builds its own.
+- **`SecureString::Format(prefix, secretView, suffix="")`** is the canonical "build a secret-bearing string" pattern for three-piece concatenation.  Single allocation sized to fit all three pieces plus trailing NUL; mlock + zero-on-replace via the existing `Release()`; copy-and-swap internally for strong exception safety (a `bad_alloc` mid-format leaves the prior contents intact).  Implementation forwards to `Build` so the two share their allocator paths.
+- **`SecureString::Build(std::initializer_list<std::string_view> pieces)`** is the N-piece variant — used at the `CURLOPT_POSTFIELDS` boundary to build secret-bearing form-urlencoded bodies (OAuth refresh-token request, JWT-bearer grant) without a `std::string` heap intermediate, AND at the canonical-request assembly boundary in `engine/curlWrapper/awsSigV4.cpp::Sign` to build canonical-headers + canonical-request directly into mlock'd buffers (the canonical-headers map carries the STS session token when present, so the build site MUST be mlock'd, not a `std::map<string,string>` + `std::string` concat chain).  Same strong-exception-guarantee posture as `Format`.
+- **`SecureString::CStr()`** returns a guaranteed-null-terminated `const char*` — relies on the trailing-NUL invariant maintained by `Set()`, `Format()`, and `Build()`.  Used for `CURLOPT_PASSWORD` (libcurl basic-auth path), `CURLOPT_POSTFIELDS` (no-copy pointer; caller keeps SecureString alive through `curl_easy_perform`), and `curl_slist_append`.
+- **`AppendSecretHeader(curl_slist*&, prefix, SecureString const&, SecureString& scratch)`** (`engine/curlWrapper/curlSlistHelper.h`) is the canonical helper for cloud connectors and workflow filters that build `"Authorization: Bearer <secret>"` headers themselves (rather than routing through `IAuthSigner`).  The scratch is caller-owned (one per HTTP request scope, reusable across multiple calls in the same scope); wipes its mlock'd buffer on destruct or on the next `Format` call.
+- **HMAC-input signers** (`AzureSharedKeySigner::Sign`, `application/cloud/sigV4Signer.cpp::Sign`, `engine/curlWrapper/awsSigV4.cpp::Sign`) take `SecureString const&` for the secret key and consume via `Get()` views — no `std::string(view)` step.  All three signers build their HMAC chain (`kSecret` / `kDate` / `kRegion` / `kService` / `kSigning` for SigV4; the decoded Base64 `rawKey` for AzureSharedKey) as `std::vector<unsigned char>` buffers wrapped in `ScopedSecretBytes` (OPENSSL_cleanse on destruct).  Shared definition at `engine/keys/scopedSecretBytes.h`.
+- **Generator out-parameter SecureString** — `OAuthTokenManager::GetAccessToken`, `JwtGenerator::Generate` / `::GenerateSnowflakeJwt`, and `GcsConnector::ExchangeJwtForAccessToken` take a caller-owned `SecureString& out` instead of returning `std::string` by value.  Connectors pass `credentials.m_Token` (or a local `SecureString`) directly as the out-param; the secret bytes never appear in a `std::string` heap allocation on the return path.  The OAuth refresh round-trip is threaded `SecureString` end-to-end on both sides (request snapshots + `RefreshResult` response fields).
+- **The irreducible residue floor is libcurl** — `curl_slist_append` always `strdup`s its input into curl-owned heap; `curl_slist_free_all` calls `free()` not `explicit_bzero+free`.  This residue persists for seconds during a streaming HTTPS request and is outside the threat-model boundary (would require forking libcurl to fix).
+
+**Architectural residue floors (outside threat-model boundary).**  Two third-party-library internal copies of credentials survive `free()` without zeroing.  Same shape in each case: we hand the bytes to the library; the library makes its own copy in its own arena and frees it without `explicit_bzero`.  Fixing would require forking the library.
+
+- **libcurl `curl_slist_append` strdup floor** — every header line and the `CURLOPT_POSTFIELDS` body (when libcurl's internal copy is used) lives in curl-owned heap until `curl_easy_cleanup`.  Empirically confirmed by the heap-scan audit's `AppendSecretHeader` scenario (1 hit at heap address).
+- **libpq `PQconnectdbParams` password copy** — libpq copies the password value out of our `values[]` array into a `PGconn`-owned buffer immediately at connect time; `PQfinish` frees with `free()`.  Architecturally equivalent to the libcurl floor.
+
+**Out-of-scope (separate hardening tracks, not credential material).**
+
+- **`QueryData::m_Data`** — request body is `std::string`.  Anthropic prompts and Bedrock SigV4-signed bodies pass through it.  Not strictly a credential, but prompts often carry secret-equivalent material (PII, internal data).  Separate body-path hardening track outside the credential-leakage scope addressed here.
+
+#### Empirical verification — heap-scan audit
+
+The SecureString-only HTTP-path discipline above is verified empirically by an in-process heap-scan audit at `test/security/heapScan_test.{h,cpp}` + `test/security/heapScan_cloud_scenarios.cpp`.  The audit is compiled into the binary only when `--heapscan` is passed to premake (sets `J9T_HEAPSCAN_BUILD`); a production binary contains zero audit code (the engine.cpp call site and the audit module body are both `#ifdef`-guarded).  Audit builds invoke `RunHeapScanAudit()` after the SigV4 self-test and `std::exit()` with PASS/FAIL — the binary never reaches normal engine startup.
+
+**Method.** For each auth style and each secret-bearing build path, the audit:
+
+1. Generates a deterministic 64-byte hex nonce (per-scenario seed so a residue hit is attributable).
+2. Plants the nonce as the secret credential in the production data-structure (`QueryData::m_ApiKey`, `AwsCredential::m_SecretAccessKey`, `CloudCredentials` analogues, or in the `client_secret` slot of an OAuth POST body).
+3. Drives the auth-build path end-to-end (`IAuthSigner::Apply` / `AppendSecretHeader` / cloud `Sign()` / `SecureString::Build`), allowing all locals to destruct via RAII.
+4. Allocates and frees a 64 MiB churn pad to flush fastbins / tcache slabs that recently held secret-bearing allocations.
+5. Walks `/proc/self/maps` and reads `/proc/self/mem` over each in-scope mapping; uses `memmem` to detect the nonce.
+6. Reports per-scenario hit counts.  The remaining `expected_residual` cell documents the libcurl strdup floor (architectural).
+
+**Two scan phases per scenario:**
+
+- **Smoke** — scans the `[heap]` mapping only (glibc main arena, `sbrk`-backed allocations).  Fast.  Catches the common case: secret-shaped `std::string`s and small heap buffers.
+- **Deep** — scans `[heap]` + unnamed anonymous mappings + `[anon:*]` named arenas.  Slower.  Catches large-allocation slabs that bypass `sbrk` and land via `mmap`, plus thread-local arenas.
+
+**Documented scope limitation: stack mappings excluded.**  The scanner holds the search needle as a local while scanning, so any walk of `[stack*]` would always self-detect at the scanner's own frame.  Heap residue is the threat-model target; stack residue is a separate (and harder to test from inside the same process) concern.  A future external-process scanner (`/proc/<j9t-pid>/mem` from a sibling test runner with `kernel.yama.ptrace_scope=0`) could close this gap.
+
+**Scenarios** (10 total — 9 must-be-zero + 1 architectural floor):
+
+| Scenario | Path | Expected smoke / deep |
+|---|---|---|
+| `Bearer` | `BearerSigner::Apply` (AI dispatch) | 0 / 0 |
+| `XGoogApiKey` | `XGoogApiKeySigner::Apply` | 0 / 0 |
+| `AnthropicXApiKey` | `AnthropicXApiKeySigner::Apply` | 0 / 0 |
+| `AzureApiKey` | `AzureApiKeySigner::Apply` | 0 / 0 |
+| `engineSigV4` | `engine/curlWrapper/awsSigV4::Apply` — input phase + STS session token via `secretHeader` + canonical-headers via `SecureString::Build` | 0 / 0 |
+| `engineSigV4(no-churn)` | Same path as `engineSigV4` but with the 64 MiB churn pad disabled — proves the canonical-headers residue is absent STRUCTURALLY rather than via allocator activity | 0 / 0 |
+| `cloudSigV4::Sign` | `application/cloud/sigV4Signer::Sign` (S3 connector path; HMAC chain wrapped in `ScopedSecretBytes`) | 0 / 0 |
+| `AzureSharedKey::Sign` | `application/cloud/azureSharedKeySigner::Sign` (Azure Blob connector path; decoded `rawKey` wrapped in `ScopedSecretBytes`) | 0 / 0 |
+| `OAuthPostBody` | `oauthTokenManager.cpp::PerformRefresh` body build via `SecureString::Build` (`client_secret` + `refresh_token` form-urlencoded body in mlock'd memory) | 0 / 0 |
+| `AppendSecretHeader` | `curlSlistHelper::AppendSecretHeader` → `curl_slist_append` → `curl_slist_free_all` | 1 / 1 (libcurl strdup floor — architectural) |
+
+**Observed result (Studio Debug, clang + libc++):**
+
+```
+HeapScan[Bearer]:                 PASS (smoke=0 / deep=0)
+HeapScan[XGoogApiKey]:            PASS (smoke=0 / deep=0)
+HeapScan[AnthropicXApiKey]:       PASS (smoke=0 / deep=0)
+HeapScan[AzureApiKey]:            PASS (smoke=0 / deep=0)
+HeapScan[engineSigV4]:            PASS (smoke=0 / deep=0)
+HeapScan[AppendSecretHeader]:     PASS (known residual) — libcurl strdup floor
+HeapScan[cloudSigV4::Sign]:       PASS (smoke=0 / deep=0)
+HeapScan[AzureSharedKey::Sign]:   PASS (smoke=0 / deep=0)
+HeapScan[OAuthPostBody]:          PASS (smoke=0 / deep=0)
+HeapScan[engineSigV4(no-churn)]:  PASS (smoke=0 / deep=0)
+Summary: 9 pass, 0 fail, 1 expected-residual
+AUDIT PASSED — exit 0
+```
+
+The `engineSigV4(no-churn)` scenario is the headline structural check: it exercises the same SigV4 path as `engineSigV4` but disables the 64 MiB churn pad between scenario teardown and scan.  A clean 0/0 result there proves the canonical-headers session-token residue is structurally absent rather than merely neutralised by allocator activity.  The only steady-state heap residue across all scenarios is the **libcurl `strdup` floor** at `AppendSecretHeader` — the irreducible architectural boundary.
+
+**How to run:**
+
+```bash
+premake5 gmake --clang --heapscan
+make config=debug
+./bin/Debug/jarvisAgent-studio   # runs audit, std::exit(rc), never starts the server
+grep HeapScan log/log.txt
+```
+
+Audit code is excluded from CI by default (opt-in via `--heapscan`); the artifact is intended as a pre-1.0 one-shot security review attachment and a regression net for future auth-style additions.
 
 ### CurlMultiDispatcher Security
 
@@ -606,7 +705,7 @@ The synchronous `CurlWrapper` (`engine/curlWrapper/curlWrapper.{h,cpp}`) is the 
 - **`m_ReadBuffer` cleared at the start of every `Query()`.**  `CurlManager::GetThreadCurl()` returns a thread-local `CurlWrapper` reused across calls.  Pre-fix, sequential `Query()` calls without an explicit `Clear()` would concatenate the previous response into the next one — a silent footgun that surfaced as parser confusion downstream.  Now the buffer is reset deterministically at every Query entry; the public `Clear()` becomes a defensive no-op rather than a required pre-condition.
 - **`qnum` captured locally for log consistency.**  The static `m_QueryCounter` is incremented once at dispatch and the result is held in a local `uint32_t` used by every subsequent log line (success and failure).  Pre-fix the failure path called `m_QueryCounter.load()` again, which can read a higher value if a concurrent `Query()` on another thread incremented the counter in between — making the qnum in the error message diverge from the qnum logged on dispatch and breaking grep-based correlation.
 - **Failure logs carry `url` + `quotaKey` substrings.**  Three fail paths (curl error, HTTP 429, generic HTTP ≥400) log `url='{}' quotaKey='{}'` alongside the existing `qnum`.  Same dashboard-run-analyzer-surfacing rationale as the dispatcher (CLAUDE.md "Failure-path logs ... mention the runId or workflowId as a literal substring").  `quotaKey` is the natural correlation key when the run identifier isn't in scope (Test Connection paths don't have a runId).
-- **`IsValid()` log severity right-sized.**  Empty-field validation logs are `LOG_CORE_ERROR` rather than `LOG_CORE_CRITICAL`.  An empty `m_ApiKey` or `m_Url` is a per-request misconfiguration (legacy caller forgot to populate the field, etc.), not the engine-level "wake the operator at 3am" condition CRITICAL implies.  ERROR is the right level: still surfaced by the run analyzer, doesn't trigger paging.
+- **`IsValid()` log severity right-sized.**  Empty-field validation logs are `LOG_CORE_ERROR` rather than `LOG_CORE_CRITICAL`.  An empty `m_Url` or empty `m_ApiKey` (`SecureString::IsEmpty()`) is a per-request misconfiguration (legacy caller forgot to populate the field, etc.), not the engine-level "wake the operator at 3am" condition CRITICAL implies.  ERROR is the right level: still surfaced by the run analyzer, doesn't trigger paging.
 
 ### SigV4 Signing Security
 
@@ -621,7 +720,7 @@ The `SigV4Signer` (`engine/curlWrapper/awsSigV4.{h,cpp}`) hand-rolls AWS Signatu
 - **OpenSSL primitive return values checked.**  `HMAC()` and `SHA256()` are one-shot APIs that return NULL on (rare) failure.  Pre-fix the return was discarded — on failure the output buffer held uninitialised data, the resulting "signature" was gibberish, and AWS rejected with an opaque 401 with no local diagnostic.  Now each helper logs `LOG_CORE_ERROR` and returns empty on NULL; `Sign()` propagates the failure up by leaving `Authorization` empty; `Apply()` detects the empty Authorization, returns `false`, and emits a structured ERROR via the upstream caller (`LiveTransport::SetupEasyHandle`) with run context.
 - **Canonical-headers includes `x-amz-content-sha256` always.**  AWS recommends — and S3/Bedrock require — that `x-amz-content-sha256` be included in the SigV4 canonical headers and signed.  Our implementation always includes it.  This means the AWS test-suite minimal vectors (`get-vanilla` etc.) which use only `host;x-amz-date` don't compare directly; sub-test #4 above bridges the gap with a Bedrock-shape vector locked in from a trusted run.
 - **No `aws-sdk-cpp` dependency.**  Hand-rolled is ~400 LOC of well-documented crypto plumbing on OpenSSL primitives we already link.  The 50 MB SDK + cmake + maintenance burden isn't justified for request-signing-only.  The startup self-test is the AWS-conformance backstop.
-- **Typed-credential threading via `QueryData::m_AwsCredential` (Sitting 6).**  `Apply()` reads `m_SecretAccessKey` / `m_SessionToken` / `m_Region` / `m_AccessKeyId` from `q.m_AwsCredential` (a `shared_ptr<AwsCredential const>` snapshot taken under KeyManager's lock at submit time, see `engine/keys.md` "Snapshot pattern for deferred dispatch") instead of the legacy `QueryData::m_Params` stringy reinjection.  Secret material stays in `SecureString` end-to-end except for the brief HMAC compute step where the raw bytes are needed — pre-Sitting-6, `AiRequestPool::ResolveProviderParams` materialised `secret_access_key` / `session_token` / `region` into a `std::string` map for the dispatch duration, defeating `SecureString`'s mlock + zero-on-destruct invariant.  The non-secret `service` field (default `"bedrock"`) stays in `m_Params` because it's a request-target attribute, not a secret.  Integration-level KAT coverage is `test/dispatch/test_bedrock_sigv4.py` (hermetic, locked Authorization signature) — pairs with sub-test #2 above (AWS-published `kSigning` derivation) per the `feedback_crypto_test_bootstrap_pattern` constraint that bootstrap-locked tests must ride alongside an independent reference vector.
+- **Typed-credential threading via `QueryData::m_AwsCredential`.**  `Apply()` reads `m_SecretAccessKey` / `m_SessionToken` / `m_Region` / `m_AccessKeyId` from `q.m_AwsCredential` (a `shared_ptr<AwsCredential const>` snapshot taken under KeyManager's lock at submit time, see `engine/keys.md` "Snapshot pattern for deferred dispatch") instead of legacy `QueryData::m_Params` stringy reinjection.  Secret material now stays in `SecureString` **end-to-end through the HMAC chain** — `SigV4Signer::Inputs::m_SecretKey` and `m_SessionToken` are `SecureString`; `Sign()` builds `kSecret` as a raw `std::vector<unsigned char>` directly from the SecureString view (no `"AWS4" + secret` std::string intermediate); HMAC intermediates (`kDate` / `kRegion` / `kService` / `kSigning`) are wrapped in `ScopedSecretBytes` for OPENSSL_cleanse-on-destruct.  The X-Amz-Security-Token header (raw STS session token on the wire) is routed through `secretHeader` via `Format` rather than `publicHeaders` (which would have leaked a std::string heap copy).  The non-secret `service` field (default `"bedrock"`) stays in `m_Params` because it's a request-target attribute, not a secret.  Integration-level KAT coverage is `test/dispatch/test_bedrock_sigv4.py` (hermetic, locked Authorization signature) — pairs with sub-test #2 above (AWS-published `kSigning` derivation) per the `feedback_crypto_test_bootstrap_pattern` constraint that bootstrap-locked tests must ride alongside an independent reference vector.
 
 #### Crypto-test bootstrap pattern (reusable for future cryptographic-primitive tests)
 

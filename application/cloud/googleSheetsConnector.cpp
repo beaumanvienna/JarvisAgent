@@ -30,6 +30,7 @@
 #include "keys/credential.h"
 #include "keys/keyManager.h"
 #include "keys/oauthTokenManager.h"
+#include "curlWrapper/curlSlistHelper.h"
 #include "curlWrapper/curlWrapper.h"
 #include "cloud/cloudTaskExecutor.h"
 #include "cloud/connectorHttp.h"
@@ -84,14 +85,15 @@ namespace AIAssistant
         if (connection.m_AuthType == CloudAuthType::OAuth2)
         {
             auto& oauthManager = Core::g_Core->GetOAuthTokenManager();
-            std::string accessToken = oauthManager.GetAccessToken(connection.m_KeyName, errorMessage);
-            if (!accessToken.empty())
+            if (oauthManager.GetAccessToken(connection.m_KeyName, credentials.m_Token, errorMessage))
             {
                 credentials.m_AuthType = CloudAuthType::OAuth2;
-                credentials.m_Token = std::move(accessToken);
                 return true;
             }
-            // Fall through to API key check if OAuth not configured
+            // Fall through to API key check if OAuth not configured.  credentials.m_Token
+            // may have been touched by an early failure path inside GetAccessToken — clear
+            // it defensively so the API-key branch starts with a clean SecureString.
+            credentials.m_Token.Clear();
             errorMessage.clear();
         }
 
@@ -104,7 +106,7 @@ namespace AIAssistant
                 if (api && !api->m_ApiKey.IsEmpty())
                 {
                     credentials.m_AuthType = CloudAuthType::BearerToken;
-                    credentials.m_Token = std::string(api->m_ApiKey.Get());
+                    credentials.m_Token.Set(api->m_ApiKey.Get());
                     resolved = true;
                 }
             });
@@ -149,7 +151,7 @@ namespace AIAssistant
             return std::unexpected(ConnectorError::Make(ConnectorErrorCode::CredentialMissing, std::move(credErr)));
         }
 
-        if (ICloudTaskExecutor::ContainsCrlf(credentials.m_Token))
+        if (ICloudTaskExecutor::ContainsCrlf(credentials.m_Token.Get()))
         {
             ConnectorHttp::IncrementCredentialCrlfRejection();
             LOG_SECURITY_WARN("[security] google_sheets_test_token_crlf_rejected connection='{}'", connection.m_Name);
@@ -161,13 +163,13 @@ namespace AIAssistant
         std::string apiBase = GetApiBaseUrl(connection);
         std::string url = apiBase + "/" + spreadsheetIdIt->second + "?fields=properties.title";
 
-        // For API key auth, append as query parameter instead of Bearer header
-        bool useApiKeyParam = (credentials.m_AuthType == CloudAuthType::BearerToken &&
-                               connection.m_AuthType != CloudAuthType::OAuth2);
-        if (useApiKeyParam)
-        {
-            url += "&key=" + credentials.m_Token;
-        }
+        // API-key auth uses the X-Goog-Api-Key HTTP header (semantically equivalent
+        // to a ?key=<token> URL parameter, but the header form keeps the secret out
+        // of the URL); OAuth uses Authorization: Bearer.  Both flow through
+        // AppendSecretHeader so the secret bytes never appear in a std::string heap
+        // allocation between SecureString and curl_slist_append.
+        bool const useApiKeyHeader = (credentials.m_AuthType == CloudAuthType::BearerToken &&
+                                      connection.m_AuthType != CloudAuthType::OAuth2);
 
         CURL* curl = curl_easy_init();
         if (!curl)
@@ -184,10 +186,14 @@ namespace AIAssistant
         ConnectorHttp::ApplyHardenedDefaults(curl, url);
 
         struct curl_slist* headers = nullptr;
-        if (!useApiKeyParam)
+        SecureString authScratch;
+        if (useApiKeyHeader)
         {
-            std::string authHeader = "Authorization: Bearer " + credentials.m_Token;
-            headers = curl_slist_append(headers, authHeader.c_str());
+            AppendSecretHeader(headers, "X-Goog-Api-Key: ", credentials.m_Token, authScratch);
+        }
+        else
+        {
+            AppendSecretHeader(headers, "Authorization: Bearer ", credentials.m_Token, authScratch);
         }
         headers = curl_slist_append(headers, "Accept: application/json");
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);

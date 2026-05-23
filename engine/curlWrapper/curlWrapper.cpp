@@ -165,6 +165,16 @@ namespace AIAssistant
             LOG_CORE_CRITICAL("curl_slist_append failed");
         }
     }
+
+    void CurlWrapper::CurlSlist::AppendCStr(char const* str)
+    {
+        m_List = curl_slist_append(m_List, str);
+        if (!m_List)
+        {
+            LOG_CORE_CRITICAL("curl_slist_append failed");
+        }
+    }
+
     struct curl_slist* CurlWrapper::CurlSlist::Get() { return m_List; }
 
     bool CurlWrapper::IsInitialized() const { return m_Initialized; }
@@ -177,7 +187,7 @@ namespace AIAssistant
     {
         bool urlEmpty = m_Url.empty();
         bool dataEmpty = m_Data.empty();
-        bool keyEmpty = m_ApiKey.empty();
+        bool keyEmpty = m_ApiKey.IsEmpty();
 
         // ERROR-level: an empty field here is a per-request misconfiguration
         // (legacy caller forgot to populate m_ApiKey, etc.), not an
@@ -196,6 +206,30 @@ namespace AIAssistant
         }
 
         return !urlEmpty && !dataEmpty && !keyEmpty;
+    }
+
+    CurlWrapper::QueryData CurlWrapper::QueryData::Clone() const
+    {
+        QueryData out;
+        out.m_Url                  = m_Url;
+        out.m_Data                 = m_Data;
+        out.m_ApiKey.Set(m_ApiKey.Get());
+        out.m_AuthStyle            = m_AuthStyle;
+        out.m_TimeoutMs            = m_TimeoutMs;
+        out.m_Params               = m_Params;
+        out.m_InterfaceType        = m_InterfaceType;
+        out.m_QuotaKey             = m_QuotaKey;
+        out.m_EstimatedInputTokens = m_EstimatedInputTokens;
+        out.m_CancelKey            = m_CancelKey;
+        out.m_MaxConcurrency       = m_MaxConcurrency;
+        out.m_MaxRetries429        = m_MaxRetries429;
+        out.m_MaxRetriesTransient  = m_MaxRetriesTransient;
+        out.m_BaseRetryMs          = m_BaseRetryMs;
+        out.m_IsMock               = m_IsMock;
+        out.m_FixturePath          = m_FixturePath;
+        out.m_AwsCredential        = m_AwsCredential;  // shared_ptr to immutable snapshot
+        out.m_AmzDateOverride      = m_AmzDateOverride;
+        return out;
     }
 
     std::string QueryErrorCode::Describe(int code)
@@ -289,18 +323,23 @@ namespace AIAssistant
         m_ReadBuffer.clear();
 
         CurlSlist headers;
-        std::vector<std::string> authHeaders;
+        std::vector<std::string> publicHeaders;
+        SecureString secretHeader;
         std::string authError;
         // Per-style validation now happens inside the signer (covers empty/whitespace
         // m_ApiKey for static-header styles AND the SigV4 dual-secret + region case
         // that the old front-end m_ApiKey.empty() pre-check missed).
-        if (!IAuthSigner::Get(queryData.m_AuthStyle).Apply(queryData, authHeaders, authError))
+        if (!IAuthSigner::Get(queryData.m_AuthStyle).Apply(queryData, publicHeaders, secretHeader, authError))
         {
             LOG_CORE_ERROR("CurlWrapper::Query: auth signer rejected request url='{}' quotaKey='{}': {}",
                            queryData.m_Url, queryData.m_QuotaKey, authError);
             return QueryResult::Fail(QueryErrorCode::NoApiKey, authError);
         }
-        for (auto const& h : authHeaders) { headers.Append(h); }
+        for (auto const& h : publicHeaders) { headers.Append(h); }
+        if (!secretHeader.IsEmpty())
+        {
+            headers.AppendCStr(secretHeader.CStr());
+        }
         headers.Append("Content-Type: application/json");
 
         auto& url = queryData.m_Url;

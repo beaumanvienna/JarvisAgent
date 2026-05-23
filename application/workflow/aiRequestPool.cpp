@@ -961,25 +961,30 @@ namespace AIAssistant
             return nullptr;
         }
 
-        std::string ResolveApiKey(ConfigParser::EngineConfig::ApiInterface const& api)
+        // Resolves the secret credential material for static-header AuthStyles into
+        // a SecureString — the secret never touches a plain std::string allocation
+        // between KeyManager and QueryData::m_ApiKey.  AwsCredential paths land the
+        // (public) AccessKeyId here for legacy compatibility; the actual SigV4
+        // secrets flow via QueryData::m_AwsCredential.
+        SecureString ResolveApiKey(ConfigParser::EngineConfig::ApiInterface const& api)
         {
+            SecureString result;
             if (Core::g_Core == nullptr)
             {
-                return {};
+                return result;
             }
-            std::string result;
             auto extract = [&](ICredential const& cred)
             {
                 // ApiKeyCredential — bearer secret (OpenAI, Anthropic, Gemini, Azure, Test).
                 if (auto const* apiKey = dynamic_cast<ApiKeyCredential const*>(&cred))
                 {
-                    result.assign(apiKey->m_ApiKey.Get());
+                    result.Set(apiKey->m_ApiKey.Get());
                     return;
                 }
                 // OAuthCredential — cached access token (rotated by OAuthTokenManager).
                 if (auto const* oauth = dynamic_cast<OAuthCredential const*>(&cred))
                 {
-                    result.assign(oauth->m_AccessToken.Get());
+                    result.Set(oauth->m_AccessToken.Get());
                     return;
                 }
                 // AwsCredential — access_key_id is public per AWS conventions and is what the
@@ -987,7 +992,7 @@ namespace AIAssistant
                 // (secret_access_key + session_token) flows via ResolveProviderParams below.
                 if (auto const* aws = dynamic_cast<AwsCredential const*>(&cred))
                 {
-                    result = aws->m_AccessKeyId;
+                    result.Set(aws->m_AccessKeyId);
                     return;
                 }
             };
@@ -1330,8 +1335,8 @@ namespace AIAssistant
         std::string const queryUrl = requestBuilder->ResolveUrl(api->m_Url, model);
         CurlWrapper::AuthStyle const authStyle = requestBuilder->GetAuthStyle();
 
-        std::string const apiKey = ResolveApiKey(*api);
-        if (apiKey.empty())
+        SecureString apiKey = ResolveApiKey(*api);
+        if (apiKey.IsEmpty())
         {
             LOG_APP_ERROR("AiRequestPool::Submit: no API key resolvable run='{}' workflow='{}' task='{}' "
                           "interface='{}' key_name='{}'",
@@ -1405,7 +1410,8 @@ namespace AIAssistant
                          concurrencyFactor, timeoutMs);
         }
 
-        CurlWrapper::QueryData queryData{.m_Url = queryUrl, .m_Data = requestBody, .m_ApiKey = apiKey,
+        CurlWrapper::QueryData queryData{.m_Url = queryUrl, .m_Data = requestBody,
+                                          .m_ApiKey = std::move(apiKey),
                                           .m_AuthStyle = authStyle, .m_TimeoutMs = timeoutMs,
                                           .m_Params = ResolveProviderParams(*api),
                                           .m_InterfaceType = static_cast<int>(api->m_InterfaceType),
@@ -2008,7 +2014,7 @@ namespace AIAssistant
         // Resolve API key + provider params from KeyManager. Params carry SigV4
         // material (region + secret_access_key + session_token) for AWS providers
         // and any future per-provider extras.
-        std::string apiKey;
+        SecureString apiKey;
         std::unordered_map<std::string, std::string> providerParams;
         {
             auto extract = [&](ICredential const& cred)
@@ -2020,11 +2026,11 @@ namespace AIAssistant
                 // leave apiKey empty — the empty-check below produces a clear error.
                 if (auto const* api = dynamic_cast<ApiKeyCredential const*>(&cred))
                 {
-                    apiKey = std::string(api->m_ApiKey.Get());
+                    apiKey.Set(api->m_ApiKey.Get());
                 }
                 else if (auto const* oauth = dynamic_cast<OAuthCredential const*>(&cred))
                 {
-                    apiKey = std::string(oauth->m_AccessToken.Get());
+                    apiKey.Set(oauth->m_AccessToken.Get());
                 }
                 providerParams = cred.m_Params;
             };
@@ -2039,7 +2045,7 @@ namespace AIAssistant
             }
         }
 
-        if (apiKey.empty())
+        if (apiKey.IsEmpty())
         {
             outError = "No API key configured for key_name '" + iface.m_KeyName + "'";
             return false;
@@ -2074,7 +2080,7 @@ namespace AIAssistant
         CurlWrapper::QueryData queryData = {
             .m_Url = queryUrl,
             .m_Data = requestData,
-            .m_ApiKey = apiKey,
+            .m_ApiKey = std::move(apiKey),
             .m_AuthStyle = authStyle,
             .m_TimeoutMs = kTestTimeoutMs,
             .m_Params = std::move(providerParams),

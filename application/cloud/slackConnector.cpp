@@ -31,6 +31,7 @@
 #include "engine.h"
 #include "keys/credential.h"
 #include "keys/keyManager.h"
+#include "curlWrapper/curlSlistHelper.h"
 #include "curlWrapper/curlWrapper.h"
 #include "cloud/cloudTaskExecutor.h"
 #include "cloud/connectorHttp.h"
@@ -82,7 +83,7 @@ namespace AIAssistant
                     return;
                 }
                 credentials.m_AuthType = CloudAuthType::BearerToken;
-                credentials.m_Token = std::string(api->m_ApiKey.Get());
+                credentials.m_Token.Set(api->m_ApiKey.Get());
             });
         if (!found)
         {
@@ -114,7 +115,7 @@ namespace AIAssistant
         }
 
         // Reject CR/LF in bearer token before splicing into the Authorization header.
-        if (ICloudTaskExecutor::ContainsCrlf(credentials.m_Token))
+        if (ICloudTaskExecutor::ContainsCrlf(credentials.m_Token.Get()))
         {
             ConnectorHttp::IncrementCredentialCrlfRejection();
             LOG_SECURITY_WARN("[security] slack_test_bearer_crlf_rejected connection='{}'", connection.m_Name);
@@ -141,8 +142,8 @@ namespace AIAssistant
         ConnectorHttp::ApplyHardenedDefaults(curl, url);
 
         struct curl_slist* headers = nullptr;
-        std::string authHeader = "Authorization: Bearer " + credentials.m_Token;
-        headers = curl_slist_append(headers, authHeader.c_str());
+        SecureString authScratch;
+        AppendSecretHeader(headers, "Authorization: Bearer ", credentials.m_Token, authScratch);
         headers = curl_slist_append(headers, "Content-Type: application/json");
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
 

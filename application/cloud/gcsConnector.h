@@ -59,14 +59,20 @@ namespace AIAssistant
         static std::string BuildEndpointUrl(CloudConnection const& connection);
 
     private:
-        // Exchange a self-signed JWT for an OAuth2 access token.
-        static bool ExchangeJwtForAccessToken(std::string const& jwt, std::string const& endpoint,
-                                               std::string& accessToken, std::string& errorMessage);
+        // Exchange a self-signed JWT for an OAuth2 access token.  Both the input JWT and
+        // the output access token are SecureString so the secret bytes never appear in a
+        // plain std::string heap allocation between JwtGenerator's output and libcurl's
+        // CURLOPT_POSTFIELDS pointer.
+        static bool ExchangeJwtForAccessToken(SecureString const& jwt, std::string const& endpoint,
+                                               SecureString& accessToken, std::string& errorMessage);
 
-        // Simple token cache (one per connection key name, keyed by m_KeyName).
+        // Simple token cache (one per connection key name, keyed by m_KeyName).  The
+        // cached access token is SecureString so cache hits return the secret bytes via
+        // a Set(view) copy into the caller's CloudCredentials::m_Token rather than
+        // through a std::string materialisation step.
         struct CachedToken
         {
-            std::string m_AccessToken;
+            SecureString m_AccessToken;
             std::chrono::steady_clock::time_point m_ExpiresAt{};
         };
 

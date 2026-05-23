@@ -8,9 +8,9 @@ PROV sidecar + .output.txt, scanning the log slice, and cleanup.  Per-API
 drivers stay thin so adding API7 later is a copy-rename.
 
 Per-API drivers assert on the body discriminator in `expected_log_substring`
-since Workstream A (Sitting 5, 2026-05-15) wired the parsed `m_ProviderErrorCode`
-+ `m_ProviderErrorType` + `CategoryToString(m_Category)` into the
-`OnRequestFailed` ERROR line.  Discriminators per InterfaceType (post-Sitting-6):
+because the parsed `m_ProviderErrorCode` + `m_ProviderErrorType` +
+`CategoryToString(m_Category)` flow into the `OnRequestFailed` ERROR line.
+Discriminators per InterfaceType:
 
   api1 + api2 + api6 → OpenAI envelope types: `insufficient_quota`,
                         `rate_limit_error`, `authentication_error`, `server_error`.

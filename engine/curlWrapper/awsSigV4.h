@@ -22,6 +22,7 @@
 #pragma once
 
 #include "curlWrapper/authSigner.h"
+#include "keys/secureString.h"
 
 #include <string>
 
@@ -32,30 +33,45 @@ namespace AIAssistant
     class SigV4Signer final : public IAuthSigner
     {
     public:
-        [[nodiscard]] bool Apply(CurlWrapper::QueryData const& queryData, std::vector<std::string>& outHeaders,
+        // SigV4's Authorization line is a signature (HMAC-SHA256 of the canonical
+        // request) — derived from but not containing the raw secret — so it goes
+        // into publicHeaders.  secretHeader stays empty for SigV4.
+        [[nodiscard]] bool Apply(CurlWrapper::QueryData const& queryData,
+                                 std::vector<std::string>& publicHeaders,
+                                 SecureString& secretHeader,
                                  std::string& errorMessage) const override;
 
         // Inputs grouped for the test seam below.
+        // m_SecretKey + m_SessionToken are SecureString so the secret bytes don't
+        // materialise into a plain std::string heap allocation between the caller
+        // (typically Apply, which pulls from AwsCredential::m_SecretAccessKey /
+        // m_SessionToken) and the HMAC chain.  m_AccessKey stays std::string —
+        // public per AWS conventions, logged for audit.
         struct Inputs
         {
-            std::string m_Method;        // "POST"
-            std::string m_Url;           // full URL
-            std::string m_Body;          // request body bytes (may be empty)
-            std::string m_AccessKey;     // AKIA...
-            std::string m_SecretKey;     // 40-char secret
-            std::string m_SessionToken;  // optional STS session token
-            std::string m_Region;        // e.g. "us-east-1"
-            std::string m_Service;       // e.g. "bedrock"
-            std::string m_AmzDate;       // ISO8601 basic: YYYYMMDDTHHMMSSZ. Empty = use current UTC.
+            std::string  m_Method;        // "POST"
+            std::string  m_Url;           // full URL
+            std::string  m_Body;          // request body bytes (may be empty)
+            std::string  m_AccessKey;     // AKIA... (public per AWS conventions)
+            SecureString m_SecretKey;     // 40-char secret access key
+            SecureString m_SessionToken;  // optional STS session token (secret)
+            std::string  m_Region;        // e.g. "us-east-1"
+            std::string  m_Service;       // e.g. "bedrock"
+            std::string  m_AmzDate;       // ISO8601 basic: YYYYMMDDTHHMMSSZ. Empty = use current UTC.
         };
 
+        // SignedHeaders carries the wire-format header values.  m_SecurityToken
+        // is a SecureString because its value IS the raw STS session token (the
+        // X-Amz-Security-Token header echoes it verbatim).  m_Authorization is
+        // a derived HMAC-SHA256 signature — not the raw secret — and stays
+        // std::string for downstream slist append.
         struct SignedHeaders
         {
-            std::string m_Host;
-            std::string m_AmzDate;
-            std::string m_ContentSha256;
-            std::string m_Authorization;
-            std::string m_SecurityToken; // empty when no session token
+            std::string  m_Host;
+            std::string  m_AmzDate;
+            std::string  m_ContentSha256;
+            std::string  m_Authorization;
+            SecureString m_SecurityToken; // empty when no session token
         };
 
         // Pure function: deterministic given Inputs (including m_AmzDate). Used by

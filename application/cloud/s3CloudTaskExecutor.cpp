@@ -36,8 +36,10 @@
 #include "engine.h"
 #include "cloud/s3CloudTaskExecutor.h"
 #include "cloud/s3Connector.h"
+#include "keys/secureString.h"
 #include "cloud/sigV4Signer.h"
 #include "cloud/connectorHttp.h"
+#include "curlWrapper/curlSlistHelper.h"
 #include "curlWrapper/curlWrapper.h"
 #include "json/jsonHelper.h"
 #include "workflow/taskPathResolver.h"
@@ -103,7 +105,7 @@ namespace AIAssistant
 
     // Helper: perform S3 HTTP request with SigV4 signing
     static bool S3Request(std::string const& method, std::string const& url, std::string const& region,
-                          std::string const& accessKeyId, std::string const& secretKey,
+                          std::string const& accessKeyId, SecureString const& secretKey,
                           std::string const& payloadHash, std::string& responseBody, long& httpCode,
                           std::map<std::string, std::string> const& extraHeaders = {},
                           char const* uploadData = nullptr, size_t uploadSize = 0)
@@ -177,7 +179,7 @@ namespace AIAssistant
 
     // Helper: download S3 object to a file
     static bool S3Download(std::string const& url, std::string const& region, std::string const& accessKeyId,
-                           std::string const& secretKey, std::string const& outputPath, std::string& errorMessage)
+                           SecureString const& secretKey, std::string const& outputPath, std::string& errorMessage)
     {
         auto signed_ = SigV4Signer::Sign("GET", url, region, "s3", accessKeyId, secretKey,
                                           SigV4Signer::EmptyPayloadHash());

@@ -65,7 +65,7 @@ namespace AIAssistant
         {
             char* m_Ptr{nullptr};
             CurlEscapedString() = default;
-            CurlEscapedString(CURL* curl, std::string const& src)
+            CurlEscapedString(CURL* curl, std::string_view src)
                 : m_Ptr(curl ? curl_easy_escape(curl, src.data(), static_cast<int>(src.size())) : nullptr)
             {
             }
@@ -73,11 +73,15 @@ namespace AIAssistant
             CurlEscapedString(CurlEscapedString const&) = delete;
             CurlEscapedString& operator=(CurlEscapedString const&) = delete;
 
-            // Returns the escaped value, or the original raw on allocation failure (rare;
-            // form-encoded body would still be syntactically valid for the common case).
-            std::string ToString(std::string const& fallback) const
+            // Returns the escaped value as a string_view (no std::string materialisation),
+            // or the caller-supplied fallback on allocation failure (rare; the form-encoded
+            // body is still syntactically valid for the common case).  The returned view is
+            // valid until ~CurlEscapedString frees m_Ptr OR until the fallback source goes
+            // out of scope — whichever comes first.  Used by PerformRefresh to build the
+            // postBody directly into a SecureString via SecureString::Build.
+            std::string_view view(std::string_view fallback) const
             {
-                return m_Ptr ? std::string(m_Ptr) : fallback;
+                return m_Ptr ? std::string_view(m_Ptr) : fallback;
             }
         };
     } // namespace
@@ -194,14 +198,15 @@ namespace AIAssistant
         LOG_CORE_INFO("OAuthTokenManager: refresh loop stopped");
     }
 
-    std::string OAuthTokenManager::GetAccessToken(std::string const& keyName, std::string& errorMessage)
+    bool OAuthTokenManager::GetAccessToken(std::string const& keyName, SecureString& outToken,
+                                            std::string& errorMessage)
     {
         std::unique_lock lock(m_Mutex);
         auto it = m_Tokens.find(keyName);
         if (it == m_Tokens.end())
         {
             errorMessage = "No OAuth tokens stored for '" + keyName + "'";
-            return {};
+            return false;
         }
 
         // Wait if another thread is already refreshing this entry.  Re-find on each wake
@@ -217,7 +222,7 @@ namespace AIAssistant
         if (it == m_Tokens.end())
         {
             errorMessage = "OAuth tokens for '" + keyName + "' were removed while waiting for refresh";
-            return {};
+            return false;
         }
 
         TokenEntry& entry = it->second;
@@ -250,13 +255,15 @@ namespace AIAssistant
             // CONTENTS at the reference can change — passing snapshots by value is the
             // only race-free way to do the network call without holding the lock.
             //
-            // The two secret-bearing snapshots (clientSecret, refreshToken) MATERIALISE
-            // SecureString contents into request-scoped std::string for the duration of
-            // the network call.  Plaintext exposure is bounded to RefreshToken's lifetime.
+            // The two secret-bearing snapshots (clientSecret, refreshToken) are SecureString
+            // so the secret bytes stay in mlock'd / zero-on-destruct memory for the duration
+            // of the network call.
             std::string const snapTokenEndpoint = entry.m_TokenEndpoint;
             std::string const snapClientId     = entry.m_ClientId;
-            std::string const snapClientSecret = std::string(entry.m_ClientSecret.Get());
-            std::string const snapRefreshToken = std::string(entry.m_RefreshToken.Get());
+            SecureString snapClientSecret;
+            SecureString snapRefreshToken;
+            snapClientSecret.Set(entry.m_ClientSecret.Get());
+            snapRefreshToken.Set(entry.m_RefreshToken.Get());
             entry.m_Refreshing = true;
             lock.unlock();
 
@@ -285,7 +292,7 @@ namespace AIAssistant
             if (!success)
             {
                 errorMessage = "On-demand refresh of OAuth token for '" + keyName + "' failed: " + refreshErr;
-                return {};
+                return false;
             }
 
             // Re-find after apply (ApplyRefreshResult relookups internally; we need a
@@ -295,25 +302,26 @@ namespace AIAssistant
             if (it == m_Tokens.end())
             {
                 errorMessage = "OAuth tokens for '" + keyName + "' were removed mid-refresh";
-                return {};
+                return false;
             }
         }
         else if (inBackoff && (tokenMissing || tokenExpired || tokenUnset))
         {
             errorMessage = "OAuth refresh for '" + keyName + "' is in backoff after recent failure";
-            return {};
+            return false;
         }
 
         if (it->second.m_AccessToken.IsEmpty())
         {
             errorMessage = "No access token available for '" + keyName + "' (refresh token missing?)";
-            return {};
+            return false;
         }
 
-        // Materialise the SecureString into request-scoped std::string for the caller.
-        // The signer will use this for the Authorization header; plaintext is bounded to
-        // the request's lifetime.  See QueryData::m_ApiKey for the same tradeoff.
-        return std::string(it->second.m_AccessToken.Get());
+        // Copy the SecureString contents into the caller-owned SecureString.  No
+        // std::string materialisation in either direction — the secret bytes stay in
+        // mlock'd, zero-on-destruct memory the whole way through.
+        outToken.Set(it->second.m_AccessToken.Get());
+        return true;
     }
 
     void OAuthTokenManager::StoreTokens(std::string const& keyName, std::string const& accessToken,
@@ -391,14 +399,16 @@ namespace AIAssistant
         TokenEntry& entry = it->second;
 
         // Wiring sandwich: unregister old, Set new (zeroes prior buffer), register new.
+        // result fields are SecureString; .Get() yields a string_view that Set() copies
+        // into the entry's mlock'd buffer without a std::string step.
         if (!entry.m_AccessToken.IsEmpty()) SecretRedactor::Get().RemoveSecret(entry.m_AccessToken.Get());
-        entry.m_AccessToken.Set(result.m_NewAccessToken);
+        entry.m_AccessToken.Set(result.m_NewAccessToken.Get());
         SecretRedactor::Get().AddSecret(entry.m_AccessToken.Get());
 
-        if (!result.m_NewRefreshToken.empty())
+        if (!result.m_NewRefreshToken.IsEmpty())
         {
             if (!entry.m_RefreshToken.IsEmpty()) SecretRedactor::Get().RemoveSecret(entry.m_RefreshToken.Get());
-            entry.m_RefreshToken.Set(result.m_NewRefreshToken);
+            entry.m_RefreshToken.Set(result.m_NewRefreshToken.Get());
             SecretRedactor::Get().AddSecret(entry.m_RefreshToken.Get());
         }
 
@@ -424,14 +434,19 @@ namespace AIAssistant
                 // but the iterator itself does not).  The pre-fix code dropped the lock
                 // for the network call inside the loop body — UB on the next iteration
                 // if a rehash had occurred.
+                // m_ClientSecret and m_RefreshToken are SecureString so the secret bytes
+                // stay in mlock'd / zero-on-destruct memory across the lock-release +
+                // network-call window.  PendingRefresh is move-only (SecureString is
+                // non-copyable, movable), so the std::vector<PendingRefresh>
+                // push_back(std::move(...)) idiom below works.
                 struct PendingRefresh
                 {
-                    std::string m_KeyName;
-                    std::string m_TokenEndpoint;
-                    std::string m_ClientId;
-                    std::string m_ClientSecret;
-                    std::string m_RefreshToken;
-                    int64_t m_SecondsUntilExpiry{0};
+                    std::string  m_KeyName;
+                    std::string  m_TokenEndpoint;
+                    std::string  m_ClientId;
+                    SecureString m_ClientSecret;
+                    SecureString m_RefreshToken;
+                    int64_t      m_SecondsUntilExpiry{0};
                 };
                 std::vector<PendingRefresh> pending;
 
@@ -475,10 +490,10 @@ namespace AIAssistant
                         task.m_KeyName        = keyName;
                         task.m_TokenEndpoint  = entry.m_TokenEndpoint;
                         task.m_ClientId       = entry.m_ClientId;
-                        // Materialise SecureString → request-scoped std::string for the
-                        // network call (lock is dropped before RefreshToken runs).
-                        task.m_ClientSecret   = std::string(entry.m_ClientSecret.Get());
-                        task.m_RefreshToken   = std::string(entry.m_RefreshToken.Get());
+                        // Snapshot SecureString → SecureString for the network call (lock
+                        // is dropped before RefreshToken runs).
+                        task.m_ClientSecret.Set(entry.m_ClientSecret.Get());
+                        task.m_RefreshToken.Set(entry.m_RefreshToken.Get());
                         task.m_SecondsUntilExpiry = secondsUntilExpiry;
                         pending.push_back(std::move(task));
                     }
@@ -535,8 +550,8 @@ namespace AIAssistant
     }
 
     bool OAuthTokenManager::RefreshToken(std::string const& keyName, std::string const& tokenEndpoint,
-                                         std::string const& clientId, std::string const& clientSecret,
-                                         std::string const& refreshToken, RefreshResult& out,
+                                         std::string const& clientId, SecureString const& clientSecret,
+                                         SecureString const& refreshToken, RefreshResult& out,
                                          std::string& errorMessage)
     {
         // This function holds NO lock and does not touch m_Tokens.  All inputs are
@@ -568,19 +583,36 @@ namespace AIAssistant
         // URL-encode every form field.  RFC 6749 doesn't restrict the refresh-token
         // charset; a token containing & or = (rare but legal) would otherwise break
         // the form-encoded body and produce a corrupted request the provider would
-        // reject with an opaque "invalid_request" error.
-        CurlEscapedString const escRefreshToken(curl, refreshToken);
+        // reject with an opaque "invalid_request" error.  CurlEscapedString ctor takes
+        // std::string_view, so SecureString::Get() views feed directly without a
+        // std::string materialisation step.
+        CurlEscapedString const escRefreshToken(curl, refreshToken.Get());
         CurlEscapedString const escClientId(curl, clientId);
-        CurlEscapedString const escClientSecret(curl, clientSecret);
+        CurlEscapedString const escClientSecret(curl, clientSecret.Get());
 
-        std::string postBody = "grant_type=refresh_token"
-                               "&refresh_token=" + escRefreshToken.ToString(refreshToken) +
-                               "&client_id=" + escClientId.ToString(clientId);
-        if (!clientSecret.empty())
+        // Build the form-urlencoded body directly into a SecureString — the body
+        // contains the refresh_token AND (for confidential-client providers) the
+        // client_secret, both of which are secret material.
+        // CURLOPT_POSTFIELDS does NOT copy by default (per libcurl docs); the
+        // SecureString must outlive curl_easy_perform — kept in this scope until
+        // curl_easy_cleanup runs below.
+        SecureString postBody;
+        if (!clientSecret.IsEmpty())
         {
             // Confidential-client providers (Google) need client_secret; public clients
             // (Microsoft PKCE) do not.
-            postBody += "&client_secret=" + escClientSecret.ToString(clientSecret);
+            postBody.Build({
+                "grant_type=refresh_token&refresh_token=", escRefreshToken.view(refreshToken.Get()),
+                "&client_id=", escClientId.view(clientId),
+                "&client_secret=", escClientSecret.view(clientSecret.Get()),
+            });
+        }
+        else
+        {
+            postBody.Build({
+                "grant_type=refresh_token&refresh_token=", escRefreshToken.view(refreshToken.Get()),
+                "&client_id=", escClientId.view(clientId),
+            });
         }
 
         std::string responseBody;
@@ -593,7 +625,11 @@ namespace AIAssistant
         using WriteFunc = size_t (*)(void*, size_t, size_t, void*);
 
         curl_easy_setopt(curl, CURLOPT_URL, tokenEndpoint.c_str());
-        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, postBody.c_str());
+        // CURLOPT_POSTFIELDS is a no-copy pointer in libcurl — postBody must outlive
+        // curl_easy_perform below.  postBody is a SecureString local to this function,
+        // so its destruction at scope-end (after curl_easy_cleanup) satisfies that.
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, postBody.CStr());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(postBody.Size()));
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, static_cast<WriteFunc>(writeCallback));
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseBody);
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
@@ -651,13 +687,16 @@ namespace AIAssistant
             LOG_CORE_ERROR("OAuthTokenManager: refresh response for '{}' missing access_token", keyName);
             return false;
         }
-        out.m_NewAccessToken = std::string(newAccessToken);
+        // out.m_NewAccessToken / m_NewRefreshToken are SecureString — Set() copies
+        // directly from the simdjson string_view into mlock'd memory without a
+        // std::string intermediate.
+        out.m_NewAccessToken.Set(newAccessToken);
 
         // Refresh-token rotation is optional — provider may or may not return a new one.
         std::string_view newRefreshToken;
         if (!doc["refresh_token"].get_string().get(newRefreshToken))
         {
-            out.m_NewRefreshToken = std::string(newRefreshToken);
+            out.m_NewRefreshToken.Set(newRefreshToken);
         }
 
         // Validate expires_in: server-supplied <= 0 (or absurdly small) values would

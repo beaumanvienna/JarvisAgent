@@ -37,11 +37,9 @@ namespace AIAssistant
 {
     // LiveTransport — the production HTTP/2 backend.  Owns the curl multi
     // handle, performs IAuthSigner integration, and harvests responses for
-    // delivery back to the dispatcher.  Lifted from CurlMultiDispatcher
-    // verbatim during the Foundation Sitting 1 refactor: comments and log
-    // lines preserved unchanged.  Selection between LiveTransport and the
-    // forthcoming MockTransport happens at the dispatcher level on the
-    // per-interface `is_mock` flag (Sitting 2).
+    // delivery back to the dispatcher.  Selection between LiveTransport and
+    // MockTransport happens at the dispatcher level on the per-interface
+    // `is_mock` flag.
     class LiveTransport : public IInterfaceTransport
     {
     public:

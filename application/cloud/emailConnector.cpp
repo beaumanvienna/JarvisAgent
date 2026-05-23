@@ -192,7 +192,7 @@ namespace AIAssistant
                 }
                 credentials.m_AuthType = CloudAuthType::BasicAuth;
                 credentials.m_Username = basic->m_Username;
-                credentials.m_Password = std::string(basic->m_Password.Get());
+                credentials.m_Password.Set(basic->m_Password.Get());
             });
         if (!found)
         {
@@ -285,7 +285,7 @@ namespace AIAssistant
 
         curl_easy_setopt(curl, CURLOPT_URL, smtpUrl.c_str());
         curl_easy_setopt(curl, CURLOPT_USERNAME, credentials.m_Username.c_str());
-        curl_easy_setopt(curl, CURLOPT_PASSWORD, credentials.m_Password.c_str());
+        curl_easy_setopt(curl, CURLOPT_PASSWORD, credentials.m_Password.CStr());
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
         curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
 
@@ -348,7 +348,7 @@ namespace AIAssistant
     }
 
     bool EmailConnector::ImapCommand(std::string const& url, std::string const& username,
-                                     std::string const& password, std::string const& customRequest,
+                                     SecureString const& password, std::string const& customRequest,
                                      std::string& responseBody, std::string& errorMessage, bool useSsl)
     {
         CURL* curl = curl_easy_init();
@@ -362,7 +362,7 @@ namespace AIAssistant
 
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
         curl_easy_setopt(curl, CURLOPT_USERNAME, username.c_str());
-        curl_easy_setopt(curl, CURLOPT_PASSWORD, password.c_str());
+        curl_easy_setopt(curl, CURLOPT_PASSWORD, password.CStr());
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, ImapWriteCallback);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseBody);
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);

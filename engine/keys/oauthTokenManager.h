@@ -53,10 +53,14 @@ namespace AIAssistant
         // call triggers a refresh using the stored refresh_token + client credentials.
         void HydrateFromKeyManager();
 
-        // Get a valid access token for the named credential.
-        // Blocks briefly if a refresh is in progress.
-        // Returns empty string and populates errorMessage on failure.
-        std::string GetAccessToken(std::string const& keyName, std::string& errorMessage);
+        // Get a valid access token for the named credential.  Writes the token bytes
+        // into `outToken` (replacing any prior contents) and returns true on success;
+        // returns false + populates errorMessage on failure (leaves outToken unchanged).
+        // Blocks briefly if a refresh is in progress.  The SecureString out-param keeps
+        // the secret bytes in mlock'd, zero-on-destruct memory — no std::string heap
+        // allocation outside the SecureString-controlled buffer.
+        [[nodiscard]] bool GetAccessToken(std::string const& keyName, SecureString& outToken,
+                                          std::string& errorMessage);
 
         // Store initial tokens after OAuth consent flow completes.
         // tokenEndpoint: provider's token URL (e.g., "https://login.microsoftonline.com/.../token")
@@ -95,12 +99,14 @@ namespace AIAssistant
         };
 
         // Result of a successful network refresh — kept on the stack outside the lock
-        // and applied back to the entry under lock by the caller.
+        // and applied back to the entry under lock by the caller.  Both token fields are
+        // SecureString so the new tokens never appear in a plain std::string heap
+        // allocation between the response parse and the ApplyRefreshResult write-back.
         struct RefreshResult
         {
-            std::string m_NewAccessToken;
-            std::string m_NewRefreshToken; // Empty if server did not rotate the refresh token
-            int64_t m_ExpiresInSeconds{0};
+            SecureString m_NewAccessToken;
+            SecureString m_NewRefreshToken; // Empty if server did not rotate the refresh token
+            int64_t      m_ExpiresInSeconds{0};
         };
 
         // Background thread: refreshes tokens expiring within 5 minutes.
@@ -109,10 +115,14 @@ namespace AIAssistant
         // Perform the network refresh using snapshot inputs (taken under lock by the
         // caller, then passed in by value so this function holds NO lock and does not
         // touch the m_Tokens map).  Result lands in `out` on success.  Returns true
-        // on success; populates errorMessage on failure (logged by caller).
+        // on success; populates errorMessage on failure (logged by caller).  The two
+        // secret-bearing inputs (clientSecret, refreshToken) are SecureString so the
+        // secret bytes never materialise in a std::string heap allocation between the
+        // snapshot capture and libcurl's CURLOPT_POSTFIELDS pointer.
         bool RefreshToken(std::string const& keyName, std::string const& tokenEndpoint,
-                          std::string const& clientId, std::string const& clientSecret,
-                          std::string const& refreshToken, RefreshResult& out, std::string& errorMessage);
+                          std::string const& clientId, SecureString const& clientSecret,
+                          SecureString const& refreshToken, RefreshResult& out,
+                          std::string& errorMessage);
 
         // Apply a successful refresh result to the named entry under lock.
         // Updates secret-redactor registrations atomically with the field updates.

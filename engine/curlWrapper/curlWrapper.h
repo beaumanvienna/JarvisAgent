@@ -21,6 +21,8 @@
 
 #pragma once
 
+#include "keys/secureString.h"
+
 #include <atomic>
 #include <memory>
 #include <string>
@@ -90,7 +92,13 @@ namespace AIAssistant
         {
             std::string m_Url;
             std::string m_Data;
-            std::string m_ApiKey;
+            // Bearer / x-api-key / x-goog-api-key / api-key — single secret credential
+            // for the four static-header AuthStyles.  Lives in mlock'd, zero-on-destruct
+            // memory so the secret never appears in a plain std::string heap allocation
+            // between AiRequestPool::ResolveApiKey and curl_slist_append.  SigV4 paths
+            // leave this empty and read credentials via m_AwsCredential.  See
+            // doc/cyber security.md for the SecureString-only HTTP-path discipline.
+            SecureString m_ApiKey;
             AuthStyle m_AuthStyle{AuthStyle::Bearer};
             long m_TimeoutMs{0}; // 0 = no timeout (default); >0 = max transfer time in ms
             // Per-provider auxiliary fields read by signers (e.g. SigV4 needs region;
@@ -157,6 +165,14 @@ namespace AIAssistant
             std::string m_AmzDateOverride;
 
             bool IsValid() const;
+
+            // Deep copy.  m_ApiKey is a SecureString (non-copyable) so the default
+            // copy ctor is deleted — callers that genuinely need a duplicate (the
+            // dispatcher's retry path keeps a spare while the original moves into
+            // the transport) call this explicitly.  Reallocates a fresh mlock'd
+            // buffer for the cloned secret; every other field is value-copied.
+            // Maintenance: when a field is added to QueryData, extend this method.
+            QueryData Clone() const;
         };
 
         // type alias for curl write callback
@@ -170,6 +186,12 @@ namespace AIAssistant
             ~CurlSlist();
 
             void Append(std::string const& str);
+            // Append a NUL-terminated header directly from a const char* — used to
+            // hand a SecureString::CStr() pointer to curl_slist_append without
+            // building an intermediate std::string that would copy the secret
+            // bytes into a non-mlock'd heap allocation.  curl makes its own copy
+            // internally; that copy is the irreducible residue floor.
+            void AppendCStr(char const* str);
             struct curl_slist* Get();
 
         private:
