@@ -1,5 +1,5 @@
 {
-  "base_url": "http://localhost:8080",
+  "base_url": "https://localhost:8443",
   "poll_interval_sec": 3,
   "default_timeout_sec": 300,
   "workflows": {

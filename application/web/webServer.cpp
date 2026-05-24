@@ -78,6 +78,7 @@
 #include "cloud/cloudCircuitBreaker.h"
 #include "cloud/connectorHttp.h"
 #include "cloud/oneDriveConnector.h"
+#include "network/urlPolicy.h"
 #include "keys/oauthTokenManager.h"
 #include "curlWrapper/curlWrapper.h"
 #include "curlWrapper/curlMultiDispatcher.h"
@@ -4736,6 +4737,33 @@ namespace AIAssistant
             }
         }
 
+        // Plain-HTTP policy: http:// is loopback-only AND never with a
+        // key_name.  Mirrors the ConfigParser gate so REST-driven creation
+        // can't slip a misconfigured interface past the config-load check.
+        if (auto const result = UrlPolicy::ValidateAiInterfaceUrl(url, keyName);
+            !result.has_value())
+        {
+            bool const isCredentialed =
+                result.error().m_Code == UrlPolicy::UrlPolicyErrorCode::CredentialedPlaintextHttp;
+            if (isCredentialed)
+            {
+                UrlPolicy::RecordCredentialedPlaintextHttpRejection();
+            }
+            else
+            {
+                UrlPolicy::RecordUrlPolicyRejection();
+            }
+            LOG_SECURITY_WARN("[security] ai_interface_url_rejected origin=rest_create url='{}' key_name='{}' "
+                              "code={} details='{}'",
+                              url, keyName, UrlPolicy::Describe(result.error().m_Code),
+                              result.error().m_Details);
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = std::string(UrlPolicy::Describe(result.error().m_Code));
+            err["message"] = result.error().m_Details;
+            return MakeJsonResponse(400, err);
+        }
+
         ConfigParser::EngineConfig::ApiInterface newIface;
         newIface.m_Url = url;
         newIface.m_Model = model;
@@ -4919,6 +4947,37 @@ namespace AIAssistant
                                          target->m_FixturePath + "'";
                         return MakeJsonResponse(400, err);
                     }
+                }
+
+                // Plain-HTTP policy: re-validate after applying updates so a
+                // partial PUT that swaps the URL or adds a key_name can't
+                // sneak past the create-time gate.  Checks the resulting
+                // state of m_Url + m_KeyName, not the request fields, so the
+                // partial-update semantics carry through.
+                if (auto const result =
+                        UrlPolicy::ValidateAiInterfaceUrl(target->m_Url, target->m_KeyName);
+                    !result.has_value())
+                {
+                    bool const isCredentialed =
+                        result.error().m_Code == UrlPolicy::UrlPolicyErrorCode::CredentialedPlaintextHttp;
+                    if (isCredentialed)
+                    {
+                        UrlPolicy::RecordCredentialedPlaintextHttpRejection();
+                    }
+                    else
+                    {
+                        UrlPolicy::RecordUrlPolicyRejection();
+                    }
+                    LOG_SECURITY_WARN("[security] ai_interface_url_rejected origin=rest_update name='{}' "
+                                      "url='{}' key_name='{}' code={} details='{}'",
+                                      target->m_Name, target->m_Url, target->m_KeyName,
+                                      UrlPolicy::Describe(result.error().m_Code),
+                                      result.error().m_Details);
+                    crow::json::wvalue err;
+                    err["ok"] = false;
+                    err["error"] = std::string(UrlPolicy::Describe(result.error().m_Code));
+                    err["message"] = result.error().m_Details;
+                    return MakeJsonResponse(400, err);
                 }
             }
             catch (...)
@@ -8638,6 +8697,18 @@ namespace AIAssistant
             static_cast<int64_t>(ConnectorHttp::GetPostgresInvalidSslmodeRejectionCount());
         signals["cloud_postgres_forbidden_param_rejections"] =
             static_cast<int64_t>(ConnectorHttp::GetPostgresForbiddenParamRejectionCount());
+
+        // ---- AI-interface plain-HTTP policy ----
+        // url_policy_rejections fires for any non-loopback http:// or
+        // disallowed-scheme URL at config-load OR REST POST/PUT.
+        // credentialed_plaintext_http_rejections fires only for the http:// +
+        // key_name combo — separate counter because that pattern indicates an
+        // operator configured a credential they intended to use, which is the
+        // higher-priority operational signal.
+        signals["url_policy_rejections"] =
+            static_cast<int64_t>(UrlPolicy::GetUrlPolicyRejectionCount());
+        signals["credentialed_plaintext_http_rejections"] =
+            static_cast<int64_t>(UrlPolicy::GetCredentialedPlaintextHttpRejectionCount());
 
         // ---- Workflow runs ----
         size_t activeRuns = 0;

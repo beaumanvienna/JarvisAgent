@@ -37,6 +37,16 @@ type EditingInterface = {
   originalName: string;
 };
 
+// True for `http://` (not `https://`).  Mirrors `UrlPolicy::IsPlaintextHttpUrl`
+// in `application/network/urlPolicy.cpp` — kept here because the dashboard
+// renders the pill from in-memory interface data without a roundtrip.  Case-
+// sensitive on purpose: every URL the server accepts is canonicalised to a
+// lowercase scheme before it reaches the UI.
+function isPlaintextHttpUrl(url: string): boolean
+{
+  return url.startsWith("http://");
+}
+
 function emptyInterface(): EditingInterface
 {
   return {
@@ -525,6 +535,25 @@ export default function AiManagerView({ appMasterPassword, onDirtyStateChange }:
         </div>
       ) : (
         <div>
+          {apiIndex >= 0 && apiIndex < interfaces.length &&
+           isPlaintextHttpUrl(interfaces[apiIndex].url) && (
+            <div
+              role="alert"
+              style={{
+                marginBottom: 12,
+                padding: "8px 12px",
+                borderRadius: 4,
+                background: "#3a2f0e",
+                color: "#fad36a",
+                border: "1px solid #6b5816",
+                fontSize: 13,
+                lineHeight: 1.4,
+              }}
+            >
+              Default AI uses plaintext loopback — fine for local LLMs
+              (ollama, llama.cpp), never use for remote backends.
+            </div>
+          )}
           {interfaces.map((iface, idx) => (
             <div
               key={iface.name}
@@ -553,8 +582,26 @@ export default function AiManagerView({ appMasterPassword, onDirtyStateChange }:
                 <div className="small muted" style={{ marginTop: 2 }}>
                   {iface.api_type} &middot; {iface.model || "no model"}
                 </div>
-                <div className="small muted" style={{ marginTop: 2 }}>
-                  {iface.url}
+                <div className="small muted" style={{ marginTop: 2, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                  <span>{iface.url}</span>
+                  {isPlaintextHttpUrl(iface.url) && (
+                    <span
+                      title="Plain HTTP — loopback only.  Server enforces that every resolved address is 127.x.y.z or ::1, and refuses any interface that adds a key_name (a credential over plaintext would expose the Bearer token in transit)."
+                      style={{
+                        display: "inline-block",
+                        padding: "1px 6px",
+                        borderRadius: 3,
+                        background: "#3a2f0e",
+                        color: "#fad36a",
+                        border: "1px solid #6b5816",
+                        fontSize: 10,
+                        fontWeight: 600,
+                        letterSpacing: "0.5px",
+                      }}
+                    >
+                      loopback HTTP
+                    </span>
+                  )}
                 </div>
                 <div style={{ marginTop: 4, display: "flex", alignItems: "center", gap: 6 }}>
                   <label className="small muted" style={{ flexShrink: 0 }}>Key:</label>

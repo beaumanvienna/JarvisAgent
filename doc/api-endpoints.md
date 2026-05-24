@@ -795,6 +795,12 @@ Manage the `"API interfaces"` array in `config.json` (in-memory + persist to dis
 - `fixture_path` outside the project root (absolute escape, `..` traversal, symlink target outside) → `fixture_path_rejected` (`ConfineUnderProjectRoot`-gated).
 - Legacy `api_type: "Test"` → `api_type_test_removed` (use `api_type: "API1..6"` + `is_mock: true` + `fixture_path` instead).
 
+**URL policy (rejected with 400 at POST + PUT):**
+- `http://` URL where any resolved address is non-loopback (`127.0.0.0/8` / `::1`) → `url_policy_violation` (the only safe `http://` case is local-LLM dispatch — `http://localhost:11434/...`).
+- `http://` URL combined with a non-empty `key_name` → `credentialed_plaintext_http` (a Bearer token over plaintext would leak in transit).
+- Forbidden scheme (`ws://`, `file://`, `ftp://`, missing scheme) → `url_policy_violation`.
+- The PUT handler re-validates after applying partial updates, so swapping just the URL or just the `key_name` cannot sneak past the create-time gate.  See `doc/cyber security.md` § "AI Interface URL Policy" for the reference impl + counter surface on `/api/debug/signals` (`url_policy_rejections`, `credentialed_plaintext_http_rejections`).
+
 Additional MockTransport hardening enforced at request dispatch (not at this endpoint): 10 MiB per-fixture size cap; optional `<fixture>.meta.json` sibling controls HTTP status (must be `[200, 599]`) and headers (allowlist `{Content-Type, Retry-After}` only — others dropped with WARN); PROV sidecar carries `"mocked": true` + the resolved `fixture_path` so post-mortem tooling distinguishes mock dispatches from live ones.  See `doc/jarvisagent.md` "API interfaces" and `doc/cyber security.md` "MockTransport Security" for the complete posture.
 
 ### POST /api/settings/ai-interfaces/save

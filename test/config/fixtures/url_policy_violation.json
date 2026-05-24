@@ -1,0 +1,45 @@
+{
+    "_comment": "Sitting 15: AI interface URL policy gate (UrlPolicy::ValidateAiInterfaceUrl) — http:// is loopback-only AND never with key_name.  This fixture exercises three rejection categories at config-load: (a) non-loopback http:// (numeric IPv4 literal so the test doesn't depend on DNS), (b) credentialed plaintext (loopback http:// + key_name), (c) forbidden scheme (ws://).  Each rejection emits a LOG_CORE_ERROR + the rejected entry is dropped from m_ApiInterfaces.  A control https:// interface is included so ConfigChecker accepts the config (otherwise the engine exits with no usable interface).  Expected counter deltas: url_policy_rejections += 2, credentialed_plaintext_http_rejections += 1.",
+    "_expected_errors": [
+        "rejected AI interface 'non-loopback-http-canary'",
+        "url='http://192.168.1.5/v1/chat'",
+        "rejected AI interface 'credentialed-loopback-canary'",
+        "url='http://localhost:11434/v1/chat'",
+        "key_name='leak-bait'",
+        "credentialed_plaintext_http",
+        "rejected AI interface 'forbidden-scheme-canary'",
+        "url='ws://localhost/v1/chat'",
+        "url_policy_violation"
+    ],
+
+    "queue folder": "queue",
+    "workflows folder": "workflows",
+
+    "API interfaces": [
+        {
+            "name": "non-loopback-http-canary",
+            "url": "http://192.168.1.5/v1/chat",
+            "model": "test-model",
+            "API": "API1"
+        },
+        {
+            "name": "credentialed-loopback-canary",
+            "url": "http://localhost:11434/v1/chat",
+            "model": "test-model",
+            "API": "API1",
+            "key_name": "leak-bait"
+        },
+        {
+            "name": "forbidden-scheme-canary",
+            "url": "ws://localhost/v1/chat",
+            "model": "test-model",
+            "API": "API1"
+        },
+        {
+            "name": "https-control",
+            "url": "https://api.openai.com/v1/chat/completions",
+            "model": "gpt-test",
+            "API": "API1"
+        }
+    ]
+}

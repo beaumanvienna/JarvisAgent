@@ -332,7 +332,6 @@ Absorbed into the AI dispatch refactor (§5g below). Original scope kept here fo
 - HTTP/2 multiplexing + libcurl multi transport + disk-first philosophy + async completion model — all preserved.
 - Out of scope: native LLM tool-calling (§5e — post-1.0), Claude Code PoC (§5f — post-1.0), additional cloud-native AI adapters (§5h — post-1.0 / pre-1.0 for enterprise).
 - Dev-plan doc `AI dispatch refactor.md` has been mined into `doc/architecture.md` §"AI Dispatch Pipeline" and is safe to delete.
-- Loose follow-up: `tools/replayTranscript.py` — nominally-planned dispatch debugging tool that reads a `<prob>.transcript.json` and re-emits the exact request body against the same provider, for reproducing drift. Not built; add when first real replay need comes up.
 
 ### 5g-rl. AI call performance optimization (rate-limit + size-aware budget) — DONE 2026-04-26
 

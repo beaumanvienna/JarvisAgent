@@ -352,7 +352,7 @@ def main():
     sys.stdout = TeeWriter(sys.__stdout__, log_file)
 
     cfg = load_config()
-    base_url = args.base_url or cfg.get("base_url", "http://localhost:8080")
+    base_url = args.base_url or cfg.get("base_url", "https://localhost:8443")
     api = JarvisAPI(base_url)
     workflows = cfg.get("workflows", {})
     run_order = cfg.get("run_order", list(workflows.keys()))

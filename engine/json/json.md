@@ -152,7 +152,7 @@ private:
    - `m_ApiInterfaces` must not be empty.
    - `engineConfig.m_ApiIndex` must be a valid in-bounds index — strictly `m_ApiIndex < m_ApiInterfaces.size()`.
    - For the selected interface:
-     - URL must `starts_with("https://")` (prefix, not substring — a URL like `http://x/?next=https://y` is rejected).
+     - URL must `starts_with("https://")` or `starts_with("http://")` (scheme prefix, not substring — a URL like `http://x/?next=https://y` is rejected).  Policy decisions on `http://` (loopback-only, never with `key_name`) live upstream in `UrlPolicy::ValidateAiInterfaceUrl`; by the time ConfigChecker runs, the entry has already been validated at parse time, so any `http://` URL still present is loopback-only.
      - Model must be non-empty.
      - Interface type must not be `InvalidAPI`.
 

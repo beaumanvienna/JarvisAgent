@@ -47,6 +47,7 @@
 #include "json/schemaValidator.h"
 #include "keys/credential.h"
 #include "keys/keyManager.h"
+#include "network/urlPolicy.h"
 #include "session/fileWriter.h"
 #include "workflow/aiCallEvents.h"
 #include "workflow/aiTranscript.h"
@@ -1348,9 +1349,9 @@ namespace AIAssistant
         // keyed by this so per-(host, modelFamily) AIMD signals stay independent
         // (Anthropic Sonnet vs Opus on same host).  Strategy derives the family;
         // we extract host from the resolved URL.
+        std::string host;
         std::string quotaKey;
         {
-            std::string host;
             size_t const schemeEnd = queryUrl.find("://");
             if (schemeEnd != std::string::npos)
             {
@@ -1365,6 +1366,19 @@ namespace AIAssistant
             }
             std::string const family = IRateLimitStrategy::Get(api->m_InterfaceType).DeriveQuotaKey(model);
             quotaKey = host + "|" + family;
+        }
+
+        // Per-dispatch audit trail for plain-HTTP dispatches.  ConfigParser
+        // + REST gates already enforce loopback-only for http://, so this
+        // line should only ever appear for local-LLM (ollama / llama.cpp)
+        // dispatch — but logging it anyway means a future regression that
+        // weakens the gate is greppable in the security log.  INFO level —
+        // this is noted-and-allowed, not an error.
+        if (UrlPolicy::IsPlaintextHttpUrl(queryUrl))
+        {
+            LOG_SECURITY_INFO("[security] ai_dispatch_plaintext_http host='{}' run='{}' workflow='{}' "
+                              "task='{}' interface='{}'",
+                              host, runIdForLog, workflowIdForLog, taskIdForLog, api->m_Name);
         }
 
         int64_t const estimatedInputTokens =

@@ -205,7 +205,7 @@ The following fields are recognized:
 - **`"MaxRequestBodyMB"`** — (number) Maximum HTTP request body size in megabytes. Oversized requests are rejected with HTTP 413 before parsing. Engine edition only. Default: 10.
 - **`"API index"`** — (number) Zero-based index of the default AI interface to use from the `"API interfaces"` array.
 - **`"API interfaces"`** — (array) List of AI provider configurations. Each entry is an object with:
-  - **`"url"`** — (string, **required**) The API endpoint URL (e.g. `https://api.openai.com/v1/chat/completions`).
+  - **`"url"`** — (string, **required**) The API endpoint URL (e.g. `https://api.openai.com/v1/chat/completions`).  Plain `http://` is loopback-only — accepted only when every resolved address falls in `127.0.0.0/8` or `::1` (the local-LLM case, e.g. `http://localhost:11434/...` for ollama / llama.cpp).  A non-loopback `http://` URL is rejected at config-load (interface dropped from `m_ApiInterfaces` with `LOG_CORE_ERROR`) and at REST CRUD time (HTTP 400 `url_policy_violation`).  An `http://` URL combined with a non-empty `key_name` is always rejected (`credentialed_plaintext_http`) — a credential over plaintext would leak the Bearer token in transit on every dispatch.  See `doc/cyber security.md` § "AI Interface URL Policy".
   - **`"model"`** — (string) The model name (e.g. `gpt-4o`, `gemini-2.5-flash`).
   - **`"API"`** — (string) The reply parser type:
     - `API1` — OpenAI-compatible chat completions (OpenAI, Google Gemini via OpenAI-compat endpoint, Ollama, any `/v1/chat/completions` provider).

@@ -30,6 +30,7 @@
 #include "file/pathConfinement.h"
 #include "json/configParser.h"
 #include "auxiliary/file.h"
+#include "network/urlPolicy.h"
 
 namespace AIAssistant
 {
@@ -913,6 +914,33 @@ namespace AIAssistant
                 LOG_CORE_INFO("max_context_tokens for '{}' model='{}': {} (source: {})",
                               apiInterface.m_Name, apiInterface.m_Model, resolved,
                               matched ? "model-name fallback table" : "unknown-model default 50000");
+            }
+
+            // Plain-HTTP policy gate: http:// is allowed only when every
+            // resolved host address is loopback (127.0.0.0/8 or ::1), and
+            // never when a key_name is configured (a credential over
+            // plaintext would expose the Bearer token in transit).  The
+            // shipped local-LLM path (ollama / llama.cpp at
+            // http://localhost:11434/...) passes this gate; cloud URLs that
+            // accidentally fell to http:// are rejected.  Fail-closed:
+            // rejected interfaces are skipped here so a misconfigured entry
+            // doesn't silently dispatch in clear text.
+            if (auto const result = UrlPolicy::ValidateAiInterfaceUrl(apiInterface.m_Url, apiInterface.m_KeyName);
+                !result.has_value())
+            {
+                if (result.error().m_Code == UrlPolicy::UrlPolicyErrorCode::CredentialedPlaintextHttp)
+                {
+                    UrlPolicy::RecordCredentialedPlaintextHttpRejection();
+                }
+                else
+                {
+                    UrlPolicy::RecordUrlPolicyRejection();
+                }
+                LOG_CORE_ERROR("ConfigParser: rejected AI interface '{}' url='{}' key_name='{}': {} ({})",
+                               apiInterface.m_Name, apiInterface.m_Url, apiInterface.m_KeyName,
+                               UrlPolicy::Describe(result.error().m_Code),
+                               result.error().m_Details);
+                continue;
             }
 
             engineConfig.m_ApiInterfaces.push_back(std::move(apiInterface));

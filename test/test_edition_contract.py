@@ -625,7 +625,7 @@ def main():
     parser = argparse.ArgumentParser(description="Edition Contract Tests")
     parser.add_argument("--edition", choices=["engine", "studio"],
                         help="Assert specific edition (default: auto-detect)")
-    parser.add_argument("--base-url", default="http://localhost:8080",
+    parser.add_argument("--base-url", default="https://localhost:8443",
                         help="JarvisAgent base URL")
     parser.add_argument("--token", default=None,
                         help="MCP admin API key for Engine auth (default: J9T_TOKEN env var)")

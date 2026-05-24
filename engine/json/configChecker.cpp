@@ -55,9 +55,23 @@ namespace AIAssistant
 
             auto checkUrl = [](std::string const& url) -> bool
             {
-                // Prefix check, not substring — guards against URLs like
-                // "http://evil.com/?x=https://fake" passing the gate.
-                return url.starts_with("https://") && url.size() > sizeof("https://") - 1;
+                // Scheme prefix check, not substring — guards against URLs
+                // like "http://evil.com/?x=https://fake" passing the gate.
+                // `http://` is accepted because `UrlPolicy::ValidateAiInterfaceUrl`
+                // already gated it at parse time: any http:// URL that reaches
+                // ConfigChecker is loopback-only and has no key_name (the local-
+                // LLM case — ollama, llama.cpp, vLLM).  Non-loopback http://
+                // is dropped from `m_ApiInterfaces` at parse, so it cannot
+                // surface here.
+                if (url.starts_with("https://") && url.size() > sizeof("https://") - 1)
+                {
+                    return true;
+                }
+                if (url.starts_with("http://") && url.size() > sizeof("http://") - 1)
+                {
+                    return true;
+                }
+                return false;
             };
 
             auto checkModel = [](std::string const& model) -> bool

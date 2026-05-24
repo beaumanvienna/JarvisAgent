@@ -206,7 +206,6 @@
 > - Live-backed E2E tests for schema-validation retry, chunking, and markitdown (currently manual-only).
 > - Automated hermetic test driving `InterfaceType::Test` (the interface exists, validated by hand, but no regression test asserts the path).
 > - Bedrock (SigV4, `InterfaceType::API5`) + Azure OpenAI — already in TODO §5h.
-> - `replayTranscript.py` tool — already in TODO.
 >
 > **Local-env gotchas worth remembering:**
 > - `config.json` in the working tree matches upstream (reverted pre-commit — the local Test interface addition and the API4-corrupted entries were left out of the commit). If you want to re-exercise the Test interface in a fresh session, POST it via `/api/settings/ai-interfaces` with `api_type: "Test"` and `url: /home/beaumanvienna/dev/jarvisAgent/test/dispatch/fixtures/hermetic_reply.txt`, then `/save`. The save-handler fix in `62a55be` means it will persist as `"API": "Test"` correctly.
@@ -297,7 +296,7 @@ Event bus (fire-and-forget, observability only):
 **Preserved unchanged**
 - Disk-first philosophy: every input and output on disk, every call replayable.
 - Queue-folder convention: one STNG / one CNTX / one TASK / many PROB / one PROV per `ai_call` task folder. Fan-out = one envelope per PROB.
-- PROV sidecar: written per dispatch, captures which interface / model / URL / key_name / api_type was used. Envelope carries the same info; PROV is kept for debugging and transcript replay. **PROV is write-only from the dispatch code path** — it is never read back during execution. Only replay tooling (`tools/replayTranscript.py`, §9) reads PROV to reconstruct an envelope from disk. This keeps the envelope as the unambiguous source of truth at runtime.
+- PROV sidecar: written per dispatch, captures which interface / model / URL / key_name / api_type was used. Envelope carries the same info; PROV is kept for post-mortem debugging via log/grep inspection. **PROV is write-only from the dispatch code path** — it is never read back during execution. This keeps the envelope as the unambiguous source of truth at runtime.
 - `max inflight ai calls` throttle (existing config field, default 1000) — preserved. Applies to `AiRequestPool::Submit` the same way it applied to the old file-event-driven path; envelope construction and dispatch are separate, so the throttle's queueing and rejection behavior are unchanged.
 - Markitdown auto-conversion of office files in queue folders.
 - Script-file watcher (`m_ScriptFileWatcher`) — independent, unchanged.
@@ -813,8 +812,6 @@ Both editions (Studio + Engine) run all tests.
 - Contract tests for all previous phases.
 
 **Performance baseline.** Before Phase 1 lands, capture a baseline run of `portfolioDividendAnalysis` (60 parallel ai_calls). After each phase, the same run must complete within +5% of baseline wall-clock time. HTTP/2 multiplexing is the guarantee; any regression indicates a serialization leak in the new layer.
-
-**Transcript replay tool.** By end of Phase 5, a `tools/replayTranscript.py` script takes a `<prob>.transcript.json` and re-emits the request body exactly, for debugging drift.
 
 ---
 

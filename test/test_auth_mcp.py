@@ -692,8 +692,8 @@ def minimal_adhoc_jcwf(wfid: str) -> dict:
 
 def main():
     parser = argparse.ArgumentParser(description="MCP auth + adhoc integration tests")
-    parser.add_argument("--base-url", default=os.environ.get("J9T_URL", "http://localhost:8080"),
-                        help="j9t base URL (default: J9T_URL env or http://localhost:8080)")
+    parser.add_argument("--base-url", default=os.environ.get("J9T_URL", "https://localhost:8443"),
+                        help="j9t base URL (default: J9T_URL env or https://localhost:8443)")
     parser.add_argument("--admin-key", default=os.environ.get("J9T_ADMIN_KEY"),
                         help="Admin MCP API key (or set J9T_ADMIN_KEY env)")
     parser.add_argument("--with-ai", action="store_true",
