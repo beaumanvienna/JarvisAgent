@@ -42,8 +42,8 @@ namespace AIAssistant
     // story is owned by the upstream SecureString that fed the secret into this scope.
     //
     // Reference impls: engine/curlWrapper/awsSigV4.cpp::Sign (SigV4 signing-key chain
-    // kSecret → kDate → kRegion → kService → kSigning); application/cloud/sigV4Signer.cpp
-    // and application/cloud/azureSharedKeySigner.cpp Sign() functions (8d port).
+    // kSecret → kDate → kRegion → kService → kSigning) and
+    // application/cloud/azureSharedKeySigner.cpp Sign().
     struct ScopedSecretBytes
     {
         std::vector<unsigned char> m_Data;

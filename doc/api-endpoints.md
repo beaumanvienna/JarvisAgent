@@ -119,6 +119,7 @@ Creates an `ISSUE_<id>.txt` file in the queue directory under the given subsyste
 - `403 forbidden` — missing or invalid MCP credential.
 - `413 payload_too_large` — request body exceeds 1 KB.
 - `429 rate_limited` — pre-auth rate limit exceeded; respect `Retry-After`.
+- `503 keystore_locked` — keystore not yet unlocked.  MCP-key validation requires the encrypted store to be decrypted via `POST /api/settings/keys/unlock`.  Returned ahead of any auth attempt so a bridge polling against a freshly-started j9t does not consume the per-IP lockout budget.  Body: `{"ok": false, "error": "keystore_locked", "message": "keystore not yet unlocked"}`.
 
 ### Debug Signals — Debug builds only
 
@@ -126,6 +127,7 @@ Creates an `ISSUE_<id>.txt` file in the queue directory under the given subsyste
 |--------|------|-------------|
 | GET | `/api/debug/signals` | Live engine introspection — AI dispatcher, controllers, workflow runs, websocket, python pool, uptime, plus cloud-surface security counters (`cloud_dns_resolved_ip_rejections`, `cloud_endpoint_ssrf_rejections`, `cloud_credential_crlf_rejections`, `cloud_input_validation_rejections`, `cloud_postgres_invalid_sslmode_rejections`, `cloud_postgres_forbidden_param_rejections`) and a `last_mock_signatures` array surfacing recent MockTransport auth-signer captures (FIFO ring, cap 32; each entry `{cancel_key, quota_key, headers}` — consumed by `test/dispatch/test_bedrock_sigv4.py` for the hermetic SigV4 KAT).  Returns 404 on Release builds. |
 | POST | `/api/debug/parse-rate-limit-headers` | Hermetic-test entry point. Body: `{interface_type, model, header_buffer, body, http_status}`. Calls `IRateLimitStrategy::Parse(...)` and returns the parsed `RateLimitObservation` plus `quota_key` + `initial_concurrency_probe`. Lets `test/dispatch/test_rate_limit_observation_parse.py` exercise every provider strategy without a live HTTP round-trip. Returns 404 on Release builds. |
+| GET | `/api/debug/build-callback-payload` | Renders the completion-callback JSON body for a given runId without firing the outbound HTTPS POST.  Lets `test/hardening/test_negative_paths.py` group 1.2 verify the 64 KiB per-output cap + UTF-8-safe truncation without the SSRF gate (which rejects loopback callbackUrls by design) getting in the way.  Query: `runId` (required), `include_outputs` (optional bool — false/0/no/False/FALSE strip per-task output values + file contents).  Returns 404 on Release builds, 404 on unknown runId, 400 on missing runId. |
 
 **Selected fields (rate-limit refactor):**
 
@@ -1161,7 +1163,7 @@ See **JC Workflow Specification §3.3.3** for full semantics and code examples.
 
 Provide either `tail` or `offset`, not both. If `offset` is given, only new lines since that byte position are returned.
 
-> **Note:** The dashboard Log Viewer uses `tail` mode for the initial backfill, then receives live updates via the WebSocket `log` message (see below). The `offset` delta-polling mode is retained for backward compatibility and external tools.
+> **Note:** The dashboard Log Viewer uses `tail` mode for the initial backfill, then receives live updates via the WebSocket `log` message (see below). The `offset` delta-polling mode serves external tools and polling clients that don't use the WebSocket.
 
 **Response (200):**
 ```json
@@ -1383,7 +1385,7 @@ Tests the connection using the `ICloudConnector::TestConnection()` method for th
 **Response (400):** `{ "ok": false, "error": "test_failed", "code": "network_error", "message": "S3 test failed: Could not connect to server" }`
 **Response (400):** `{ "ok": false, "error": "no_connector", "message": "No connector registered for type 'xyz'" }`
 
-The `code` field on `test_failed` responses is the lowercase-snake form of `ConnectorErrorCode` — one of `invalid_config` / `invalid_endpoint` / `credential_missing` / `credential_invalid` / `oauth_error` / `network_error` / `auth_failure` / `http_error` / `unknown_error`.  Stable identifiers the dashboard switches on for remediation copy.  The breaker records the same code via `CloudCircuitBreaker::RecordFailure`; it surfaces as `last_failure_code` on the per-connection entry of `/api/status::connection_health`.
+The `code` field on `test_failed` responses is the lowercase-snake form of `ConnectorErrorCode` — one of `invalid_config` / `invalid_endpoint` / `credential_missing` / `credential_invalid` / `oauth_error` / `network_error` / `auth_failure` / `http_error` / `value_out_of_range` / `unknown_error`.  Stable identifiers the dashboard switches on for remediation copy.  The breaker records the same code via `CloudCircuitBreaker::RecordFailure`; it surfaces as `last_failure_code` on the per-connection entry of `/api/status::connection_health`.  Codes are classified by `IsConnectionFailure(code)` — connection-class codes tick the breaker's consecutive-failure counter and can trip it Open; `value_out_of_range` (known-good-connection app-level rejection: db_query `max_rows` / `max_output_bytes` / `statement_timeout` exceeded) is recorded for display but does NOT tick the counter, so a user repeatedly hitting an app-level cap does not lock themselves out of the connection.
 
 ### POST /api/connections/save
 Serializes all connections to `connections.json` in the launch directory.  The write is atomic (tmp-file + rename) — on a 5xx response the existing `connections.json` is left unchanged.

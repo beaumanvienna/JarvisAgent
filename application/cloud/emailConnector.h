@@ -23,6 +23,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <string>
 
 #include "keys/secureString.h"
@@ -66,8 +67,17 @@ namespace AIAssistant
         // Parse UIDs from an IMAP SEARCH response (format: "* SEARCH 1 2 3\r\n").
         static std::vector<std::string> ParseSearchUids(std::string const& searchResponse);
 
+        // Parse UIDVALIDITY from an IMAP STATUS response.  RFC 3501 §6.3.10 shape:
+        // `* STATUS "INBOX" (UIDVALIDITY 12345)`.  Returns 0 on parse failure
+        // (caller treats 0 as "no UIDVALIDITY captured" — pre-poll seed state).
+        static uint32_t ParseStatusUidValidity(std::string const& statusResponse);
+
         // Check an IMAP folder for messages newer than lastSeenUid.
         // Returns the highest UID found, or "" on error / no messages.
+        // `uidValidityOut` is set to the current mailbox UIDVALIDITY on success
+        // (0 on STATUS-command failure).  Caller compares to its last-seen
+        // UIDVALIDITY — a change means UIDs have been renumbered and any
+        // saved UID watermark is invalid.
         // On first call (lastSeenUid empty), seeds the watermark without reporting new mail
         // (hasNewMail will be false).
         static std::string CheckForNewMail(CloudConnection const& connection,
@@ -76,6 +86,7 @@ namespace AIAssistant
                                            std::string const& subjectFilter,
                                            std::string const& lastSeenUid,
                                            bool& hasNewMail,
+                                           uint32_t& uidValidityOut,
                                            std::string& errorMessage);
 
         // ===================================================================

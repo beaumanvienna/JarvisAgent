@@ -880,7 +880,7 @@ make
 
 - `mode: "per_item"` *(updated in v1.1)*  
   Task is expanded per iterator item (for example, each row in a CSV, each line in a text file, each query hit from a Lucene-style index).  
-  The expansion is driven by a **filter node** (3.7) referenced via the task's `"filter"` field. For backward compatibility, expansion may also be driven by a structure trigger (3.2.3) or by explicit dataflow list sources.
+  The expansion is driven by a **filter node** (3.7) referenced via the task's `"filter"` field. Expansion may alternatively be driven by a structure trigger (3.2.3) or by explicit dataflow list sources.
 
 - `filter` (OPTIONAL, string) *(new in v1.1)*  
   References a filter node by ID (see 3.7). Required when `mode` is `"per_item"` and no structure trigger drives the expansion.
@@ -1409,7 +1409,7 @@ Individual files MAY still be listed explicitly:
 
 Glob and explicit entries MAY be mixed in the same array.
 
-##### 3.3.6.8 `environment` (Legacy / Optional)
+##### 3.3.6.8 `environment` (Optional)
 
 Tasks MAY also declare an `environment` object for shell or Python tasks:
 

@@ -58,8 +58,12 @@ namespace AIAssistant
         }
 
         // Returns the MAC bytes, or empty vector on OpenSSL failure.  Caller
-        // detects failure via .empty() and propagates up to Sign().
-        std::vector<unsigned char> HmacSha256(std::vector<unsigned char> const& key, std::string const& data)
+        // detects failure via .empty() and propagates up to Sign().  Data is
+        // string_view so callers can pass std::string / std::string_view /
+        // SecureString::Get() views without a defensive copy — consistent
+        // with cloud-side AzureSharedKey + the rest of the SecureString-only
+        // HTTP path.
+        std::vector<unsigned char> HmacSha256(std::vector<unsigned char> const& key, std::string_view data)
         {
             std::vector<unsigned char> out(SHA256_DIGEST_LENGTH);
             unsigned int len = 0;
@@ -212,7 +216,13 @@ namespace AIAssistant
         out.m_AmzDate = in.m_AmzDate.empty() ? FormatAmzDateNow() : in.m_AmzDate;
         std::string const dateStamp = out.m_AmzDate.substr(0, 8); // YYYYMMDD
 
-        out.m_ContentSha256 = EngineCore::Sha256Hex(in.m_Body);
+        // Payload hash: caller may override (S3 UNSIGNED-PAYLOAD or pre-hashed upload
+        // body); otherwise derive from m_Body.  The Bedrock dispatch path always
+        // leaves the override empty so the derived hash matches the body bytes the
+        // upstream caller will actually send.
+        out.m_ContentSha256 = in.m_ContentSha256Override.empty()
+                                  ? EngineCore::Sha256Hex(in.m_Body)
+                                  : in.m_ContentSha256Override;
         if (out.m_ContentSha256.empty())
         {
             // SHA256 failure — leave Authorization empty so Apply() detects and rejects.
@@ -220,41 +230,64 @@ namespace AIAssistant
         }
         out.m_SecurityToken.Set(in.m_SessionToken.Get());
 
-        // Canonical headers: lowercase name + ':' + trimmed value + '\n', sorted by name.
-        // The header set is fixed (host, x-amz-content-sha256, x-amz-date, and optionally
-        // x-amz-security-token) and the alphabetical sort order is deterministic, so we
-        // hand-build the canonical-headers string in the exact std::map sort order rather
-        // than going through std::map<string,string>.  The session-token VALUE (when
-        // present) is the only secret field; canonicalHeaders is built into a SecureString
-        // (mlock'd, zero-on-destruct) so the secret bytes don't sit in a heap-resident
-        // std::string for the duration of the Sign() call.
+        // Canonical headers: lowercase name + ':' + trimmed value + '\n', sorted by
+        // name.  Build the sorted set as std::map<string, string_view> — the map's
+        // alphabetical ordering is the AWS canonical-request requirement.  Values
+        // are string_views so the session token (a SecureString::Get() view) and
+        // the extras (caller-owned strings) don't need a defensive copy.
+        //
+        // The session-token VALUE (when present) is the only secret in this set;
+        // the final canonicalHeaders string is built into a SecureString
+        // (mlock'd, zero-on-destruct) so the secret bytes don't sit in a heap-
+        // resident std::string for the duration of the Sign() call.
         std::string const trimmedHost = TrimSpace(out.m_Host);
         bool const hasSessionToken = !in.m_SessionToken.IsEmpty();
+        std::string_view const sessionTokenView =
+            hasSessionToken ? in.m_SessionToken.Get() : std::string_view{};
 
-        SecureString canonicalHeaders;
+        std::map<std::string, std::string_view> canonicalHeaderMap;
+        canonicalHeaderMap["host"] = trimmedHost;
+        canonicalHeaderMap["x-amz-content-sha256"] = out.m_ContentSha256;
+        canonicalHeaderMap["x-amz-date"] = out.m_AmzDate;
         if (hasSessionToken)
         {
-            canonicalHeaders.Build({
-                "host:", trimmedHost, "\n",
-                "x-amz-content-sha256:", out.m_ContentSha256, "\n",
-                "x-amz-date:", out.m_AmzDate, "\n",
-                "x-amz-security-token:", in.m_SessionToken.Get(), "\n",
-            });
-        }
-        else
-        {
-            canonicalHeaders.Build({
-                "host:", trimmedHost, "\n",
-                "x-amz-content-sha256:", out.m_ContentSha256, "\n",
-                "x-amz-date:", out.m_AmzDate, "\n",
-            });
+            canonicalHeaderMap["x-amz-security-token"] = sessionTokenView;
         }
 
-        // signedHeaders is just the sorted header-name list (semicolon-joined).  All names
-        // are public on the wire — std::string is the right type.
-        std::string const signedHeaders =
-            hasSessionToken ? "host;x-amz-content-sha256;x-amz-date;x-amz-security-token"
-                             : "host;x-amz-content-sha256;x-amz-date";
+        // Extra headers (Content-Type for S3 PUT, etc.) are lowercased and AWS-
+        // trimmed.  Storage for the lowercased keys + trimmed values is in
+        // parallel vectors so the map's string_view values remain valid for the
+        // lifetime of the build below.
+        std::vector<std::string> extraKeys;
+        std::vector<std::string> extraValues;
+        extraKeys.reserve(in.m_ExtraHeadersToSign.size());
+        extraValues.reserve(in.m_ExtraHeadersToSign.size());
+        for (auto const& [k, v] : in.m_ExtraHeadersToSign)
+        {
+            std::string lowerKey = k;
+            std::transform(lowerKey.begin(), lowerKey.end(), lowerKey.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            extraKeys.push_back(std::move(lowerKey));
+            extraValues.push_back(TrimSpace(v));
+            canonicalHeaderMap[extraKeys.back()] = extraValues.back();
+        }
+
+        // Emit canonical-headers + signed-headers list in map order.  Pieces vector
+        // is sized 4 per header (name + ':' + value + '\n').
+        std::vector<std::string_view> pieces;
+        pieces.reserve(canonicalHeaderMap.size() * 4);
+        std::string signedHeaders;
+        for (auto const& [k, v] : canonicalHeaderMap)
+        {
+            pieces.push_back(k);
+            pieces.push_back(":");
+            pieces.push_back(v);
+            pieces.push_back("\n");
+            if (!signedHeaders.empty()) signedHeaders += ';';
+            signedHeaders += k;
+        }
+        SecureString canonicalHeaders;
+        canonicalHeaders.Build(pieces);
 
         // canonicalRequest contains canonicalHeaders, so when the session token is present
         // canonicalRequest carries the secret too.  Build it as a SecureString so the

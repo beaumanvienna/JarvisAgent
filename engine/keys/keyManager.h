@@ -56,22 +56,6 @@ namespace AIAssistant
         // Save current providers to an encrypted file.
         bool Save(std::filesystem::path const& keysFilePath, std::string_view masterPassword);
 
-#ifdef J9T_STUDIO
-        // Load providers from a plaintext JSON file.  Studio editions only —
-        // the production Engine binary rejects plaintext credential storage
-        // at link time (this declaration is `#ifdef`-stripped + the lone
-        // production caller in `engine.cpp` is gated by the same macro).
-        bool LoadPlaintext(std::filesystem::path const& keysFilePath);
-
-        // Save current providers to a plaintext JSON file.  Studio-only,
-        // same rationale as LoadPlaintext.
-        bool SavePlaintext(std::filesystem::path const& keysFilePath);
-#endif
-
-        // Backward compatibility: create a single "openai" provider from OPENAI_API_KEY env var.
-        // endpoint, model, and apiType are taken from the existing config.json API interface.
-        bool LoadFromEnvironment(std::string const& endpoint, std::string const& model, std::string const& apiType);
-
         // Runtime unlock: attempt to decrypt the stored keys file path with a password.
         // Updates m_KeyLoadStatus on success or failure.
         bool Unlock(std::string_view masterPassword);

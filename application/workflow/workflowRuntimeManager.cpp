@@ -671,11 +671,7 @@ namespace AIAssistant
             }
 
             std::string const callbackUrl = callbackIterator->second.m_Value;
-            std::string const workflowId = workflowRun.m_WorkflowId;
             std::string const runId = workflowRun.m_RunId;
-            std::string const state = WorkflowRunStateToString(workflowRun.m_State);
-            std::string const completedAt = workflowRun.m_CompletedAtIso8601;
-            bool const hasFailed = workflowRun.m_HasFailed;
 
             // Output content is included by default for backwards compatibility.
             // Setting `callback_include_outputs` to "false" / "0" / "no" in the run
@@ -709,108 +705,7 @@ namespace AIAssistant
                 }
             }
 
-            // Build per-task summary.
-            std::string taskSummaryJson;
-            {
-                taskSummaryJson += "{";
-                bool first = true;
-                for (auto const& [taskId, taskState] : workflowRun.m_TaskStates)
-                {
-                    if (!first)
-                    {
-                        taskSummaryJson += ",";
-                    }
-                    first = false;
-
-                    static_assert(static_cast<int>(TaskInstanceStateKind::WaitingExternal) == 6,
-                                  "TaskInstanceStateKind variant count changed — extend this switch");
-                    std::string taskStateStr;
-                    switch (taskState.m_State)
-                    {
-                        case TaskInstanceStateKind::Pending:
-                            taskStateStr = "pending";
-                            break;
-                        case TaskInstanceStateKind::Ready:
-                            taskStateStr = "ready";
-                            break;
-                        case TaskInstanceStateKind::Running:
-                            taskStateStr = "running";
-                            break;
-                        case TaskInstanceStateKind::Skipped:
-                            taskStateStr = "skipped";
-                            break;
-                        case TaskInstanceStateKind::Succeeded:
-                            taskStateStr = "succeeded";
-                            break;
-                        case TaskInstanceStateKind::Failed:
-                            taskStateStr = "failed";
-                            break;
-                        case TaskInstanceStateKind::WaitingExternal:
-                            taskStateStr = "waiting_external";
-                            break;
-                    }
-
-                    taskSummaryJson += "\"" + JsonHelper::EscapeJsonString(taskId) + "\":{\"state\":\"" + taskStateStr + "\"";
-                    if (!taskState.m_LastErrorMessage.empty())
-                    {
-                        taskSummaryJson += ",\"error\":\"" + JsonHelper::EscapeJsonString(taskState.m_LastErrorMessage) + "\"";
-                    }
-
-                    // Include task output content for succeeded tasks — only if the
-                    // run context didn't opt out via callback_include_outputs=false.
-                    if (includeOutputs && taskState.m_State == TaskInstanceStateKind::Succeeded &&
-                        !taskState.m_OutputValues.empty())
-                    {
-                        static constexpr size_t kMaxOutputBytes = 65536;
-                        taskSummaryJson += ",\"outputs\":{";
-                        bool firstOutput = true;
-                        for (auto const& [slotName, slotValue] : taskState.m_OutputValues)
-                        {
-                            if (!firstOutput)
-                            {
-                                taskSummaryJson += ",";
-                            }
-                            firstOutput = false;
-
-                            // Try to read file content if the value looks like a path.
-                            std::string content;
-                            std::filesystem::path const filePath(slotValue);
-                            std::error_code ec;
-                            if (std::filesystem::is_regular_file(filePath, ec) && !ec)
-                            {
-                                std::ifstream ifs(filePath, std::ios::binary);
-                                if (ifs.is_open())
-                                {
-                                    content.resize(kMaxOutputBytes);
-                                    ifs.read(content.data(), static_cast<std::streamsize>(kMaxOutputBytes));
-                                    content.resize(static_cast<size_t>(ifs.gcount()));
-                                }
-                            }
-
-                            if (content.empty())
-                            {
-                                content = slotValue; // Fallback: use the raw value.
-                            }
-
-                            taskSummaryJson += "\"" + JsonHelper::EscapeJsonString(slotName) + "\":\"" + JsonHelper::EscapeJsonString(content) + "\"";
-                        }
-                        taskSummaryJson += "}";
-                    }
-
-                    taskSummaryJson += "}";
-                }
-                taskSummaryJson += "}";
-            }
-
-            // Build the full callback payload.
-            std::string payload = "{";
-            payload += "\"workflowId\":\"" + JsonHelper::EscapeJsonString(workflowId) + "\",";
-            payload += "\"runId\":\"" + JsonHelper::EscapeJsonString(runId) + "\",";
-            payload += "\"state\":\"" + state + "\",";
-            payload += "\"ok\":" + std::string(hasFailed ? "false" : "true") + ",";
-            payload += "\"completedAt\":\"" + JsonHelper::EscapeJsonString(completedAt) + "\",";
-            payload += "\"tasks\":" + taskSummaryJson;
-            payload += "}";
+            std::string payload = BuildCallbackPayload(workflowRun, includeOutputs);
 
             LOG_APP_INFO("[callback] firing completion callback for run '{}' to '{}'", runId, callbackUrl);
 
@@ -941,6 +836,119 @@ namespace AIAssistant
         }
 
     } // namespace
+
+    std::string BuildCallbackPayload(WorkflowRun const& workflowRun, bool includeOutputs)
+    {
+        static constexpr size_t kMaxOutputBytes = 65536;
+
+        std::string const state = WorkflowRunStateToString(workflowRun.m_State);
+
+        std::string taskSummaryJson = "{";
+        bool first = true;
+        for (auto const& [taskId, taskState] : workflowRun.m_TaskStates)
+        {
+            if (!first)
+            {
+                taskSummaryJson += ",";
+            }
+            first = false;
+
+            static_assert(static_cast<int>(TaskInstanceStateKind::WaitingExternal) == 6,
+                          "TaskInstanceStateKind variant count changed — extend this switch");
+            std::string taskStateStr;
+            switch (taskState.m_State)
+            {
+                case TaskInstanceStateKind::Pending:
+                    taskStateStr = "pending";
+                    break;
+                case TaskInstanceStateKind::Ready:
+                    taskStateStr = "ready";
+                    break;
+                case TaskInstanceStateKind::Running:
+                    taskStateStr = "running";
+                    break;
+                case TaskInstanceStateKind::Skipped:
+                    taskStateStr = "skipped";
+                    break;
+                case TaskInstanceStateKind::Succeeded:
+                    taskStateStr = "succeeded";
+                    break;
+                case TaskInstanceStateKind::Failed:
+                    taskStateStr = "failed";
+                    break;
+                case TaskInstanceStateKind::WaitingExternal:
+                    taskStateStr = "waiting_external";
+                    break;
+            }
+
+            taskSummaryJson += "\"" + JsonHelper::EscapeJsonString(taskId) + "\":{\"state\":\"" + taskStateStr + "\"";
+            if (!taskState.m_LastErrorMessage.empty())
+            {
+                taskSummaryJson += ",\"error\":\"" + JsonHelper::EscapeJsonString(taskState.m_LastErrorMessage) + "\"";
+            }
+
+            if (includeOutputs && taskState.m_State == TaskInstanceStateKind::Succeeded &&
+                !taskState.m_OutputValues.empty())
+            {
+                taskSummaryJson += ",\"outputs\":{";
+                bool firstOutput = true;
+                for (auto const& [slotName, slotValue] : taskState.m_OutputValues)
+                {
+                    if (!firstOutput)
+                    {
+                        taskSummaryJson += ",";
+                    }
+                    firstOutput = false;
+
+                    std::string content;
+                    std::filesystem::path const filePath(slotValue);
+                    std::error_code ec;
+                    if (std::filesystem::is_regular_file(filePath, ec) && !ec)
+                    {
+                        std::ifstream ifs(filePath, std::ios::binary);
+                        if (ifs.is_open())
+                        {
+                            // Read a small overshoot beyond the cap (a UTF-8
+                            // codepoint is at most 4 bytes) so TruncateUtf8Safe
+                            // sees the straddling sequence and backs off to a
+                            // complete codepoint boundary.  Without the slop,
+                            // an exactly-at-cap byte-level read could leave a
+                            // dangling lead — invalid UTF-8 that detonates
+                            // strict JSON validators and PyUnicode_FromString
+                            // on any Python-side callback receiver.
+                            constexpr size_t kReadSlop = 3;
+                            content.resize(kMaxOutputBytes + kReadSlop);
+                            ifs.read(content.data(), static_cast<std::streamsize>(kMaxOutputBytes + kReadSlop));
+                            content.resize(static_cast<size_t>(ifs.gcount()));
+                            content = TruncateUtf8Safe(content, kMaxOutputBytes);
+                        }
+                    }
+
+                    if (content.empty())
+                    {
+                        content = slotValue;
+                    }
+
+                    taskSummaryJson += "\"" + JsonHelper::EscapeJsonString(slotName) + "\":\"" +
+                                       JsonHelper::EscapeJsonString(content) + "\"";
+                }
+                taskSummaryJson += "}";
+            }
+
+            taskSummaryJson += "}";
+        }
+        taskSummaryJson += "}";
+
+        std::string payload = "{";
+        payload += "\"workflowId\":\"" + JsonHelper::EscapeJsonString(workflowRun.m_WorkflowId) + "\",";
+        payload += "\"runId\":\"" + JsonHelper::EscapeJsonString(workflowRun.m_RunId) + "\",";
+        payload += "\"state\":\"" + state + "\",";
+        payload += "\"ok\":" + std::string(workflowRun.m_HasFailed ? "false" : "true") + ",";
+        payload += "\"completedAt\":\"" + JsonHelper::EscapeJsonString(workflowRun.m_CompletedAtIso8601) + "\",";
+        payload += "\"tasks\":" + taskSummaryJson;
+        payload += "}";
+        return payload;
+    }
 
     void WorkflowRuntimeManager::InitializeControlflowRuntime(ActiveRun& activeRun)
     {

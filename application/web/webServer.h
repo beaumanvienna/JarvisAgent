@@ -312,6 +312,13 @@ namespace AIAssistant
         // without scraping logs.
         crow::response HandleDebugRecentSubmissionsGet();
 
+        // Renders the completion-callback payload for a given runId without
+        // firing the outbound HTTPS POST.  Lets test_negative_paths.py verify
+        // the 64 KiB per-output cap + UTF-8-safe truncation without the SSRF
+        // gate getting in the way (the gate rejects loopback callbackUrls by
+        // design).  Query: runId (required), include_outputs (optional bool).
+        crow::response HandleDebugBuildCallbackPayloadGet(crow::request const& req);
+
         // Observe-idempotent contract test.  Body:
         //   { "initial_concurrency_probe": int, "hard_cap": int,
         //     "observations": [ {observation+was_429}, ... ] }

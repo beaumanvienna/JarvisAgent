@@ -65,11 +65,15 @@ namespace AIAssistant
         // Store initial tokens after OAuth consent flow completes.
         // tokenEndpoint: provider's token URL (e.g., "https://login.microsoftonline.com/.../token")
         // clientId: OAuth application client ID (needed for refresh requests)
-        // clientSecret: OAuth client secret (required by confidential-client providers like Google)
-        void StoreTokens(std::string const& keyName, std::string const& accessToken,
-                         std::string const& refreshToken, int64_t expiresInSeconds,
+        // clientSecret: OAuth client secret (required by confidential-client providers like Google).
+        // The three secret-bearing inputs (accessToken, refreshToken, clientSecret) are SecureString
+        // so the bytes stay in mlock'd / zero-on-destruct memory between the consent-callback
+        // parse site and the in-memory TokenEntry — no plain std::string heap allocation
+        // outside the SecureString-controlled buffer.
+        void StoreTokens(std::string const& keyName, SecureString const& accessToken,
+                         SecureString const& refreshToken, int64_t expiresInSeconds,
                          std::string const& tokenEndpoint = {}, std::string const& clientId = {},
-                         std::string const& clientSecret = {});
+                         SecureString const& clientSecret = {});
 
         // Check if a credential has valid (non-expired) tokens.
         bool HasValidToken(std::string const& keyName) const;

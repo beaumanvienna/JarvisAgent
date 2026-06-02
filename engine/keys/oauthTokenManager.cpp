@@ -324,25 +324,27 @@ namespace AIAssistant
         return true;
     }
 
-    void OAuthTokenManager::StoreTokens(std::string const& keyName, std::string const& accessToken,
-                                         std::string const& refreshToken, int64_t expiresInSeconds,
+    void OAuthTokenManager::StoreTokens(std::string const& keyName, SecureString const& accessToken,
+                                         SecureString const& refreshToken, int64_t expiresInSeconds,
                                          std::string const& tokenEndpoint, std::string const& clientId,
-                                         std::string const& clientSecret)
+                                         SecureString const& clientSecret)
     {
         std::lock_guard lock(m_Mutex);
 
         TokenEntry entry;
-        if (!accessToken.empty())  entry.m_AccessToken.Set(accessToken);
-        if (!refreshToken.empty()) entry.m_RefreshToken.Set(refreshToken);
-        if (!clientSecret.empty()) entry.m_ClientSecret.Set(clientSecret);
+        if (!accessToken.IsEmpty())  entry.m_AccessToken.Set(accessToken.Get());
+        if (!refreshToken.IsEmpty()) entry.m_RefreshToken.Set(refreshToken.Get());
+        if (!clientSecret.IsEmpty()) entry.m_ClientSecret.Set(clientSecret.Get());
         entry.m_TokenEndpoint = tokenEndpoint;
         entry.m_ClientId      = clientId;
         entry.m_ExpiresAt     = NowUnixSeconds() + expiresInSeconds;
 
-        // Register tokens with SecretRedactor
-        SecretRedactor::Get().AddSecret(accessToken);
-        if (!refreshToken.empty()) SecretRedactor::Get().AddSecret(refreshToken);
-        if (!clientSecret.empty()) SecretRedactor::Get().AddSecret(clientSecret);
+        // Register tokens with SecretRedactor.  AddSecret takes string_view so the
+        // SecureString::Get() views feed directly without materialising into a heap
+        // std::string.
+        SecretRedactor::Get().AddSecret(accessToken.Get());
+        if (!refreshToken.IsEmpty()) SecretRedactor::Get().AddSecret(refreshToken.Get());
+        if (!clientSecret.IsEmpty()) SecretRedactor::Get().AddSecret(clientSecret.Get());
 
         m_Tokens[keyName] = std::move(entry);
         LOG_CORE_INFO("OAuthTokenManager: stored tokens for '{}' (expires in {} s)", keyName, expiresInSeconds);

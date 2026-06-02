@@ -1025,6 +1025,24 @@ namespace AIAssistant
                     return HandleParseRateLimitHeadersPost(req);
                 });
 
+        // Completion-callback payload renderer — exposes the body that
+        // FireCompletionCallback would POST to a configured callbackUrl,
+        // without actually firing the HTTP request.  Lets
+        // test_negative_paths.py exercise the 64 KiB per-output cap +
+        // UTF-8-safe truncation without standing up an HTTPS receiver
+        // (the SSRF gate rejects loopback, so end-to-end testing the
+        // payload-rendering path otherwise requires a tunneled public
+        // HTTPS receiver).  Query params: runId (required), include_outputs
+        // (optional, default true; accepts false/0/no/False/FALSE).
+        CROW_ROUTE(m_Server, "/api/debug/build-callback-payload")
+            .methods("GET"_method)(
+                [this](crow::request const& req)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty()) return MakeAuthErrorResponse(err);
+                    return HandleDebugBuildCallbackPayloadGet(req);
+                });
+
         // Size-aware-budget readback — surfaces the dispatcher's bounded
         // ring of recent submissions (QueryData::m_TimeoutMs etc.) so
         // test_size_aware_budget.py can assert the timeout-budget formula
@@ -1701,6 +1719,26 @@ namespace AIAssistant
             return MakePayloadTooLargeResponse(1);
         }
 
+        // Short-circuit the locked-keystore case BEFORE attempting MCP auth.  When
+        // the keystore hasn't been unlocked yet (normal post-restart state), the
+        // MCP-key cache is empty by construction, so every heartbeat attempt would
+        // fail and increment the per-IP lockout counter — locking the trusted
+        // bridge out within ~150 s of startup for 15 minutes and blocking REST
+        // shutdown along with it.  Returning 503 Service Unavailable here is the
+        // right shape: tells the bridge "system is starting, retry later" without
+        // consuming adversarial-flood budget.  (423 Locked would be semantically
+        // closer but Crow's response constructor does not recognise it and
+        // rewrites it to 500.)  No RecordAuthFailure call — the heartbeat never
+        // actually attempted auth, so it's not an auth failure.
+        if (!m_McpKeysLoaded.load())
+        {
+            crow::json::wvalue body;
+            body["ok"] = false;
+            body["error"] = "keystore_locked";
+            body["message"] = "keystore not yet unlocked";
+            return MakeJsonResponse(503, body);
+        }
+
         // Require a valid MCP key.  Without this gate, any unauthenticated
         // caller could pin IsMcpConnected() to true and suppress staleness alerts.
         std::optional<AuthResult> const auth = TryMcpAuth(req);
@@ -1708,6 +1746,21 @@ namespace AIAssistant
         {
             LOG_SECURITY_WARN("[security] mcp_heartbeat_unauthorized ip={}", req.remote_ip_address);
             RecordAuthFailure(req.remote_ip_address);
+            return MakeAuthErrorResponse("missing or invalid MCP credential");
+        }
+
+        // A populated AuthResult with a non-empty m_Error is an auth FAILURE, not a
+        // success — TryMcpAuth returns AuthResult{"invalid_token", ...} on a bogus
+        // mcp_* token (and has already logged mcp_auth_failure + called
+        // RecordAuthFailure for the lockout counter).  Without this check the
+        // handler would treat any non-empty mcp_* Bearer as a valid heartbeat,
+        // updating m_McpLastHeartbeat and pinning IsMcpConnected() to true — exactly
+        // the staleness-alert suppression the gate above warns about.  Don't
+        // double-count the failure here; TryMcpAuth owns the counter.
+        if (!auth->m_Error.empty())
+        {
+            LOG_SECURITY_WARN("[security] mcp_heartbeat_unauthorized ip={} error={}", req.remote_ip_address,
+                              auth->m_Error);
             return MakeAuthErrorResponse("missing or invalid MCP credential");
         }
 
@@ -3962,6 +4015,22 @@ namespace AIAssistant
                 m_WorkflowRuntimeManager->SetRunTerminalObserver({});
                 LOG_APP_INFO("[shutdown] WebServer::SignalStop: detached run-terminal observer from WRM");
             }
+        }
+
+        // Stop the reaper inside the watchdog window.  Without this, the reaper
+        // is only torn down via ~AdhocWorkflowManager during unique_ptr<Application>
+        // destruction at end of main — AFTER engine.cpp's 3-s shutdown watchdog is
+        // diffused.  A future CV-wake regression in StopReaperThread would then
+        // silently stall exit by up to 60 s with no watchdog line and no force-exit.
+        // Lifting the stop here puts it inside the watchdog window so any stall
+        // becomes a loud _exit(EXIT_FAILURE) instead of a silent slow exit.
+        // StopReaperThread is idempotent — the destructor still calls it as a no-op
+        // safety net.
+        if (m_AdhocManager)
+        {
+            LOG_APP_INFO("[shutdown] stopping AdhocManager reaper thread...");
+            m_AdhocManager->StopReaperThread();
+            LOG_APP_INFO("[shutdown] AdhocManager reaper thread stopped");
         }
 
 #ifdef J9T_STUDIO
@@ -7041,19 +7110,26 @@ namespace AIAssistant
         }
 
         // Store tokens in OAuthTokenManager.  Pass client_secret through for confidential
-        // clients so the background refresh loop can use it.
-        std::string clientSecretForRefresh;
+        // clients so the background refresh loop can use it.  The three secret-bearing
+        // inputs are threaded through SecureString locals so the bytes stay in mlock'd /
+        // zero-on-destruct memory — no std::string heap allocation between the consent
+        // response and OAuthTokenManager's in-memory TokenEntry.
+        SecureString accessTokenSecure;
+        SecureString refreshTokenSecure;
+        SecureString clientSecretSecure;
+        accessTokenSecure.Set(accessToken);
+        if (!refreshToken.empty()) refreshTokenSecure.Set(refreshToken);
         if (providerInfo.m_RequiresClientSecret)
         {
             auto clientSecretIt = connection->m_Params.find("client_secret");
             if (clientSecretIt != connection->m_Params.end())
             {
-                clientSecretForRefresh = clientSecretIt->second;
+                clientSecretSecure.Set(clientSecretIt->second);
             }
         }
         auto& oauthManager = Core::g_Core->GetOAuthTokenManager();
-        oauthManager.StoreTokens(connection->m_KeyName, std::string(accessToken), std::string(refreshToken),
-                                 expiresIn, tokenUrl, clientId, clientSecretForRefresh);
+        oauthManager.StoreTokens(connection->m_KeyName, accessTokenSecure, refreshTokenSecure,
+                                 expiresIn, tokenUrl, clientId, clientSecretSecure);
 
         // Persist refresh_token + OAuth app config to the encrypted keys file so tokens
         // survive a restart.  The access_token itself is short-lived and is NOT persisted;
@@ -7101,9 +7177,9 @@ namespace AIAssistant
                     // one on the next request from the persisted refresh token, so we
                     // don't write it here.
                     cred->m_RefreshToken.Set(refreshToken);
-                    if (!clientSecretForRefresh.empty())
+                    if (!clientSecretSecure.IsEmpty())
                     {
-                        cred->m_ClientSecret.Set(clientSecretForRefresh);
+                        cred->m_ClientSecret.Set(clientSecretSecure.Get());
                     }
                     cred->m_ExpiresAt = static_cast<int64_t>(std::time(nullptr)) + expiresIn;
                     cred->m_Scopes = connection->m_Params.count("scopes")
@@ -8975,6 +9051,50 @@ namespace AIAssistant
         body["observation"] = std::move(obs);
 
         return MakeJsonResponse(200, body);
+    }
+
+    crow::response WebServer::HandleDebugBuildCallbackPayloadGet(crow::request const& req)
+    {
+        auto const* runIdParam = req.url_params.get("runId");
+        if (runIdParam == nullptr || std::string(runIdParam).empty())
+        {
+            return MakeWorkflowJsonError(400, "missing_runid", "runId query parameter is required",
+                                         "GET /api/debug/build-callback-payload");
+        }
+        std::string runId(runIdParam);
+
+        bool includeOutputs = true;
+        if (auto const* p = req.url_params.get("include_outputs"); p != nullptr)
+        {
+            std::string const v(p);
+            if (v == "false" || v == "0" || v == "no" || v == "False" || v == "FALSE")
+            {
+                includeOutputs = false;
+            }
+        }
+
+        WorkflowRuntimeManager* workflowRuntimeManager = nullptr;
+        {
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            workflowRuntimeManager = m_WorkflowRuntimeManager;
+        }
+        if (workflowRuntimeManager == nullptr)
+        {
+            return MakeWorkflowJsonError(501, "not_configured", "Workflow runtime manager not configured",
+                                         "GET /api/debug/build-callback-payload");
+        }
+
+        WorkflowRun run;
+        if (!workflowRuntimeManager->TryGetRunById(runId, run))
+        {
+            return MakeWorkflowJsonError(404, "run_not_found", "Run not found: " + runId,
+                                         "GET /api/debug/build-callback-payload", runId);
+        }
+
+        std::string const payload = BuildCallbackPayload(run, includeOutputs);
+        crow::response resp(200, payload);
+        resp.set_header("Content-Type", "application/json");
+        return resp;
     }
 
     crow::response WebServer::HandleDebugRecentSubmissionsGet()

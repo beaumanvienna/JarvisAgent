@@ -194,11 +194,17 @@ namespace AIAssistant
         // Start/Stop on the same instance would race on the std::thread
         // assignment (atomic doesn't make a non-atomic member safe).  Both
         // are guarded by m_ReaperLifecycleMutex.  Inside ReaperLoop the
-        // m_ReaperCv + m_Mutex pair lets Stop() wake the loop immediately
-        // instead of waiting up to a second for the next sleep slice.
+        // m_ReaperCv + m_ReaperCvMutex pair lets Stop() wake the loop
+        // immediately instead of sleeping out the 60 s interval.  The CV uses
+        // its OWN mutex (not the manager-wide m_Mutex shared with
+        // Reap/Stage/OnRunCompleted) so a Stop notify never has to wait behind
+        // a mid-flight Reap directory-walk that holds m_Mutex.  The predicate
+        // reads only the atomic m_ReaperRunning, so the CV mutex guards just
+        // the wait/notify handshake.
         std::thread m_ReaperThread;
         mutable std::mutex m_ReaperLifecycleMutex;
         std::atomic<bool> m_ReaperRunning{false};
         std::condition_variable m_ReaperCv;
+        mutable std::mutex m_ReaperCvMutex;
     };
 } // namespace AIAssistant

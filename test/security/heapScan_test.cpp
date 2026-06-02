@@ -40,12 +40,15 @@ namespace AIAssistant
 
 #else // J9T_HEAPSCAN_BUILD
 
-// NOTE: application/cloud/sigV4Signer.h is deliberately NOT included here.  It
-// defines AIAssistant::SigV4Signer which collides with the engine signer of the
-// same name in engine/curlWrapper/awsSigV4.h.  The cloud-side scenarios are
-// implemented in heapScan_cloud_scenarios.cpp (which includes the cloud header
-// in isolation) and exposed via the forward-declared helpers below.
+// After the cloud/sigV4Signer consolidation, there is only one
+// AIAssistant::SigV4Signer (engine/curlWrapper/awsSigV4.{h,cpp}) — the S3
+// connector path goes through the same Sign() now, with the per-S3 features
+// (caller-supplied payload hash, signed extra headers) modeled as fields on
+// Inputs.  The cloud-shape SigV4 scenario below exercises the S3 dispatch
+// shape (GET + empty-body override + s3 service) to ensure the new
+// ContentSha256Override + ExtraHeadersToSign paths don't introduce a residue.
 
+#include "cloud/azureSharedKeySigner.h"
 #include "curlWrapper/authSigner.h"
 #include "curlWrapper/awsSigV4.h"
 #include "curlWrapper/curlSlistHelper.h"
@@ -53,16 +56,6 @@ namespace AIAssistant
 #include "engine.h"
 #include "keys/credential.h"
 #include "keys/secureString.h"
-
-namespace AIAssistant
-{
-    namespace HeapScanCloud
-    {
-        // Defined in heapScan_cloud_scenarios.cpp.
-        void ExerciseCloudSigV4Sign(SecureString const& secretKey);
-        void ExerciseAzureSharedKeySign(SecureString const& accountKey);
-    } // namespace HeapScanCloud
-} // namespace AIAssistant
 
 #include <algorithm>
 #include <array>
@@ -502,13 +495,24 @@ namespace AIAssistant
             return RunScenario(
                 "cloudSigV4::Sign", seed,
                 [](Needle const& needle) {
+                    // Exercises the S3 dispatch shape (GET + empty-body override
+                    // + s3 service + Content-Type signed extra) against the
+                    // engine signer — verifies the new ContentSha256Override
+                    // and ExtraHeadersToSign paths don't introduce residue.
                     SecureString secretKey;
                     secretKey.Set(NeedleView(needle));
-                    HeapScanCloud::ExerciseCloudSigV4Sign(secretKey);
-                    // Cloud SigV4 uses the same ScopedSecretBytes pattern as the engine
-                    // sibling — kSecret/kDate/kRegion/kService/kSigning all wrapped in
-                    // OPENSSL_cleanse-on-destruct byte vectors.  No std::string heap
-                    // intermediate holds the secret.
+                    SigV4Signer::Inputs in;
+                    in.m_Method = "GET";
+                    in.m_Url = "https://test-bucket.s3.us-east-1.amazonaws.com/object.txt";
+                    in.m_AccessKey = "AKIDEXAMPLE";
+                    in.m_SecretKey.Set(secretKey.Get());
+                    in.m_Region = "us-east-1";
+                    in.m_Service = "s3";
+                    in.m_ContentSha256Override =
+                        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+                    in.m_ExtraHeadersToSign["Content-Type"] = "application/octet-stream";
+                    auto signed_ = SigV4Signer::Sign(in);
+                    (void)signed_;
                 },
                 /*expectedResidual=*/false);
         }
@@ -527,7 +531,12 @@ namespace AIAssistant
                     // intermediate holds the decoded secret.
                     SecureString accountKey;
                     accountKey.Set(NeedleView(needle));
-                    HeapScanCloud::ExerciseAzureSharedKeySign(accountKey);
+                    auto signed_ = AzureSharedKeySigner::Sign(
+                        /*method=*/"GET",
+                        /*url=*/"https://testaccount.blob.core.windows.net/container/blob",
+                        /*accountName=*/"testaccount",
+                        accountKey);
+                    (void)signed_;
                 },
                 /*expectedResidual=*/false);
         }

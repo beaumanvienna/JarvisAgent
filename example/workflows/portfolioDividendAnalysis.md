@@ -4,12 +4,17 @@
 
 The **portfolioDividendAnalysis** workflow demonstrates JarvisAgent's
 **per-item fan-out** capability driven by a local CSV file. It reads a
-60-position investment portfolio, dispatches one AI call per position to
-look up dividend data, then aggregates all results into a single portfolio
-summary.
+60-position investment portfolio, enriches it with **live dividend data from a
+real source**, dispatches one AI call per position to format the figures and
+add qualitative analysis, aggregates all results into a single portfolio
+summary, and stamps a **deterministically-computed grand total** onto it.
 
-This is a two-task pipeline that showcases:
+This is a four-task pipeline that showcases:
 
+- **Real-data enrichment + AI-as-formatter** — a Stage-0 Python task pulls
+  authoritative dividend figures from the sibling `planner` app's database, so
+  the AI works with ground-truth numbers instead of recalling (often stale)
+  values from training.
 - **`csv` filter source** — reads rows from a CSV file with header-based
   field binding.
 - **`per_item` mode with `{{binding.field}}` template substitution** — each
@@ -17,54 +22,79 @@ This is a two-task pipeline that showcases:
 - **`cntx_files` glob patterns** — the downstream summary task dynamically
   collects all per-item outputs using `PROB_*.output.txt` instead of
   hardcoding 60 file references.
-- **Two-stage AI pipeline** — fan-out (per position) → aggregate (single
-  summary).
+- **Deterministic aggregation** — a final Python task recomputes the exact
+  allocation-weighted yield from the enriched data and prepends it to the
+  summary, because language models drift when summing dozens of figures.
+- **Four-stage pipeline** — enrich (Python) → fan-out (per position) →
+  aggregate (AI summary) → verify totals (Python).
 
 ---
 
 ## 1. Big Picture
 
 ```
-                                                  +-----------------------+
-                                    per item      |  lookupDividend       |
-+----------------+  60 positions  ------------->  |  ai_call (per_item)   |
-|  positions     |                                |  60 AI calls          |
-|  csv filter    | ------+                        +-----------+-----------+
-|  port62pos     |       |                                    |
-+----------------+       |                          depends_on|
-                         |                                    v
-                         |                        +-----------------------+
-                         |   glob collect         |  portfolioSummary     |
-                         +---  PROB_*.output  --> |  ai_call (single)     |
-                                                  |  1 AI call            |
-                                                  +-----------------------+
++-----------------------+
+|  exportPlannerData    |   reads port62pos.csv + planner DB
+|  python (Stage 0)     | --> writes port62pos_enriched.csv
++-----------+-----------+    (Symbol,Name,Percentage,DividendYield,
+            |                 AnnualDividendPerShare,Price,AsOf)
+  depends_on|
+            v
++----------------+  60 positions   +-----------------------+
+|  positions     |  per item       |  lookupDividend       |
+|  csv filter    | -------------->  |  ai_call (per_item)   |
+|  enriched CSV  | ------+          |  60 AI calls          |
++----------------+       |          +-----------+-----------+
+                         |                      | depends_on
+                         |  glob collect        v
+                         +--- PROB_*.output -> +-----------------------+
+                                               |  portfolioSummary     |
+                                               |  ai_call (single)     |
+                                               +-----------+-----------+
+                                                 depends_on|
+                                                           v
+                                               +-----------------------+
+                                               |  stampPortfolioTotals |
+                                               |  python (Stage 3)     |
+                                               |  exact total → report |
+                                               +-----------------------+
 ```
 
 ### What happens when you click Run
 
-1. **Filter evaluation** — `FilterEngine` reads `port62pos.csv` (60 data rows
-   + 1 header), producing 60 `FilterItem` objects with fields `Symbol`, `Name`,
-   and `Percentage`.
+1. **Stage 0 — enrichment.** The `exportPlannerData` Python task joins
+   `port62pos.csv` (Symbol, Name, Percentage) against the `planner` app's
+   `tickers` table and writes `port62pos_enriched.csv` beside it, adding
+   authoritative `DividendYield`, `AnnualDividendPerShare`, `Price`, and `AsOf`
+   columns. Symbols absent from the planner get blank columns — never a guess.
 
-2. **Fan-out** — The runtime creates 60 child task instances
-   (`lookupDividend#0` through `lookupDividend#59`). Each child receives
-   the CSV fields as `{{pos.*}}` template variables.
+2. **Filter evaluation** — `FilterEngine` reads `port62pos_enriched.csv` (60
+   data rows + 1 header), producing 60 `FilterItem` objects with the enriched
+   fields bound under `pos`.
 
-3. **Template substitution** — For each child, `{{pos.Symbol}}` and
+3. **Fan-out** — The runtime creates 60 child task instances
+   (`lookupDividend#0` through `lookupDividend#59`). Each child receives the
+   enriched CSV fields as `{{pos.*}}` template variables.
+
+4. **Template substitution** — For each child, `{{pos.Symbol}}` and
    `{{pos.row_number_padded}}` are replaced in both the PROB filename
-   (e.g. `PROB_NVDA_037.txt`) and its content.
+   (e.g. `PROB_NVDA_037.txt`) and its content (which carries the authoritative
+   figures).
 
-4. **AI dispatch** — 60 async AI requests are dispatched in parallel. Each
-   asks the model to look up dividend yield, compute weighted contribution,
-   and report the 5-year trend.
-
-5. **Completion** — Output files `PROB_LQD_001.output.txt` through
-   `PROB_UPS_060.output.txt` are written as responses arrive.
+5. **AI dispatch** — 60 async AI requests run in parallel. Each **copies the
+   supplied figures through unchanged**, computes the weighted contribution,
+   and adds a 5-year trend label + one-line note.
 
 6. **Aggregation** — Once all 60 children succeed, `portfolioSummary` becomes
-   ready. Its `cntx_files` glob pattern `../01_lookupDividend/PROB_*.output.txt`
-   dynamically collects all 60 output files. A single AI call produces the
+   ready. Its `cntx_files` glob `../01_lookupDividend/PROB_*.output.txt`
+   dynamically collects all 60 output files, and a single AI call produces the
    final portfolio summary.
+
+7. **Verify totals** — `stampPortfolioTotals` recomputes the exact
+   allocation-weighted yield straight from `port62pos_enriched.csv` and prepends
+   a "Verified Portfolio Totals (computed)" block to the AI summary, writing the
+   combined `portfolio_report.md`. This is the authoritative grand total — the
+   model's own summation is not trusted for the headline number.
 
 ---
 
@@ -73,12 +103,22 @@ This is a two-task pipeline that showcases:
 ### AI Provider Key
 
 An AI provider key (e.g. `"openai"`) must exist in the JarvisAgent KeyManager.
-The workflow defaults specify `provider: "openai"` and `model: "gpt-4.1-mini"`.
+The workflow defaults specify the `gpt-4.1-mini` interface.
+
+### Dividend data source — the `planner` app
+
+Stage 0 reads the sibling `planner` project's SQLite database (table `tickers`,
+columns `symbol, current_price, ttm_dividend, yield_pct, last_fetched`).
+`ttm_dividend` is the **forward** annual $/share (suspended payers read `$0`);
+`yield_pct` is the dividend yield. The path defaults to the planner's database
+and can be overridden with the `PLANNER_DB` environment variable. Refresh the
+planner's market data before a run if you want current prices in the `AsOf`
+column.
 
 ### CSV Data File
 
-`port62pos.csv` must be present in the `workflows/` directory alongside the
-`.jcwf` file.
+`port62pos.csv` ships inside the `.jcwf` and is extracted to the workflow's
+runtime directory; Stage 0 derives `port62pos_enriched.csv` from it.
 
 ---
 
@@ -86,31 +126,41 @@ The workflow defaults specify `provider: "openai"` and `model: "gpt-4.1-mini"`.
 
 ```
 example/workflows/
-  portfolioDividendAnalysis.jcwf    ← workflow definition
+  portfolioDividendAnalysis.jcwf    ← workflow definition (bundles port62pos.csv)
   portfolioDividendAnalysis.md      ← this document
-  port62pos.csv                     ← 60-position portfolio (Symbol, Name, Percentage)
+scripts/
+  export_dividends.py               ← Stage-0 enrichment (module: export_dividends)
+  portfolio_totals.py               ← Stage-3 deterministic totals (module: portfolio_totals)
 ```
 
-At runtime, all files are copied to the `workflows/` directory.
+At runtime the `.jcwf` is extracted into the `workflows/` directory; Stage 0
+writes `port62pos_enriched.csv` beside the extracted `port62pos.csv`.
 
 ---
 
 ## 4. CSV Data Format
 
-`port62pos.csv` has 60 data rows with a header:
+The bundled source `port62pos.csv` has 60 data rows with a header:
 
 ```csv
 Symbol,Name,Percentage
 LQD,iShares iBoxx USD Investment Grade Corporate Bond ETF,7.11%
-BNDX,Vanguard Total International Bond ETF,5.32%
-WELL,Welltower Inc.,4.48%
 JPM,JPMorgan Chase & Co.,4.28%
 ...
 UPS,United Parcel Service Inc.,0.05%
 ```
 
-The filter binding `"pos"` makes these available as `{{pos.Symbol}}`,
-`{{pos.Name}}`, and `{{pos.Percentage}}`.
+Stage 0 writes the **enriched** `port62pos_enriched.csv` that the filter
+actually reads — the same rows plus authoritative dividend columns:
+
+```csv
+Symbol,Name,Percentage,DividendYield,AnnualDividendPerShare,Price,AsOf
+LQD,iShares iBoxx ...,7.11%,4.54%,4.94,108.93,2026-06-01
+JPM,JPMorgan Chase & Co.,4.28%,2.02%,6.00,296.58,2026-06-01
+...
+```
+
+The filter binding `"pos"` makes every column available as `{{pos.<Column>}}`.
 
 ---
 
@@ -124,7 +174,7 @@ The filter binding `"pos"` makes these available as `{{pos.Symbol}}`,
     "id": "positions",
     "source": {
       "kind": "csv",
-      "path": "port62pos.csv",
+      "path": "port62pos_enriched.csv",
       "delimiter": ",",
       "has_header": true
     },
@@ -136,8 +186,11 @@ The filter binding `"pos"` makes these available as `{{pos.Symbol}}`,
 
 Key points:
 
-- **`kind: "csv"`** — reads a local CSV file via `FilterEngine::EvaluateCsv()`.
-- **`has_header: true`** — first row is treated as column names, not data.
+- **`path: "port62pos_enriched.csv"`** — the file Stage 0 produces. Because
+  `lookupDividend` `depends_on` Stage 0, the enriched file always exists before
+  the filter is evaluated.
+- **`kind: "csv"`** — reads a local CSV via `FilterEngine::EvaluateCsv()`.
+- **`has_header: true`** — first row is column names, not data.
 - **`binding: "pos"`** — all values are injected with the `pos.` prefix.
 - **`max_items: 100`** — safety cap (the CSV has 60 rows).
 
@@ -150,69 +203,109 @@ Each child task instance has access to:
 | `{{pos.Symbol}}` | CSV column "Symbol" | `NVDA` |
 | `{{pos.Name}}` | CSV column "Name" | `NVIDIA Corporation` |
 | `{{pos.Percentage}}` | CSV column "Percentage" | `3.75%` |
+| `{{pos.DividendYield}}` | enriched column | `0.03%` |
+| `{{pos.AnnualDividendPerShare}}` | enriched column | `0.04` |
+| `{{pos.Price}}` | enriched column | `141.22` |
+| `{{pos.AsOf}}` | enriched column (data date) | `2026-06-01` |
 | `{{pos.index}}` | 0-based row index | `5` |
 | `{{pos.row_number}}` | 1-based row number | `6` |
-| `{{pos.line}}` | Raw CSV line | `NVDA,NVIDIA Corporation,3.75%` |
-| `{{pos.col_0}}` | Positional column 0 | `NVDA` |
+| `{{pos.row_number_padded}}` | zero-padded row number | `037` |
 
-### 5.3 Task 1 — `lookupDividend` (per_item)
+### 5.3 Task 0 — `exportPlannerData` (python)
+
+```jsonc
+"exportPlannerData": {
+  "type": "python",
+  "working_directory": "../../queue/portfolioDividendAnalysis/00_exportPlannerData",
+  "params": { "module": "export_dividends", "function": "export" }
+}
+```
+
+- Runs `scripts/export_dividends.py::export`, which reads `port62pos.csv` and
+  the planner DB and writes `port62pos_enriched.csv` into the workflow base
+  directory (via `context["_workflow_base_directory"]`).
+- It is the **single source of factual numbers** — the AI never invents them.
+
+### 5.4 Task 1 — `lookupDividend` (per_item)
 
 ```jsonc
 "lookupDividend": {
   "type": "ai_call",
   "mode": "per_item",
   "filter": "positions",
-  "working_directory": "../queue/portfolioDividendAnalysis/01_lookupDividend",
+  "depends_on": ["exportPlannerData"],
+  "working_directory": "../../queue/portfolioDividendAnalysis/01_lookupDividend",
   "queue_binding": {
     "stng_files": [{ "path": "STNG_succinct.txt", "content": "..." }],
     "task_files": [{ "path": "TASK_dividendLookup.txt", "content": "..." }],
     "cntx_files": [{ "path": "CNTX_portfolio.txt", "content": "..." }],
     "prob_files": [{
       "path": "PROB_{{pos.Symbol}}_{{pos.row_number_padded}}.txt",
-      "content": "Symbol: {{pos.Symbol}}\nName: {{pos.Name}}\nPortfolio Allocation: {{pos.Percentage}}\n"
+      "content": "Symbol: {{pos.Symbol}}\nName: {{pos.Name}}\nPortfolio Allocation: {{pos.Percentage}}\nDividend Yield: {{pos.DividendYield}}\nAnnual Dividend/Share: ${{pos.AnnualDividendPerShare}}\nPrice: ${{pos.Price}}  (as of {{pos.AsOf}})\n"
     }]
   }
 }
 ```
 
-- **`mode: "per_item"`** + **`filter: "positions"`** — triggers fan-out of
-  60 children.
-- **`prob_files`** — template-substituted per child. Produces `PROB_LQD_001.txt`,
-  `PROB_BNDX_002.txt`, ..., `PROB_UPS_060.txt`. The `{{pos.row_number_padded}}`
-  suffix ensures unique filenames even if two rows share the same symbol.
-- **`cntx_files`** — inline content providing portfolio-level context
-  (shared by all children).
-- The AI is instructed to return a structured report with yield, weighted
-  contribution, and 5-year trend.
+- **`depends_on: ["exportPlannerData"]`** — guarantees the enriched CSV is
+  fresh before the fan-out evaluates the filter.
+- **`mode: "per_item"`** + **`filter: "positions"`** — fans out to 60 children.
+- **`prob_files`** — template-substituted per child, carrying the authoritative
+  figures. Produces `PROB_LQD_001.txt` … `PROB_UPS_060.txt`; the
+  `{{pos.row_number_padded}}` suffix keeps filenames unique.
+- The TASK instructs the model to **copy the supplied yield / per-share / price
+  through unchanged**, compute `Weighted Contribution = Allocation% ×
+  DividendYield% ÷ 100`, and add only a 5-year trend label and a one-line note.
 
-### 5.4 Task 2 — `portfolioSummary` (single, with glob)
+### 5.5 Task 2 — `portfolioSummary` (single, with glob)
 
 ```jsonc
 "portfolioSummary": {
   "type": "ai_call",
   "mode": "single",
   "depends_on": ["lookupDividend"],
-  "working_directory": "../queue/portfolioDividendAnalysis/02_portfolioSummary",
+  "working_directory": "../../queue/portfolioDividendAnalysis/02_portfolioSummary",
   "queue_binding": {
     "stng_files": [{ "path": "STNG_succinct.txt", "content": "..." }],
     "task_files": [{ "path": "TASK_portfolioSummary.txt", "content": "..." }],
     "prob_files": [{ "path": "PROB_summarize.txt", "content": "..." }],
-    "cntx_files": [
-      "../01_lookupDividend/PROB_*.output.txt"
-    ]
+    "cntx_files": [ "../01_lookupDividend/PROB_*.output.txt" ]
   }
 }
 ```
 
-- **`depends_on: ["lookupDividend"]`** — waits for all 60 children to
-  complete before starting.
-- **`cntx_files` glob pattern** — `PROB_*.output.txt` dynamically collects
-  all per-item output files. The runtime expands this at execution time,
-  sorts matches lexicographically, and materializes each as a `CNTX_*` file.
-  This means the workflow adapts automatically if the CSV changes to 30 or
-  100 positions.
-- The AI receives all 60 dividend reports as context and produces a single
+- **`depends_on: ["lookupDividend"]`** — waits for all 60 children.
+- **`cntx_files` glob** — `PROB_*.output.txt` dynamically collects all per-item
+  outputs at execution time, sorted lexicographically, each materialized as a
+  `CNTX_*` file. The workflow adapts automatically to any number of positions.
+- The AI receives all 60 (now accurate) dividend reports and produces a single
   executive summary.
+
+### 5.6 Task 3 — `stampPortfolioTotals` (python)
+
+```jsonc
+"stampPortfolioTotals": {
+  "type": "python",
+  "depends_on": ["portfolioSummary"],
+  "working_directory": "../../queue/portfolioDividendAnalysis/03_stampTotals",
+  "file_inputs": ["../02_portfolioSummary/PROB_summarize.output.txt"],
+  "file_outputs": ["portfolio_report.md"],
+  "params": { "module": "portfolio_totals", "function": "stamp" },
+  "outputs": { "reportPath": { "type": "string" } }
+}
+```
+
+- Runs `scripts/portfolio_totals.py::stamp`. It recomputes the exact
+  allocation-weighted yield (`Σ allocation% × yield% ÷ 100`) directly from
+  `port62pos_enriched.csv` — the same ground-truth data the per-item stage used.
+- **`file_inputs`** resolves the AI summary (sibling `02_portfolioSummary`
+  output), injected as `context["_file_input_0"]`; **`outputs.reportPath`**
+  (the `Path` suffix triggers the convention) passes the resolved
+  `portfolio_report.md` path as a kwarg.
+- It prepends a **"Verified Portfolio Totals (computed)"** block (exact total,
+  payer/zero counts, top contributors) to the AI's narrative — language models
+  drift when adding dozens of figures, so the headline number is computed in
+  Python, not by the model.
 
 ---
 
@@ -221,39 +314,23 @@ Each child task instance has access to:
 After a successful run:
 
 ```
-queue/portfolioDividendAnalysis/01_lookupDividend/
-  STNG_succinct.txt                     ← written once (shared)
-  TASK_dividendLookup.txt               ← written once (shared)
-  CNTX_portfolio.txt                    ← written once (shared)
+workflows/portfolioDividendAnalysis/
+  port62pos.csv                         ← bundled source
+  port62pos_enriched.csv                ← written by Stage 0
 
-  PROB_LQD_001.txt                      ← per-item input (position details)
-  PROB_LQD_001.output.txt               ← per-item output (dividend report)
-  PROB_BNDX_002.txt
-  PROB_BNDX_002.output.txt
-  ...
-  PROB_UPS_060.txt
-  PROB_UPS_060.output.txt               ← 60 pairs total
+queue/portfolioDividendAnalysis/01_lookupDividend/
+  STNG_succinct.txt / TASK_dividendLookup.txt / CNTX_portfolio.txt   ← shared
+  PROB_LQD_001.txt / PROB_LQD_001.output.txt                         ← per-item pair
+  ...                                                                ← 60 pairs total
 
 queue/portfolioDividendAnalysis/02_portfolioSummary/
-  STNG_succinct.txt
-  TASK_portfolioSummary.txt
-  PROB_summarize.txt
-  PROB_summarize.output.txt             ← final portfolio summary
+  STNG_succinct.txt / TASK_portfolioSummary.txt / PROB_summarize.txt
+  PROB_summarize.output.txt             ← AI executive summary
+  CNTX_PROB_LQD_001.txt ...             ← 60 files materialized from the glob
 
-  CNTX_PROB_LQD_001.txt                ← materialized from glob (60 files)
-  CNTX_PROB_BNDX_002.txt
-  ...
-  CNTX_PROB_UPS_060.txt
+queue/portfolioDividendAnalysis/03_stampTotals/
+  portfolio_report.md                   ← final deliverable: verified totals + AI summary
 ```
-
-A filter manifest is written to:
-
-```
-workflows/positions/positions.manifest.json
-```
-
-This enables incremental re-runs: on subsequent executions, only positions
-whose CSV row has changed are re-evaluated.
 
 ---
 
@@ -267,68 +344,60 @@ Name: NVIDIA Corporation
 Allocation: 3.75%
 Dividend Yield: 0.03%
 Annual Dividend/Share: $0.04
+Price: $141.22 (as of 2026-06-01)
 Weighted Contribution: 0.0011%
 Dividend Trend (5yr): Growing
 Notes: Minimal dividend; growth-focused semiconductor company.
 ```
 
-### Portfolio Summary (PROB_summarize.output.txt)
+The dividend yield, per-share, and price are passed through from the enriched
+CSV unchanged; only the weighted contribution, trend label, and note are
+produced by the AI.
 
-The summary includes:
+### Final Report (03_stampTotals/portfolio_report.md)
 
-1. **Estimated Total Portfolio Dividend Yield** — sum of all weighted
-   contributions (e.g. ~3.02%)
-2. **Top 10 Dividend Contributors** — sorted table by weighted contribution
-3. **Bottom 10 Contributors** — positions with lowest yield
-4. **Dividend Trend Overview** — e.g. 44 Growing, 13 Stable, 3 Declining
-5. **Asset Class Breakdown** — Equities, REITs, Bond ETFs, Other
-6. **Key Observations** — bullet points on income profile, concentration
-   risk, and suggestions
+The deliverable opens with the Stage-3 **Verified Portfolio Totals** block —
+the exact allocation-weighted yield, payer/zero counts, and top contributors,
+computed in Python — followed by the AI executive summary (estimated total,
+top/bottom contributor tables, trend overview, asset-class breakdown, and
+key observations). The verified header is the number to trust; the AI's own
+stated total is qualitative narrative that can drift on large sums.
 
 ---
 
 ## 8. Key Features Demonstrated
 
-### 8.1 CSV Filter Source (JCWF v1.1)
+### 8.1 Real-data enrichment, AI as formatter
 
-The simplest filter kind — reads a local file, parses header and rows,
-and produces one `FilterItem` per data row.
+Factual, time-sensitive numbers come from a real source (the planner DB) via
+the Stage-0 Python task; the AI is reserved for what it does well — formatting,
+the weighted-contribution arithmetic, and qualitative trend/notes. A `$0.00`
+dividend (suspended payer) flows through correctly rather than being "corrected"
+to a remembered value.
 
-**How it works internally:**
+### 8.2 CSV Filter Source (JCWF v1.1)
 
-1. `FilterEngine::Evaluate()` dispatches to `EvaluateCsv()`.
-2. The header row is parsed to determine column names.
-3. Each data row becomes a `FilterItem` with named fields (from header)
-   and positional fields (`col_0`, `col_1`, ...).
-4. Range filtering and `max_items` are applied during reading.
+`FilterEngine::Evaluate()` dispatches to `EvaluateCsv()`: the header row sets
+column names, each data row becomes a `FilterItem` with named fields (from the
+header) and positional fields (`col_0`, `col_1`, …); `max_items` and range
+filtering apply during reading.
 
-### 8.2 Glob Patterns in `cntx_files` (JCWF v1.1)
+### 8.3 Glob Patterns in `cntx_files` (JCWF v1.1)
 
-The summary task uses `"../01_lookupDividend/PROB_*.output.txt"` to
-dynamically discover all per-item outputs at execution time.
+The summary task uses `"../01_lookupDividend/PROB_*.output.txt"` to discover all
+per-item outputs at execution time. `ExpandCntxFileGlobs()` detects the wildcard,
+resolves the parent directory relative to the task working directory, collects
+and sorts the matches, and materializes each as `CNTX_<basename>` — no need to
+hardcode 60 paths, and it scales with the data.
 
-**How it works internally:**
+### 8.4 Deterministic bookends around the AI
 
-1. `ExpandCntxFileGlobs()` detects `*` or `?` in the path.
-2. The parent directory is resolved relative to the task working directory.
-3. All regular files matching the filename pattern are collected and sorted.
-4. Each match is expanded into an individual `cntx_files` entry.
-5. Materialization copies each as `CNTX_<basename>` in the task folder.
-
-This eliminates the need to hardcode 60 file paths and adapts automatically
-to any number of positions.
-
-### 8.3 Two-Stage Per-Item → Aggregate Pipeline
-
-This is a common pattern for large-scale AI workflows:
-
-1. **Stage 1 (fan-out):** Per-item tasks run in parallel, each producing
-   a focused report.
-2. **Stage 2 (aggregate):** A single task collects all reports and
-   synthesizes a summary.
-
-The `depends_on` relationship ensures Stage 2 never starts until all
-Stage 1 children have completed.
+A common shape for data-grounded AI workflows: a deterministic enrichment stage
+produces ground-truth inputs, per-item tasks fan out in parallel, a single
+aggregate task synthesizes the result, and a deterministic stage recomputes the
+load-bearing numbers. The AI handles language and per-item formatting; Python
+owns the facts and the arithmetic that must be exact (the grand total). `depends_on`
+edges serialize the four stages: enrich → fan-out → aggregate → verify.
 
 ---
 
@@ -336,8 +405,8 @@ Stage 1 children have completed.
 
 | Component | Role in This Workflow |
 |-----------|----------------------|
-| `FilterEngine::EvaluateCsv` | Parses CSV with header, delimiter, range support |
-| `FilterManifestManager` | Writes manifest for incremental freshness tracking |
+| `PythonTaskExecutor` | Runs the Stage-0 enrichment + Stage-3 totals scripts |
+| `FilterEngine::EvaluateCsv` | Parses the enriched CSV with header + delimiter |
 | `WorkflowRuntimeManager` | Per-item fan-out + aggregation of child results |
 | `AiCallTaskExecutor` | Template substitution, queue file materialization |
 | `ExpandCntxFileGlobs` | Glob expansion for dynamic `cntx_files` collection |
@@ -347,20 +416,19 @@ Stage 1 children have completed.
 ## 10. How to Run
 
 ```bash
-# 1. Ensure the workflow and CSV are in the runtime folder
+# 1. Ensure the .jcwf is in the runtime folder (extracts port62pos.csv)
 cp example/workflows/portfolioDividendAnalysis.jcwf workflows/
-cp example/workflows/port62pos.csv workflows/
 
-# 2. Ensure an AI provider key exists in AI Keys (e.g. "openai")
+# 2. Ensure an AI provider key exists in the Keys page (e.g. "openai")
+#    and the planner DB is reachable (or set PLANNER_DB).
 
-# 3. Start JarvisAgent
-./bin/Release/jarvisAgent
-
-# 4. Open the web UI → Workflows → Portfolio Dividend Analysis → Run
+# 3. Start JarvisAgent, then: web UI → Workflows → Portfolio Dividend Analysis → Run
 ```
 
-A full run takes approximately 25–30 seconds (60 parallel AI calls for
-Stage 1, then 1 call for Stage 2).
+Stages 0 and 3 (Python) each run in well under a second; the 60 parallel
+per-item calls plus the single summary dominate the wall-clock. The AI tasks use
+the engine's size-aware timeout budget (no fixed per-task timeout), so the
+summary call — which folds in all 60 reports — gets enough time.
 
 ---
 
@@ -369,38 +437,27 @@ Stage 1, then 1 call for Stage 2).
 ### Different Portfolio
 
 Replace `port62pos.csv` with any CSV that has `Symbol`, `Name`, and
-`Percentage` columns. The workflow adapts to any number of rows
-automatically — both the per-item fan-out and the glob-based summary
-collection scale with the data.
+`Percentage` columns. The enrichment, per-item fan-out, and glob-based summary
+all scale with the row count automatically. Symbols not present in the planner
+DB simply get blank dividend columns.
+
+### Different data source
+
+Point `export_dividends.py` at a different database or API (or set `PLANNER_DB`).
+The contract is only that the enriched CSV gains the `DividendYield`,
+`AnnualDividendPerShare`, `Price`, and `AsOf` columns the PROB template expects.
 
 ### Different AI Provider
 
-Change the `defaults.ai` section:
+Change the `defaults.ai` section in `global.json`:
 
 ```jsonc
 "defaults": {
-  "ai": {
-    "provider": "google",
-    "model": "gemini-2.5-flash"
-  }
+  "ai": { "provider": "google", "model": "gemini-2.5-flash" }
 }
 ```
 
-### Adding a Third Stage
+### Adding a Stage
 
-To extend the pipeline (e.g. generate a PDF report from the summary),
-add a shell or Python task with `depends_on: ["portfolioSummary"]`:
-
-```jsonc
-"generateReport": {
-  "type": "python",
-  "depends_on": ["portfolioSummary"],
-  "working_directory": "../workflows/portfolioDividendAnalysis/03_report",
-  "file_inputs": [
-    "../../queue/portfolioDividendAnalysis/02_portfolioSummary/PROB_summarize.output.txt"
-  ],
-  "file_outputs": ["portfolio_report.pdf"]
-}
-```
-
----
+Chain another shell or Python task with `depends_on: ["stampPortfolioTotals"]`
+(e.g. to render a PDF from `portfolio_report.md`, or email/upload it).

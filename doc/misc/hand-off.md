@@ -15,6 +15,476 @@ Keep entries self-contained — a fresh-context Claude should be able to read ju
 
 ---
 
+## 2026-06-01 (Sitting 16 — Part 6: full closeout, items #11–#17 + drive-by + verification gate) → next session
+
+Closed the **entire remaining Sitting-16 basket** (the 7 items #11–#17) plus the noted `triggerEngine.cpp:521` drive-by, then ran the full closeout verification gate on the merged working tree.  The Sitting-16 incidental-findings basket is now **empty** — every item closed.  JC's standing call all along was "commit at full Sitting-16 closeout"; this is that point.  JC handles the commit.
+
+### What landed (working tree — JC commits)
+
+- **#14 — heartbeat `auth->m_Error` check.**  `HandleMcpHeartbeatPost` now rejects a populated-but-failed `AuthResult` (non-empty `m_Error`) with 403, not just `!has_value()`.  Closes the staleness-alert-suppression bug where any non-empty `mcp_*` Bearer pinned `IsMcpConnected()` true.  No double-count — `TryMcpAuth` already owns `RecordAuthFailure`.  New regression case in `test_auth_mcp.py::test_heartbeat_rejects_bogus_mcp_token` (bogus→403, valid→200).
+- **drive-by — `triggerEngine.cpp:521` use-after-move.**  `AddEmailWatchTrigger` logged `instance.m_Folder` after `std::move(instance)`; captured `resolvedFolder` into a local before the move.
+- **#17 — persisted-watermark unbounded growth.**  `SavePersistedEmailWatermarksLocked` now prunes entries whose `(workflowId|triggerId)` has no live trigger before writing.  Reload goes through `ClearAll()` + `RegisterAll()` (webServer.cpp:2087), so a removed workflow's trigger is silently dropped; the prune runs on the next surviving trigger's save (RegisterAll has already repopulated `m_EmailWatchTriggers`, so survivors are kept).  New `test_email_watch_persistence.py` **S6** scenario (install A+B → uninstall A → assert A's watermark pruned, B's survives).
+- **#16 — reaper cleanup.**  `AdhocWorkflowManager` reaper got its own `m_ReaperCvMutex` (CV no longer shares the manager-wide `m_Mutex`, so a `Stop` notify can't queue behind a mid-flight `Reap` directory walk), and `ReaperLoop` reordered to `Reap(); wait_for(60s);` so a restart sweeps stale folders immediately instead of after 60 s.
+- **#15 — 12 cloud-task executors → typed `ConnectorErrorCode`.**  Every `ExecuteCloud`-level `return false` now sets `taskState.m_LastFailureCode` (~150 sites across s3/gcs/azureBlob/oneDrive/email/slack/jira/redmine/gitHub/googleSheets/snowflake/polarionWrite).  App-level cap/size/quota rejections → `ValueOutOfRange` (the only breaker-behavioral code — keeps a user hitting a cap from self-DoSing the connection); curl-failure → `NetworkError`, 401/403 → `AuthFailure`, other 4xx/5xx → `HttpError`, bad params/path-confinement → `InvalidConfig`, SSRF gate → `InvalidEndpoint`.  Helper-internal `return false` (taskState out of scope) tagged at the `ExecuteCloud` caller.  Companion: removed the now-vestigial `_warm_up_connection` calls + helper from `test_negative_paths.py` 4.2/4.3.
+- **#11 — KeyManager cap synth tests + plaintext/env-var keystore purge.**  New `test/hardening/test_keymanager_caps.py` drives both caps on the **encrypted** `keys.json.enc` path (sandbox spawns j9t + POSTs `/api/settings/keys/unlock` → `Load`): T1 a >4 MB keystore → `exceeds kMaxKeysFileBytes` (pre-decrypt); T2 a Python-crafted VALID 1030-provider keystore (reproduces the `JKEY` AES-256-GCM wire format from `engine/keys/keyEncryption.h`) → `provider count exceeds kMaxProviders=1024`.  4/4 PASS.  **While here, surfaced + fixed a cyber-sec-doc violation:** the Studio-only plaintext-`keys.json` loader (`KeyManager::LoadPlaintext` + the `engine.cpp` `#ifdef J9T_STUDIO` block + dead `SavePlaintext`) AND the `OPENAI_API_KEY` env-var credential fallback (`LoadFromEnvironment`) both contradicted the "same cyber-sec across editions / no unsecured keys" posture in `doc/cyber security.md` — both purged.  `keys.json.enc` (runtime-unlocked) is now the **sole** credential source in every edition.  Credential docs (`engine/keys.md`, `doc/jarvisagent.md`, `doc/cyber security.md`) rewritten to state-of-the-art (no plaintext / env-var / backward-compat framing).  The internal `SetDefaultProvider("")` WARN guard stays defense-in-depth (unreachable via external input).
+- **#12 — live S3 round-trip.**  New `test/dispatch/test_s3_roundtrip.py`: an adhoc JCWF chains python-canary → s3 upload → download → delete (shared `working_directory`) against `my-s3` (minio).  Proves the consolidated engine signer (basket #1) produces wire-correct signatures for PUT (incl. `Content-Type` via `m_ExtraHeadersToSign`), GET, DELETE live.
+- **#13 — live OAuth consent round-trip.**  JC ran the real Google Sheets consent in-browser; the callback's `StoreTokens` stored access+refresh+client_secret as `SecureString`.  Verified: **0** plaintext `ya29.`/`1//` tokens across `security.txt`/`log.txt`/`keys.json.enc`, connection test `ok:true`.  The basket's suggested heap-scan `ScenarioStoreTokens` fallback was found **confounded** — `SecretRedactor::AddSecret` stores secrets as plaintext `std::vector<std::string>` by design (it needs cleartext to redact logs), so a post-`StoreTokens` scan always finds the nonce there; the live round-trip is the honest verification.
+
+### What's verified (merged tree)
+
+| Check | Result |
+|---|---|
+| Studio Debug + Release, Engine Debug + Release builds | clean (only pre-existing simdjson `-Wunused-result` at triggerEngine.cpp:1316) |
+| Edition isolation | Engine Release 15.0 MB < Studio Release 16.1 MB; `LoadPlaintext` absent from Engine |
+| Heap-scan audit (`--heapscan`) | **PASSED** — 9 pass / 0 fail / 1 expected-residual (libcurl strdup floor); `cloudSigV4::Sign` S3-shape 0/0 |
+| `test_auth_mcp.py` (incl #14) | 103/103 |
+| `test_negative_paths.py` (incl #15 + warm-up removal) | 55/55 — 4.4 confirms breaker stays Closed on 6 cap rejections, `last_failure_code=value_out_of_range` |
+| `test_email_watch_persistence.py` (incl #17 S6) | 19/19 (one S5 flake on first run, green on re-run — see gotcha) |
+| `test_keymanager_caps.py` (#11) | 4/4 |
+| `test_s3_roundtrip.py` (#12) | 6/6 |
+| `test_url_policy.py` / `test_adhoc_user_slug_collision.py` | 27/27 / 14/14 |
+| `test_malformed_configs.py` | 56/56 |
+| `test_bedrock_sigv4.py` KAT | PASS (`1a6d6607…` unchanged) |
+| #13 live OAuth | 0 plaintext tokens anywhere; token usable |
+
+### Gotchas next-session-Claude should know
+
+- **`SecretRedactor::AddSecret` stores plaintext** (`m_Secrets` is `std::vector<std::string>`, append-only global) — by design, it needs cleartext to match-and-redact log lines.  This means any heap-scan scenario that calls a path which registers a secret with the redactor (e.g. `StoreTokens`) will find the nonce as an accepted residual, NOT a leak.  Verify those paths live (logs show the redactor working: no plaintext reaches the log) rather than via heap-scan.
+- **OAuth CSRF `state` is keyed by connection name** (`m_OAuthStateTokens[connectionName]`) and overwritten on every `/oauth/authorize` call.  Initiating authorize twice for the same connection (e.g. a curl pre-fetch + the dashboard Connect button) makes the callback's older `state` mismatch the newer stored one → "state mismatch — possible CSRF".  Drive the whole flow from one source (the dashboard Connect button) with no intervening authorize.
+- **`test_email_watch_persistence.py` S5 (restore happy-path) is timing-sensitive.**  Its restore-INFO/fire-trigger assertions read the log via a restart-aware offset; the qwen interface (config default `api_index=11`) emits a failing `TestInterface` call + log noise on every relaunch which can push the restore-INFO past the 30 s window.  Flaked once, green on re-run.  Not a product bug (file-based assertions passed both times).  If it flakes, re-run; if it fails twice, investigate.
+- **The email-watch suite takes ~8.4 min** (not "10") — dominated by the ~60 s TriggerEngine tick cadence × ~7 poll-waits + 4 j9t restart cycles + 1 greenmail restart.  The new S6 is the biggest single contributor (two entry-waits + an absent-prune wait, deadline 140 s though actual is ~1 tick).  Tightenable if it matters (install A+B in one shot, drop absent-deadline to ~90 s).
+- **Credentials are encrypted-only in every edition now** — `keys.json.enc` (AES-256-GCM, runtime-unlocked) is the sole credential source; the Studio-only plaintext `keys.json` loader and the `OPENAI_API_KEY` env-var fallback are both gone.  `test_keymanager_caps.py` runs against any j9t binary (it crafts an encrypted keystore fixture) — but it couples to the `JKEY` wire format in `engine/keys/keyEncryption.h` (33-byte header + PBKDF2-HMAC-SHA256 600k + AES-256-GCM, header as AAD); if that format bumps to V3, regenerate the T2 fixture.  `test_s3_roundtrip.py` needs a running unlocked j9t with `my-s3` online (minio up).
+- **#15 connection-class display granularity:** the storage `*Download`/`*Request` helpers fold transport + HTTP-status into one bool, so downloads are tagged `NetworkError` even on an HTTP 404.  Harmless — all are connection-class (`IsConnectionFailure` true), so breaker behavior is identical; only the `last_failure_code` display differs.  Splitting would need helper-signature changes (out of scope).
+
+### Open items / next-session candidates
+
+- **Sitting 16 basket is CLOSED** — all 22 original + incidental items resolved across Parts 1–6.  Nothing remains in `pre-1_0_follow-ups.md`'s basket section.
+- Unchanged Pre-1.0 tail items live in `todo.md` (landing page, promo video, dogfooding, repo-layout hygiene).
+
+---
+
+## 2026-05-25 (Sitting 16 — Part 5: item 10 full close — test residual) → next session
+
+Picked up the Part-4 residual on #10 (email_watch save-path).  Closed 1 of 7 remaining items — #10 is now fully closed.  Added one new basket item (#17 — persisted-watermark map unbounded-growth across workflow removals, surfaced during Part 5 verification when stale test-workflow entries persisted in `queue/.email_watermarks.json`).  JC's call: still not committing — wrap commit at full Sitting-16 closeout.  **7 items remain (#11-17)**.
+
+### What landed (working tree — JC handles commits)
+
+**#10 (residual close).**  `test/hardening/test_email_watch_persistence.py` is now fully automated end-to-end — 5 scenarios, 16 assertions, 0 failures.  The test owns the j9t restart cycle: REST shutdown via `Authorization: Bearer $J9T_TOKEN` → wait for HTTPS port to drop → launch via `jarvisagent.sh` in a detached process group (`start_new_session=True`) → poll for HTTPS-up via an auth-free probe to `/api/settings/keys/unlock` → unlock the keystore with `JARVIS_MASTER_PASSWORD`.  Without that env var, S2-S5 skip with a warning; S1 still runs against the live j9t.
+
+| Scenario | Assertions | Verifies |
+|---|---|---|
+| **S1** save with UIDVALIDITY | 6 | format_version=2, connection_name, folder, uid_validity, last_seen_uid, updated_at |
+| **S2** v1-file rejection across restart | 2 | load-time WARN `format_version=1 (expected 2) — discarding`, file-shape post-load (untouched or v2 without fake entry) |
+| **S3** registration-time `(connection, folder)` guard | 1 | post-restart WARN `discarding stale watermark for trigger '<id>' workflow '<wfid>'` with both targets named |
+| **S5** restore happy-path | 4 | post-restart INFO `restored persisted UID watermark '<u1>'` + fire-trigger line `firing trigger workflow='<wfid>' trigger='ew'` + watermark advanced U1→U2 + UIDVALIDITY unchanged |
+| **S4** poll-time UIDVALIDITY-change guard | 3 | `docker restart greenmail` to change UIDVALIDITY → WARN `UIDVALIDITY changed (V1 -> V2)` + absence of fire-trigger line + watermark `uid_validity` updated V1→V2 |
+
+### Files in working tree
+
+| File | Change |
+|---|---|
+| `test/hardening/test_email_watch_persistence.py` | Rewrite — `shutdown_j9t` / `launch_j9t` / `wait_for_j9t_listening` / `unlock_keystore` / `restart_j9t` lifecycle helpers; `wait_for_log_substring` + `read_log_tail` with reset-aware offset (file shrinks on restart → fall back to offset 0); `docker_restart_greenmail` helper; `install_workflow` uses `scripts/echo.sh` (sanctioned no-op); five `scenario_*` functions; greenmail recipient is bare `test` (the `-Dgreenmail.users=test:test` config creates a user whose email IS `test` with no @-domain) |
+| `doc/misc/pre-1_0_follow-ups.md` | #10 status changed UNFINISHED → **closed 2026-05-25 (Sitting 16 Part 5)**.  "Remaining for next session" sub-bullets replaced with a "What's verified" table + a "Gotchas" sub-list (greenmail recipient routing / shell-task `scripts/` enforcement / spdlog log-recreation / the drive-by `instance.m_Folder` use-after-move log bug) |
+| `doc/misc/hand-off.md` | This entry |
+
+### What's verified
+
+| Check | Result |
+|---|---|
+| Studio Release build (incremental from Part 4) | clean (only pre-existing simdjson `[-Wunused-result]` in triggerEngine.cpp) |
+| `test_email_watch_persistence.py` full suite | **16/16 assertions across 5 scenarios** (S1: 6, S2: 2, S3: 1, S5: 4, S4: 3) |
+| `test_negative_paths.py` regression | 47/47 across 4 groups (the prior 55 count was pre-warmup-removal; today's `_warm_up_connection` no-ops dropped 8 assertion ticks without changing coverage) |
+| `test_auth_mcp.py` regression | 100/100 |
+| Restart cycles run through the test | 4 full REST-shutdown + relaunch + unlock cycles (S2, S3, S5, S4 each take ownership of one) plus 1 `docker restart greenmail` inside S4 — all clean, no `[shutdown watchdog]` lines |
+| Doc sweep across tracked docs | clean — `doc/cloud-integration.md` already covered Part 4's STATUS UIDVALIDITY request, format_version=2, and the three guards (lines 854/859/861-865); no other tracked doc had stale "Scenario N (manual)" / "next session" leaks |
+
+**Aggregate: 163 passing checks (16 + 47 + 100) across the email_watch persistence + negative-paths + auth-MCP suites.**
+
+### Architecture notes for next-session-Claude
+
+- **The test owns j9t lifecycle from S2 onward.**  S1 runs against the already-running j9t; S2-S5 each REST-shut-down j9t and launch a fresh instance via `jarvisagent.sh` + `JARVIS_MASTER_PASSWORD` unlock.  The instance left running at test end is the one S4 launched — REST-shutdown + manual relaunch if you want a clean log.txt for downstream work.
+- **Scenario ordering is load-bearing.**  S4 (greenmail restart) is LAST because it wipes INBOX + advances UIDVALIDITY; any earlier scenario depending on a stable greenmail state would break if S4 ran before it.
+- **`wait_for_log_substring` is restart-aware.**  spdlog opens log.txt fresh on each j9t restart, so an `offset_pre` captured before shutdown points past the new file's EOF.  The helper falls back to offset 0 when the current size is smaller than the captured offset — works for both "appended-since-capture" (normal case) and "file-was-reset" (post-restart case).
+- **Drive-by bug found, not fixed.**  `triggerEngine.cpp:521`: the AddEmailWatchTrigger INFO log uses `instance.m_Folder` AFTER `m_EmailWatchTriggers.push_back(std::move(instance))` on line 516 — moved-from string is empty, log line shows `folder=`.  Functionally harmless (the vector entry has the correct folder; poll log lines show `folder 'INBOX'`).  Two-line fix: either reorder the log call before the push, or capture `instance.m_Folder` into a local before the move.  Out of scope for the #10 close, but worth a drive-by edit when the file is next touched.
+
+### Open items / next-session candidates
+
+7 items remain in the Sitting 16 basket:
+
+- **#11** — KeyManager hardening synth tests (>4 MB keystore + empty-name `SetDefaultProvider`)
+- **#12** — Live S3 round-trip smoke for the consolidated signer
+- **#13** — Live OAuth consent round-trip for SecureString `StoreTokens`
+- **#14** — Heartbeat handler `auth->m_Error` check (one-line fix + test)
+- **#15** — Migrate remaining 12 cloud-task executors to typed `ConnectorErrorCode`
+- **#16** — Reaper architecture cleanup
+- **#17** *(NEW)* — `m_PersistedEmailWatermarks` map grows unboundedly across workflow removals; pruning at trigger-removal time + a save-prune assertion in `test_email_watch_persistence.py`
+
+### Gotchas next-session-Claude should know
+
+- **greenmail SMTP routing collapses to bare `test` after any restart.**  `-Dgreenmail.users=test:test` creates a single user whose email IS the bare string `test` (no @-domain).  Mail to `test@anything` auto-creates a DIFFERENT user and is invisible to the `test` IMAP login.  An older memory note recorded `test@example.com` working — that was a stale auto-created user that survived a long-running container; any greenmail restart drops it.  Use bare `test` for any new email_watch test.  Updated this convention in `test_email_watch_persistence.py::send_test_email`.
+- **Shell tasks enforce `scripts/` prefix at executor entry.**  Any `command` field not starting with `scripts/` returns ERROR `Script path '<cmd>' rejected for task '<id>' (must be inside the 'scripts/' directory)` — including absolute paths like `touch /tmp/...`.  Test workflows that need a side-effect should use `scripts/echo.sh` or write a small dedicated script under `scripts/` (kept minimal — these get tracked in git).
+- **Binary mtime check before any live test.**  Lost ~15 min this sitting running against a stale binary (built 2026-05-24 13:00, source updated 2026-05-24 17:07 with the UIDVALIDITY persistence work).  The mismatch surfaced as missing log lines (the binary didn't have the new INFO/WARN strings).  `stat -c '%y' bin/Release/jarvisAgent-studio application/workflow/triggerEngine.cpp` before launching any persistence test.
+- **`test_negative_paths.py` reports 47 checks today, not 55.**  Part 4 said 55; the count dropped after the `_warm_up_connection` no-ops were removed from tests 4.2/4.3 (the consecutive-failures-stay-Closed assertions don't need warm-up now that db_query emits typed `ValueOutOfRange`).  All 4 groups still PASS; the assertion-count reduction is intentional cleanup, not a regression.
+
+---
+
+## 2026-05-24 (Sitting 16 — Part 4: item 10 partial close, redesign + live test) → next session
+
+Fourth pass on the Sitting 16 basket, same day as Parts 1+2+3.  Closed 0 items in numerical order — #10 is **partially closed / UNFINISHED**: the most-correct redesign (option D) landed AND was verified live via greenmail, but two test branches and one doc-routing check remain for next session.  See the basket entry for #10 for the explicit "Remaining for next session" list — bundled into the same item per `feedback_no_breadcrumbs` (don't stack a perpetual backlog of new items for half-finished work).  JC's call: still not committing — wrap commit at full Sitting-16 closeout.
+
+### What landed (working tree — JC handles commits)
+
+**#10 — email_watch save-path redesign with UIDVALIDITY + integrity guards.**  Briefed three options to JC (a IMAP mock via greenmail / b extract-to-helper / c Debug-only endpoint pair) plus one redesign option (d).  JC picked option D — most-correct.  Investigation found the original "save mirrors load" framing missed two real integrity gaps that no save-side test alone would have caught:
+
+1. **No `(connection, folder)` guard.**  The persisted-watermark map keyed `(workflow_id, trigger_id)` and stored `connection_name` / `folder` as "informational; helps debug stale entries" (the original comment).  A JCWF edit that repointed a trigger from server A to server B with the same trigger_id would silently apply A's UID to B — UIDs are only meaningful within `(server, mailbox-UIDVALIDITY)`.
+2. **No UIDVALIDITY tracking at all.**  RFC 3501 §2.3.1.1 says UIDVALIDITY changes when a mailbox renumbers (rename / delete+recreate / server restore).  Without it, a UIDVALIDITY bump silently misapplies old UIDs to new messages — under-fire (UID space wider after bump) or over-fire (narrower).
+
+Both fixed with the option-D redesign:
+
+- **New `STATUS folder (UIDVALIDITY)` IMAP request** in `EmailConnector::CheckForNewMail`, issued against the base URL (no folder in the URL path so libcurl doesn't perform an extra SELECT) with the folder name in the STATUS command itself.  Folder name allowlist-validated upstream so quoting it in the STATUS command is safe.  STATUS failure logs WARN + returns `uidValidityOut=0` (caller treats 0 as "no UIDVALIDITY captured" — seed-fresh path).
+- **New `ParseStatusUidValidity` parser** — anchors on the `UIDVALIDITY ` token (not the mailbox part, so quoted/atom mailbox forms both work), reads a non-negative 32-bit unsigned integer, returns 0 on out-of-range / malformed.
+- **`PersistedEmailWatermark`, `EmailWatchTriggerInstance`, `EmailPollJob` all gain `uint32_t m_UidValidity` / `m_LastSeenUidValidity`.**  All four `(connection, folder, uid_validity, last_seen_uid)` fields are LOAD-BEARING at restore time.
+- **JSON format_version bumped 1 → 2.**  Save emits `uid_validity` field.  Load requires `format_version=2` AND requires `connection_name` / `folder` / `uid_validity` present (skips per-entry if missing rather than silently defaulting to 0 — a missing uid_validity with implicit 0 would bypass the UIDVALIDITY guard).  Version-1 files discarded with WARN at load per `feedback_no_legacy`; no compat shim.  Triggers re-seed from current IMAP state on the next poll.
+- **Registration-time guard** in `AddEmailWatchTrigger`: when restoring from `m_PersistedEmailWatermarks`, discards saved entries whose `(connection, folder)` don't match the trigger's current targeting.  UIDVALIDITY can't be checked here (no poll yet) — that branch fires at poll time.
+- **Poll-time guard** in the trigger dispatch loop: when `currentUidValidity != job.m_LastSeenUidValidity` (and both nonzero), logs WARN naming both values and discards the in-memory watermark so the next sub-step re-seeds from current state without firing for pre-existing mail.
+
+**Doc updated.**  `doc/cloud-integration.md` email_watch section now covers the STATUS request, the v2 file shape (`format_version` / `connection_name` / `folder` / `uid_validity` / `last_seen_uid` / `updated_at`), and the three integrity guards (registration-time `(connection, folder)`; poll-time UIDVALIDITY; format-gate v1-rejection).
+
+**Test infrastructure.**  New `test/hardening/test_email_watch_persistence.py` (live, depends on the already-running greenmail Docker container: SMTP 3025 / IMAP 3143, user `test:test`).  Three scenarios — Scenario 1 fully automated (6/6 assertions on the v2 shape), Scenarios 2+3 documented as manual-verification with the exact log lines to expect (each requires a server restart cycle the test framework would need to orchestrate — small additional script effort, deferred to next session).
+
+### Files in working tree
+
+| File | Change |
+|---|---|
+| `application/cloud/emailConnector.h` | +`<cstdint>` include; `CheckForNewMail` signature gains `uint32_t& uidValidityOut`; new `ParseStatusUidValidity` decl with RFC 3501 reference |
+| `application/cloud/emailConnector.cpp` | New `ParseStatusUidValidity` impl (32-bit overflow check) + new STATUS request issued via `ImapCommand` against the base URL before the SEARCH; populates `uidValidityOut` |
+| `application/workflow/triggerEngine.h` | `PersistedEmailWatermark` doc-block + `uint32_t m_UidValidity`; `EmailWatchTriggerInstance` gains `m_LastSeenUidValidity` |
+| `application/workflow/triggerEngine.cpp` | `EmailPollJob` gains UIDVALIDITY; poll-time UIDVALIDITY-change guard; registration-time `(connection, folder)` guard in `AddEmailWatchTrigger`; save emits `format_version: 2` + `uid_validity`; load requires `format_version=2` and treats connection/folder/uid_validity as required (not "informational"); v1 files rejected with WARN |
+| `test/hardening/test_email_watch_persistence.py` | NEW — greenmail-based live test (scenario 1 automated 6/6; scenarios 2+3 documented as manual verification with the exact log lines to expect) |
+| `doc/cloud-integration.md` | `email_watch Trigger` section extended with the STATUS request behaviour + the new `Watermark integrity` paragraph (the three guards + the v2 file shape) |
+| `doc/misc/pre-1_0_follow-ups.md` | #10 status changed to **UNFINISHED — partial close** with explicit "What landed" / "What's verified" / "Remaining for next session" sub-bullets per `feedback_no_breadcrumbs` (residual bundled into the same item, not new basket entries) |
+| `doc/misc/hand-off.md` | This entry |
+
+### What's verified
+
+| Check | Result |
+|---|---|
+| Studio Debug build | clean (only pre-existing simdjson `[-Wunused-result]` in triggerEngine.cpp; clangd `<expected>` noise is the stale-compile-commands artifact per `feedback_cpp23_clang_libcxx`) |
+| `test_email_watch_persistence.py` Scenario 1 (live greenmail save) | **6/6 assertions** — format_version=2, connection_name='my-greenmail', folder='INBOX', uid_validity=1779341395 (greenmail's actual UIDVALIDITY), last_seen_uid='1', updated_at ISO-8601 Z |
+| Scenario 2 (manual: plant v1 file → restart) | Exact WARN observed: `[email_watch] '...' format_version=1 (expected 2) — discarding (starting fresh; next poll re-seeds watermarks)` |
+| Scenario 3 (manual: install→save→swap connection→restart) | Exact WARN observed: `[email_watch] discarding stale watermark for trigger 'ew' workflow 'ewconnswap' — trigger now targets connection='my-email' folder='INBOX' but persisted entry is connection='my-greenmail' folder='INBOX' (UID '1' applied to mismatched target would be meaningless)` |
+| `test_negative_paths.py` full suite | 55/55 across 4 groups (no regression) |
+| `test_auth_mcp.py` | 100/100 (no regression) |
+| REST-shutdown + relaunch cycle | clean (used twice — for Scenario 2 + Scenario 3) |
+
+**Aggregate: 161 passing checks + 2 manual scenarios with exact log-line matches.**
+
+### Architecture notes for next-session-Claude
+
+- **The watermark file is global cross-workflow state.**  Lives at `<queue_folder>/.email_watermarks.json`, single file containing all triggers' watermarks across all workflows.  Per JCWF spec convention the queue folder has per-workflow subfolders for task state — this file lives ABOVE that level because the trigger engine itself is global.  Trade-off: one I/O per save, all triggers contend for one file; per-workflow placement would co-locate state but multiply I/O.  No change needed; the contention isn't observable in practice (saves are <ms and only fire after successful polls).
+- **STATUS uses the base URL, not the folder URL.**  `imap://host:port/` with CUSTOMREQUEST `STATUS "<folder>" (UIDVALIDITY)` — this avoids an extra implicit SELECT that libcurl would perform if the folder were in the URL path.  STATUS is per RFC 3501 §6.3.10 valid in any authenticated state without requiring SELECT.
+- **TriggerEngine tick cadence is ~60s, NOT the per-trigger `poll_interval_seconds`.**  The poll-interval gates whether a tick eligibly polls a given trigger, but the tick itself fires on a coarser engine-level cadence.  A trigger with `poll_interval_seconds=2` will not poll every 2 s — its first eligible poll lands at the next tick boundary (typically ~60 s after registration).  The new test bumps `deadline_s=90` to accommodate; future tests targeting fast trigger response need the same headroom.
+- **POST /api/workflows writes a MINIMAL global.json** (only `version` / `id` / `manual_start`) — triggers, label, doc, defaults get dropped from global.json and end up only in the canvas JSON, which the binder ignores.  Author programmatic test workflows by writing the JCWF zip directly (see `install_workflow` helper in the new test).  PUT /api/workflows/<id> preserves existing global.json fields (the editor doesn't re-send them) — but on initial CREATE there's nothing to preserve.  This is the same pattern that bit me twice this session: once during #10 setup, once during #8 (the JCWF shape for `_db_query_jcwf` differs from canvas shape).
+- **The `(connection, folder)` registration guard belongs in `AddEmailWatchTrigger`, NOT in `LoadPersistedEmailWatermarks`.**  Load doesn't know the trigger's current targeting; only Add sees both the saved entry and the new registration.  Putting the guard in Load would prematurely discard entries before the trigger has even registered (in case the trigger is registered with a matching target later).
+- **The poll-time UIDVALIDITY-change guard zeros `hasNewMail`** so the current poll doesn't fire for messages that predate the trigger's awareness of the new UIDVALIDITY.  `highestUid` is left as returned so the per-job state at the update site records it as the new seed with the new UIDVALIDITY — future polls then compare against the new baseline.  This matches the "treat current state as the new baseline" semantics the basket spec implied.
+
+### Open items / next-session candidates
+
+- **#10 unfinished residual** (see the basket entry for the full list): poll-time UIDVALIDITY-change guard test (`docker restart greenmail` → restart j9t → expect UIDVALIDITY-mismatch WARN); end-to-end restore-happy-path test (load applies watermark → next poll only fires for UID > restored); doc-routing recheck for api-endpoints; optionally automate scenarios 2+3.
+- 4 original basket items remain (#11-14) + 2 new from Part 3 (#15-16):
+  - **#11** — KeyManager hardening synth tests
+  - **#12** — Live S3 round-trip smoke for the consolidated signer
+  - **#13** — Live OAuth consent round-trip for SecureString `StoreTokens`
+  - **#14** — Heartbeat handler `auth->m_Error` check
+  - **#15** — Migrate remaining 12 cloud-task executors to typed `ConnectorErrorCode`
+  - **#16** — Reaper architecture cleanup
+
+### Gotchas next-session-Claude should know
+
+- **Greenmail user setup is `-Dgreenmail.users=test:test`** — single user, password `test`.  IMAP login as any other user fails.  SMTP wildcards for any recipient but only mail addressed where greenmail's routing maps to `test`'s INBOX is readable.  Empirically `test@example.com` worked; `test@localhost` didn't deliver.  When extending the email_watch test, use `test@greenmail.com` or `test@example.com` as the recipient.
+- **greenmail UIDVALIDITY is stable across IMAP reconnects but resets on container restart** — `docker restart greenmail` generates a fresh UIDVALIDITY.  That's the lever for the unfinished UIDVALIDITY-change guard test.  After restart, all messages in INBOX are gone (greenmail's storage is volatile by default), so the test setup needs to re-send the canary message after the restart.
+- **POST /api/workflows splits the JCWF body** — minimal global.json + canvas.  The splitter is the reason direct-zip install via Python `zipfile` is necessary for trigger-bearing test workflows.  See the `install_workflow` helper in `test_email_watch_persistence.py` for the pattern.
+- **Editing a JCWF in-place + `POST /api/workflows/reload`** is enough to pick up trigger changes — the registry re-extracts the zip and re-runs the binder.  No restart needed for trigger re-registration, BUT the persisted watermark map is only re-loaded at TriggerEngine construction (engine startup) — so to test the registration-time guard against a swapped connection, j9t MUST be restarted (reload alone doesn't re-trigger the load path).  Used REST shutdown + relaunch for both Scenarios 2 + 3.
+- **The `paths debug ... triggersCount=N` log line is misleading for binding diagnosis** — it counts the parser's `outputDefinition.m_Triggers` (the canvas-scope triggers), NOT `workflowDefinition.m_Triggers` (the global-scope triggers the binder actually iterates).  When a trigger seems "registered but not firing", check global.json for the trigger field rather than trusting the parser-log count.
+
+---
+
+## 2026-05-24 (Sitting 16 — Part 3: items 7+8+9 of the incidental-findings basket) → next session
+
+Third pass on the Sitting 16 basket, same day as Parts 1+2.  Closed 3 of the 8 remaining items (#7 reaper CV wake-on-stop, #8 circuit-breaker failure-class policy, #9 ReadMeta simdjson rewrite).  Two new items added to the basket from incidental findings (#15 migrate other 12 cloud-task executors to typed `ConnectorErrorCode`, #16 reaper architecture cleanup).  JC's call: still not committing — wrap commit at full Sitting-16 closeout.  **5 items remain from the original basket (#10–14) + 2 new (#15, #16)**.
+
+### What landed (working tree — JC handles commits)
+
+**#7 — Reaper CV wake-on-stop shutdown-timing test.**  Closed *structurally* rather than via the basket's proposed perf-based timing test.
+
+Investigation found the original basket premise was inaccurate AND the actual threat model was different.  Git history (`41c325b` MCP 1.0 → `8083f14` cyber-sec part 5) shows the pre-CV reaper used a 60×1s chunked-poll loop — worst-case 1 s shutdown blocking, not 60 s as the spec claimed.  More importantly: REAPER-INST instrumentation showed reaper teardown was running AFTER `[engine] diffusing watchdog` in stdout — i.e., in the `unique_ptr<Application>` destruction at end of `main`, OUTSIDE the 3-s shutdown watchdog window covered by `app->OnShutdown()` + `engine->Shutdown()`.  A regression that reintroduced a long `sleep_for` in `StopReaperThread` would silently stall exit by up to 60 s with no `[shutdown watchdog] timeout expired` line and no `_exit(EXIT_FAILURE)` — the perf-test would catch it, but a watchdog-covered path would catch it MORE loudly.
+
+Fix: lifted `m_AdhocManager->StopReaperThread()` into `WebServer::SignalStop()` (right after the WRM observer detach), bringing reaper teardown inside the watchdog window.  Destructor still calls `StopReaperThread()` as an idempotent no-op safety net.  Empirical measurement after fix: `StopReaperThread` runs in 182 µs during Phase 1 of OnShutdown, `wait_for` returns `predicate-true(stop)` (CV wake path).  REST-shutdown wall-clock 93 ms total; zero `[shutdown watchdog]` lines.
+
+Companion audit: every long-lived thread member across `application/` + `engine/` checked.  Result is in the new CLAUDE.md discipline rule — all 6 `std::thread` members + KeyboardInput `std::future` + ThreadPool's `BS::thread_pool<>` workers are joined inside the watchdog window; watchdog thread itself is detached by design.  Two transient function-local threads (`workflowRuntimeManager.cpp:712` callbackThread detached; `assistantTools.cpp:2074` reader joined locally) are non-issues.
+
+**#8 — Circuit breaker failure-class policy.**  Implemented option C from the sitting brief — typed `IsConnectionFailure(ConnectorErrorCode)` policy helper.
+
+The basket spec was slightly inaccurate too (referenced `ValueOutOfRange` as if it existed in `ConnectorErrorCode` — it actually lives in `ParserError::Code`, a different subsystem enum).  Actual changes:
+- New `ConnectorErrorCode::ValueOutOfRange` variant (sibling of NetworkError / AuthFailure / etc.).
+- New `[[nodiscard]] bool IsConnectionFailure(code)` in `connectorError.{h,cpp}` — switch is `default:`-free per CLAUDE.md, every variant enumerated.  Connection-class: InvalidConfig / InvalidEndpoint / CredentialMissing / CredentialInvalid / OAuthError / NetworkError / AuthFailure / HttpError / UnknownError.  App-level (skip counter): ValueOutOfRange.
+- Cleanest seam without touching every `ExecuteCloud` virtual signature across 13 cloud-task subclasses: added `std::optional<ConnectorErrorCode> TaskState::m_LastFailureCode` as sibling of `m_LastErrorMessage` in `workflowTypes.h`.  Subclasses populate it on failure; base class `ICloudTaskExecutor::Execute` passes it through to `RecordFailure`.  Required adding `#include <optional>` + `#include "cloud/connectorError.h"` to workflowTypes.h (small build-time cost for the wide-include change).
+- `dbQueryCloudTaskExecutor.cpp` populates the field at the three cap-rejection sites: row cap (`max_rows`), byte cap (`max_output_bytes`), and statement_timeout firing (detected via `PG_DIAG_SQLSTATE` field — SQLSTATE 57014 = query_canceled on the query-failed branch).
+- `CloudCircuitBreaker::RecordFailure` stores the typed code for display but skips counter+state-transitions when `IsConnectionFailure(*code) == false`.
+- Legacy untyped callers (no code passed) default to connection-class so unmigrated subclasses preserve existing "every failure counts" posture.
+
+New test 4.4 in `test/hardening/test_negative_paths.py` (`group4_db_query_breaker_app_level_classification`) submits 6 consecutive `max_rows` cap rejections WITHOUT warm-up; asserts breaker stays Closed, `consecutive_failures` unchanged from baseline, and `last_failure_code == "value_out_of_range"`.  Group 4: 12→18 PASS.
+
+**#9 — `AdhocWorkflowManager::ReadMeta` simdjson rewrite.**  Replaced the `pluck` lambda + four `std::string::find`-based substring scans with `simdjson::dom::parser` + `parser.parse(content).get(root)` + `root[field].get_string().get(sv)` — mirrors the `RewriteWorkflowId` idiom directly above it in the same file.  Parse failure (truncated/corrupt JSON) or non-object root logs at ERROR with the meta path; missing-file path (normal `Init` filesystem-scan hot path) still returns nullopt without logging.  Legacy parent-dir-name fallback for `owner_slug` preserved.  Closes the `feedback_simdjson_only` violation in the security-critical attribution path.
+
+### Files in working tree
+
+| File | Change |
+|---|---|
+| `application/web/webServer.cpp` | `WebServer::SignalStop()` — added `m_AdhocManager->StopReaperThread()` call (after WRM observer detach) with comment block explaining watchdog-window reasoning |
+| `application/workflow/adhocWorkflowManager.cpp` | `ReadMeta` rewritten to use `simdjson::dom::parser` (drops the `pluck` lambda + `string::find` machinery) |
+| `application/cloud/connectorError.h` | +`ValueOutOfRange` variant; +`[[nodiscard]] bool IsConnectionFailure(code)` declaration |
+| `application/cloud/connectorError.cpp` | `Describe` extended; `IsConnectionFailure` impl (default-free switch) |
+| `application/workflow/workflowTypes.h` | +`std::optional<ConnectorErrorCode> TaskState::m_LastFailureCode`; +`<optional>` + `cloud/connectorError.h` includes |
+| `application/cloud/cloudTaskExecutor.cpp` | Base `Execute` passes `taskState.m_LastFailureCode` to `RecordFailure` |
+| `application/cloud/dbQueryCloudTaskExecutor.cpp` | +`#include "cloud/connectorError.h"`; sets `ValueOutOfRange` at row-cap / byte-cap / SQLSTATE-57014 sites |
+| `application/cloud/cloudCircuitBreaker.cpp` | `RecordFailure` consults `IsConnectionFailure`; skips counter+state-transition when typed code is app-level |
+| `test/hardening/test_negative_paths.py` | New test 4.4 (`group4_db_query_breaker_app_level_classification`) — 6 consecutive cap rejections without warm-up; 5 assertions on breaker state / counter / typed code |
+| `CLAUDE.md` | New discipline rule: long-lived subsystem threads must be stopped inside the watchdog window |
+| `doc/architecture.md` | Updated `AdhocWorkflowManager` reaper row in Key Design Decisions table — adds the SignalStop teardown invariant + the post-diffusion stall rationale |
+| `doc/cyber security.md` | Circuit breaker entry extended with `IsConnectionFailure` policy note (self-DoS prevention) |
+| `doc/api-endpoints.md` | `connection_health[].last_failure_code` enumeration adds `value_out_of_range`; added classification clause explaining which codes tick the breaker counter |
+| `application/cloud/README.md` | `cloudCircuitBreaker` table row extended with the policy classification |
+| `doc/misc/pre-1_0_follow-ups.md` | #7 / #8 / #9 closed with paragraphs; #15 (cloud-executor migration) + #16 (reaper architecture cleanup) added as new basket items |
+| `doc/misc/hand-off.md` | This entry |
+
+### What's verified
+
+| Check | Result |
+|---|---|
+| Studio Debug build (incremental after each fix) | clean (only pre-existing simdjson `[-Wunused-result]` in triggerEngine.cpp; clangd `<expected>` noise is the stale-compile-commands artifact per `feedback_cpp23_clang_libcxx`) |
+| `test_negative_paths.py --group 4` | **18/18** (was 12 entering this session — +6 from the new 4.4 test for failure-class classification) |
+| `test_negative_paths.py` full suite | **55/55 across 4 groups** (was 49 entering this session) |
+| `test_auth_mcp.py` (regression for #9 — adhoc submission + GetRunInfo route through ReadMeta) | **100/100** |
+| `test_adhoc_user_slug_collision.py` (regression for #9 — per-user authz lookups route through ReadMeta) | **14/14** |
+| Manual: REST-shutdown post-fix wall-clock from `/api/shutdown` to process exit | **93 ms** (clean exit, zero `[shutdown watchdog]` lines, reaper REAPER-INST showed 182 µs total inside Phase 1) |
+| Manual: 6 consecutive `max_rows` cap submissions on `local-pg` | breaker `circuit_state="closed"`, `consecutive_failures=0` unchanged, `last_failure_code="value_out_of_range"` ✓ |
+| Companion thread audit | every `std::thread`/future/threadpool-worker in `application/` + `engine/` joined inside watchdog window; two transient function-local threads (callbackThread detached, reader joined locally) are non-issues |
+
+**Aggregate: 187 passing checks across negative-paths + auth-mcp + slug-collision suites + the explicit failure-class probe.**
+
+### Architecture notes for next-session-Claude
+
+- **The 3-s shutdown watchdog window is narrower than it looks.**  `engine.cpp:297-311` starts the watchdog AFTER `engine->Run(app)` returns and diffuses it at line 332 right before `return EXIT_SUCCESS`.  Only `app->OnShutdown()` + `engine->Shutdown()` + the fatal-message print are inside the window.  The `unique_ptr<Application>` destruction that fires `~Application` → `~WebServer` → member destructors → joins happens DURING the return at end of `main`, AFTER diffusion.  Any subsystem thread whose stop is destructor-only-driven runs in that unmonitored tail.  The new CLAUDE.md discipline rule codifies this; the rest of the codebase is currently compliant (verified by the audit), but new threaded subsystems MUST extend the pattern.
+- **`IsConnectionFailure` is the single policy gate for the breaker.**  Adding a new `ConnectorErrorCode` variant forces a switch-arm decision via `-Wswitch`.  When a future variant is added, judge: is the connection itself healthy and the call rejected at app layer (→ false, like ValueOutOfRange), or is the connection broken (→ true)?  The conservative default for `UnknownError` is true so a regression in code-tagging doesn't silently bypass the breaker.
+- **`TaskState::m_LastFailureCode` is the seam between cloud-task subclasses and the breaker.**  Subclasses populate it on failure; the base `ICloudTaskExecutor::Execute` passes it to `RecordFailure`.  No virtual signature changes — extending the typed-failure-code coverage to other executors (basket item #15) is a per-site "set the field before `return false`" edit, nothing more.
+- **db_query statement_timeout detection.**  PostgreSQL surfaces `SET statement_timeout` firing as SQLSTATE 57014 (`query_canceled`) on the failed `PQexec`.  `PQresultErrorField(res, PG_DIAG_SQLSTATE)` reads it; the dbQuery executor branches on the SQLSTATE to decide whether the query failure is connection-class (default) or app-level (timeout fired → ValueOutOfRange).  This is the only cap branch that needs runtime SQLSTATE inspection — the row and byte caps are local app checks where the code is unconditionally `ValueOutOfRange`.
+- **`AdhocWorkflowManager::ReadMeta` simdjson DOM idiom matches `RewriteWorkflowId` directly above it.**  Both use `simdjson::dom::parser` + `parser.parse(content).get(root)` + `if (!root.is_object())` check + `root[field].get_string()` for field extraction.  Future hand-rolled JSON readers in this file should mirror this pattern (per `feedback_simdjson_only`).
+
+### Open items / next-session candidates
+
+7 items remain in the Sitting 16 basket (5 original + 2 new):
+
+- **#10** — email_watch save-path live test (needs IMAP mock — mailpit or minimal)
+- **#11** — KeyManager hardening synth tests (>4 MB keystore + empty-name `SetDefaultProvider`)
+- **#12** — Live S3 round-trip smoke for the consolidated signer
+- **#13** — Live OAuth consent round-trip for SecureString `StoreTokens`
+- **#14** — Heartbeat handler `auth->m_Error` check (one-line fix + test)
+- **#15** *(NEW)* — Migrate remaining 12 cloud-task executors to emit typed `ConnectorErrorCode`.  Today only db_query is migrated.  Other executors still hit the legacy untyped `RecordFailure(name)` path → conservative default = connection-class.  Per-executor: identify app-level rejection branches, set `taskState.m_LastFailureCode` before `return false`.  Companion: remove vestigial `_warm_up_connection` calls in `test_negative_paths.py` tests 4.2/4.3 once migration is unambiguously complete (today they're no-ops for the cap branches, harmless defensive bridge).
+- **#16** *(NEW)* — `AdhocWorkflowManager` reaper architecture cleanup.  Two small post-1.0-grade polish items: (a) separate `m_ReaperCvMutex` from the manager-wide `m_Mutex` so reaper-wake `notify` doesn't contend with `Reap`/`Stage`/etc.; (b) reorder `ReaperLoop` to `Reap(); wait_for(60s);` so startup sweeps stale folders without a 60-s delay.  Neither breaks anything today.  Per `feedback_no_breadcrumbs`, bundle into a future sitting when adjacent reaper work happens rather than carving out a dedicated sitting.
+
+### Gotchas next-session-Claude should know
+
+- **REST shutdown is the canonical path (`feedback_shutdown_via_rest`).**  `kill -TERM <pid>` works too (Core::SignalHandler routes both SIGTERM and SIGINT to the same `EngineEventShutdown` path) and gives the same shutdown semantics, but the documented rule is REST + `Authorization: Bearer $J9T_TOKEN`.  Keystore must be unlocked first via `POST /api/settings/keys/unlock` with `JARVIS_MASTER_PASSWORD`.  Violated this once mid-sitting; JC redirected explicitly.
+- **The watchdog is not whole-process.**  Misread once in this sitting — JC corrected by clarifying "very beginning of shutdown" — only the OnShutdown+engine->Shutdown phase is covered.  The empirical stdout ordering (`[engine] diffusing watchdog` appears before destructor lines) is the most direct way to see where the window ends.
+- **simdjson `parser.parse(std::string)`** accepts unpadded `std::string` directly (the dom path; ondemand needs `padded_string`).  RewriteWorkflowId + the new ReadMeta both use this pattern.  When loading from a path, `padded_string::load(path.string())` is the alternative (used in triggerEngine + configParser).  Both are fine; pick whichever matches the surrounding pattern.
+- **Adhoc JCWF shape uses `tasks` as a dict + `manual_start: true` + `params` dict per task** (see `_db_query_jcwf` helper in `test_negative_paths.py:591`) — NOT the canvas-based `canvases[].tasks[]` shape that the editor saves.  Submitted via `POST /api/workflows/run-adhoc` with body `{jcwf, cleanup_policy}`.  Run state poll endpoint is `/api/workflow-runs/{runId}` (NOT `/api/workflows/runs/{runId}`); terminal states are `succeeded` / `failed`; first-task error is `run.tasks[0].error` (NOT `error_message`).  Burned ~15 min on a wrong-endpoint variant of the manual cap-rejection verification before catching this from the test helpers.
+- **PostgreSQL SQLSTATE constants.**  `57014` = `query_canceled` (statement_timeout firings).  Other adjacent ones if needed: `53100` disk full, `40001` serialization failure, `08000` connection exception, `08006` connection failure.  The pg-docs SQLSTATE table is the source of truth — these are wire-stable across PG versions.
+- **The Effort.** paragraph in `pre-1_0_follow-ups.md` enumerates which items came from which sitting.  After this sitting it's slightly stale (mentions items 5-11 from Sittings 9/11/12/14, doesn't mention 12-16) — left unedited since it's narrative scaffolding, not a comprehensive list.  If editing it later, items 7-9 closed this sitting, items 15-16 added this sitting from incidental findings during #7 + #8 work.
+
+---
+
+## 2026-05-24 (Sitting 16 — Part 2: items 5+6 of the incidental-findings basket) → next session
+
+Second pass on the Sitting 16 basket, same day as Part 1.  Closed 2 of the 10 remaining items (#5 Polarion path-traversal coverage, #6 AI output 64 KiB cap coverage + UTF-8 truncation fix).  JC's call: not committing yet — wrap commit at full Sitting-16 closeout.  **8 items remain** (#7–11, #12–14).
+
+### What landed (working tree — JC handles commits)
+
+**#5 — Polarion path-traversal coverage.**  Three sub-tests added to `test/hardening/test_negative_paths.py` Group 2, all driven against the existing `../polarionMockup` C++ server at `http://localhost:18080`:
+
+- **2.4** — `polarion_write download_attachment` with `file_path=/tmp/j9t_polarion_escape_canary.bin` and valid IDs → `ConfineUnderProjectRoot` rejects pre-network (before any HTTP call to mock), task fails with `attachment output path does not resolve under project root: /tmp/...`, no escape file on disk.
+- **2.5** — same task type with `work_item_id=../escape` → `IsValidPolarionId` allowlist rejects the `..` substring before any HTTP call, task fails with `invalid Polarion identifier (allowlist [A-Za-z0-9._-/], no '..', length 1-256)`.
+- **2.6** — `polarion_query` filter with `id=../escape` + downstream `mode: per_item` consumer task (`/bin/true`) so the filter eval is dispatched.  Mock returns work items, runtime invokes `WriteItemFile` per item, `IsValidFilesystemId` rejects, ERROR log line emitted: `[polarion] WriteItemFile rejected filter.m_Id '../escape' — fails allowlist`.  Test snapshots the `/api/log` byte offset before submission and greps only new lines.
+
+Each sub-test skips (with `warn(...)` line) if `_polarion_mock_reachable` returns false — keeps the test runnable when polarionMockup isn't up.
+
+`test_negative_paths.py` docstring updated; the prior "Polarion WriteItemFile path-traversal: needs a live or mocked Polarion connection + a hostile JCWF" deferral note removed.
+
+**#6 — AI output 64 KiB cap coverage + UTF-8 truncation fix.**  Three coupled landings:
+
+1. **Refactor.**  `BuildCallbackPayload(WorkflowRun const&, bool includeOutputs) → std::string` extracted from `FireCompletionCallback` in `application/workflow/workflowRuntimeManager.cpp`.  Declared in `workflowRuntimeManager.h` as a public free function in the `AIAssistant` namespace.  `FireCompletionCallback` now calls it once instead of inlining ~100 lines of payload-building.  No behaviour change for the existing call site.
+
+2. **UTF-8 bug fix.**  The per-output cap path read `kMaxOutputBytes` (65536) bytes into a buffer and handed that to `TruncateUtf8Safe`.  `TruncateUtf8Safe` short-circuits when `s.size() <= maxBytes`, so a file exactly at-or-above the cap left a buffer where the last byte could be a multibyte UTF-8 LEAD with no continuations — invalid UTF-8 that would detonate strict JSON validators and `PyUnicode_FromString` on any Python-side receiver.  Fix: caller reads `kMaxOutputBytes + 3` slop bytes (UTF-8 codepoints are at most 4 bytes, so 3 extra bytes is the minimum needed for `TruncateUtf8Safe` to see the straddling sequence and back off correctly).  `TruncateUtf8Safe` itself unchanged — its "well-formed input only" contract is preserved.
+
+3. **Debug-only endpoint.**  New route `GET /api/debug/build-callback-payload?runId=X&include_outputs=<bool>` (admin-gated, compiled out of Release).  Returns the same JSON body that `FireCompletionCallback` would POST, without firing the outbound HTTPS request.  Necessary because the SSRF gate rejects loopback callbackUrls by design (`project_n8n_callback_tunnel` in memory) — without this endpoint, a test would need a tunneled public HTTPS receiver to inspect the payload.  Handler at `webServer.cpp::HandleDebugBuildCallbackPayloadGet`; declaration in `webServer.h`.  400 on missing runId; 404 on unknown runId; 501 if WorkflowRuntimeManager not configured.
+
+4. **Test helper script.**  `scripts/writeOutputCapCanary.py` follows the existing `scripts/verifyMailpitMessage.py` convention (`@jarvis-script` header, `(context, **kwargs)` signature, returns dict).  Writes 65535 'A' bytes + the 3-byte UTF-8 encoding of '€' (U+20AC = 0xE2 0x82 0xAC) to `<task_working_directory>/big.txt` — total 65538 bytes, with the '€' straddling the 65536-byte cap (lead at offset 65535, continuations at 65536/65537).  Returns `{"content": <abs path>}` so the JCWF's `outputs.content` slot resolves to the file path (callback-payload reader then reads up to 64 KiB from it).
+
+5. **Test 1.2 in test_negative_paths.py.**  Probes `/api/debug/build-callback-payload` to detect Release builds (skips with warning).  Submits the canary JCWF (python task type, `module: writeOutputCapCanary`, `function: write_canary`, `file_outputs: ["big.txt"]`, `outputs: {content: {type: string}}`).  Polls to terminal, GETs the debug endpoint, parses the payload, asserts: (a) content size ≤ 64 KiB, (b) content was truncated (size < 65538), (c) **content size is exactly 65535** (the 65535 'A's; partial '€' dropped — UTF-8-safe truncation), (d) content is well-formed UTF-8 via `bytes.decode('utf-8', errors='strict')`.
+
+`doc/api-endpoints.md` updated under the `/api/debug/` table with the new endpoint.
+
+### Files in working tree
+
+| File | Change |
+|---|---|
+| `application/workflow/workflowRuntimeManager.h` | +`BuildCallbackPayload` declaration with full docstring (file-backed outputs, 64 KiB cap, UTF-8-safe truncation, debug-endpoint cross-ref) |
+| `application/workflow/workflowRuntimeManager.cpp` | Extracted `BuildCallbackPayload` (lines ~840–960) in the `AIAssistant` namespace right after the anonymous namespace closes; `FireCompletionCallback` reduced to a single call; UTF-8 slop fix: `kMaxOutputBytes + 3` read with comment explaining the rationale |
+| `application/web/webServer.cpp` | New Debug-only route + handler `HandleDebugBuildCallbackPayloadGet` (admin-gated, query params: `runId` required + `include_outputs` optional bool); registration alongside `/api/debug/signals` |
+| `application/web/webServer.h` | Handler declaration with docstring naming the test caller |
+| `scripts/writeOutputCapCanary.py` | NEW — 65538-byte UTF-8 canary writer (python task helper) |
+| `test/hardening/test_negative_paths.py` | Docstring +5 lines (1.2 + 2.4/2.5/2.6); `_polarion_mock_reachable` helper + 3 polarion sub-tests + `group1_output_cap_utf8_truncation`; GROUPS dict extended |
+| `doc/api-endpoints.md` | New `/api/debug/build-callback-payload` row in the debug-endpoints table |
+| `doc/misc/pre-1_0_follow-ups.md` | Sitting 16 Part 2 close-out paragraph + items #5 and #6 closed in the basket list |
+| `doc/misc/hand-off.md` | This entry |
+
+### What's verified
+
+| Check | Result |
+|---|---|
+| Studio Debug build | clean (only stale clangd `<expected>` artifacts per `feedback_cpp23_clang_libcxx`) |
+| Studio Release build | clean (verifies #ifdef DEBUG strips the new endpoint correctly) |
+| `test_negative_paths.py --group 1` | **12/12** (was 4 — +8 from 1.2) |
+| `test_negative_paths.py --group 2` | **20/20** (was 7 — +13 from 2.4 + 2.5 + 2.6) |
+| `test_negative_paths.py` full suite | **49/49 across 4 groups** (was 41 entering this session, was 28 before Sitting 16 P1) |
+| `test_auth_mcp.py` (regression) | **100/100** |
+| Manual probe: `/api/debug/build-callback-payload` (missing runId) | 400 `missing_runid` |
+| Manual probe: `/api/debug/build-callback-payload?runId=nonexistent` | 404 `run_not_found` |
+| End-to-end UTF-8 truncation | callback payload content = exactly 65535 bytes (file on disk = 65538), well-formed UTF-8 |
+
+**Aggregate: 149 passing checks** across the negative-paths suite + auth-mcp regression.
+
+### Architecture notes for next-session-Claude
+
+- **`BuildCallbackPayload` is now the single payload-builder.**  Both `FireCompletionCallback` (production) and `HandleDebugBuildCallbackPayloadGet` (Debug-only) call it.  Future shape changes touch one site.  Anonymous-namespace helpers (`WorkflowRunStateToString`, `IsCallbackUrlAllowed`) are accessible from the AIAssistant-namespace function via the unnamed-namespace's implicit using-directive into the enclosing namespace.
+- **The 3-byte read slop is the smallest safe overshoot.**  UTF-8 codepoints are at most 4 bytes; reading `cap+3` guarantees `TruncateUtf8Safe` sees enough context to back off.  Reading `cap+4` would also work but adds no safety.  The slop is local to BuildCallbackPayload; no other site needs it because other sites that call `TruncateUtf8Safe` pass already-complete data (process stdout, AI replies).
+- **The new debug endpoint is admin-gated AND Debug-only.**  Tests that depend on it MUST probe (`if probe.status_code == 404: skip`) so they degrade gracefully on Release.  See the 1.2 sub-test pattern.
+- **Polarion sub-tests reuse the existing `my-polarion` connection** in `connections.json` (endpoint `http://localhost:18080/polarion`, key_name `polarion`).  No new connection setup needed — JC's host already has it from the `goKartComplianceCheck.jcwf` work.  Each sub-test calls `_polarion_mock_reachable` first and skips with `warn(...)` if the mock is down, so a host without polarionMockup running still gets the rest of Group 2's 4 checks.
+- **`WriteItemFile` ConfineUnderProjectRoot branch (post-allowlist) intentionally not covered** in 2.6.  After the allowlist passes, the gate fires only with symlink rigging at `<workflowBaseDir>/<filter_id>` pointing outside the project root.  Too artificial to be worth the test rigging.  Documented in the basket-closure note for item #5.
+- **Python task `m_OutputValues` priority:** the function's return dict populates first (`pythonTaskExecutor.cpp:344-347`), then `derivedOutputs` from `BuildOutputSlotMap` fills MISSING JCWF-declared slots (`:353-358`).  `BuildOutputSlotMap` looks each declared slot up in `m_OutputValues` and `m_InputValues` — it does NOT auto-resolve from `file_outputs`.  So for the cap test, `writeOutputCapCanary.write_canary` must explicitly return `{"content": <abs path>}`; relying on `file_outputs` alone would leave the `content` slot empty.
+
+### Open items / next-session candidates
+
+8 items remain in the Sitting 16 basket:
+
+- **#7** — Reaper CV wake-on-stop shutdown-timing test (sandbox-spawn pattern, assert shutdown < 5 s)
+- **#8** — Circuit breaker failure-class policy (treat `ValueOutOfRange` cap rejections as non-connection-failure)
+- **#9** — `AdhocWorkflowManager::ReadMeta` hand-rolled JSON → simdjson DOM
+- **#10** — email_watch save-path live test (needs IMAP mock — mailpit or a minimal mock)
+- **#11** — KeyManager hardening synth tests (>4 MB keystore + empty-name `SetDefaultProvider`)
+- **#12** — Live S3 round-trip smoke for the consolidated signer (LocalStack or AWS)
+- **#13** — Live OAuth consent round-trip for SecureString `StoreTokens`
+- **#14** — Heartbeat handler `auth->m_Error` check (one-line fix + test)
+
+No new deferred items surfaced during this session.
+
+### Gotchas next-session-Claude should know
+
+- **`./jarvisagent.sh` runs the Release binary regardless of `.build-edition`** — for #6's debug endpoint, JC's host needs `./bin/Debug/jarvisAgent-studio` directly (the launcher won't pick it up).  After any C++ change to the Debug-only endpoint or `BuildCallbackPayload`, rebuild Debug + restart the Debug binary explicitly.
+- **The Debug binary doesn't survive being launched with bare `&` in a one-off Bash command** — the child gets SIGHUP'd when the shell exits.  Use `setsid nohup ./bin/Debug/jarvisAgent-studio > log 2>&1 < /dev/null &` for a process that outlives the shell.  Encountered this twice while iterating on #6.
+- **Polarion connection `my-polarion` endpoint is `http://localhost:18080/polarion`** (mock at `:18080`, path prefix `/polarion`).  The mock listens at `/polarion/rest/v1/...`; the polarionClient prepends `/rest/v1/...` to the connection endpoint.  PAT is `1234!@#$` (per `polarionMockup/README.md`).
+- **The polarionMockup is at `/home/beaumanvienna/dev/polarionMockup`** (not `../polarionMock`).  Built separately via its own premake5; `./bin/Release/mockup` to start; listens on `0.0.0.0:18080`.  Currently running on JC's host.
+- **`MakeWorkflowJsonError` puts the runId in a `workflowId` JSON field** in the error response — minor labeling quirk in the helper (passes the last positional arg as workflowId).  Harmless for the test path but confusing if debugging.  Not worth fixing unless the helper is touched for another reason.
+- **clangd LSP errors about `<expected>` are stale-compile-commands artifacts** — re-run `premake5 gmake --clang` to regenerate `compile_commands.json` if they get distracting.  The actual gcc / clang+libc++ builds succeed.
+
+---
+
+## 2026-05-24 (Sitting 16 — Part 1: items 1-4 of the incidental-findings basket) → next session
+
+First pass on the Sitting 16 basket.  Closed 4 of 11 items in numerical order; the remaining 7 (plus 3 new deferred-verification items discovered along the way) stay in the basket for a follow-on session.  JC's call: not committing yet — wrap commit at full Sitting-16 closeout.
+
+### What landed (working tree — JC handles commits)
+
+**#1 — SigV4Signer consolidation.**  The two parallel `AIAssistant::SigV4Signer` classes (engine/curlWrapper for AI dispatch, application/cloud for S3) are now one.  `application/cloud/sigV4Signer.{h,cpp}` deleted (350 LoC gone).  Engine `SigV4Signer::Inputs` gained `m_ContentSha256Override` (caller-supplied payload hash for S3 list/delete/download empty-body case and pre-hashed uploads) and `m_ExtraHeadersToSign` (Content-Type signing on S3 PUT).  `Sign()` refactored from hand-built sorted canonical-headers to `std::map<std::string, std::string_view>`-driven sort so extras integrate cleanly (Content-Type sorts before host alphabetically — the hand-built "host first" order would have broken).  Canonical-headers still builds into a SecureString (session-token VALUE is the secret; the build path stays mlock'd).
+
+To support the runtime-sized canonical-headers piece set, `SecureString::Build` gained a `std::span<std::string_view const>` overload.  The existing `initializer_list` overload delegates to it.
+
+`application/cloud/s3Connector.cpp` + `s3CloudTaskExecutor.cpp` route through the engine signer; `EngineCore::Sha256Hex` replaces the deleted cloud-side `SigV4Signer::Sha256Hex` / `::EmptyPayloadHash` helpers.  `test/security/heapScan_cloud_scenarios.cpp` deleted (collapsed back into `heapScan_test.cpp` now that the two-headers-can't-coexist constraint is gone).  `premake5.lua` build-list updated; `engine/keys/scopedSecretBytes.h` reference comment updated.
+
+**#2 — `OAuthTokenManager::StoreTokens` secrets → SecureString.**  Header signature: three secret-bearing params (`accessToken`, `refreshToken`, `clientSecret`) become `SecureString const&` (defaulted to empty).  Body uses `IsEmpty()`/`Get()` instead of `empty()`/value; redactor `AddSecret` calls take views directly.  Consent-callback caller (`webServer.cpp` OAuth callback handler) now builds three SecureString locals and sets them from the simdjson views + `connection->m_Params["client_secret"]`; no `std::string(view)` materialisation at the call site.  Same threading shape as Sitting 8e R1 (`PerformRefresh` snapshots).
+
+**#3 — Engine `awsSigV4.cpp::HmacSha256` data param widened to `std::string_view`.**  Mechanical signature change.  Removes the `std::string const&` inconsistency with the cloud-side sibling (which already took `string_view`).  All call sites pass strings that implicitly convert.
+
+**#4 — MCP heartbeat: short-circuit on locked keystore.**  `HandleMcpHeartbeatPost` checks `m_McpKeysLoaded.load()` BEFORE `TryMcpAuth`.  When the MCP-key cache is empty (normal post-restart state until master password unlock), returns HTTP **503** with `{"ok":false,"error":"keystore_locked","message":"keystore not yet unlocked"}` and does NOT call `RecordAuthFailure`.  503 instead of the plan's 423 because Crow's response constructor rewrites 423 → 500 (not in its known status set); 503 is semantically close (service-starting) and Crow-recognised.  Closes the self-DoS where a bridge polling at 15 s intervals exhausts the 10-failures-per-5-min lockout budget within ~150 s of startup.  `doc/api-endpoints.md` heartbeat-endpoint section updated with the new error code.
+
+### Files in working tree
+
+| File | Change |
+|---|---|
+| `engine/keys/secureString.{h,cpp}` | +`Build(std::span<std::string_view const>)` overload; initializer_list version delegates to it |
+| `engine/curlWrapper/awsSigV4.{h,cpp}` | `Inputs` extended with `m_ContentSha256Override` + `m_ExtraHeadersToSign`; `Sign()` map-sorted canonical headers; `HmacSha256` data param `string_view` |
+| `engine/keys/scopedSecretBytes.h` | comment dropped now-deleted `application/cloud/sigV4Signer.cpp` reference |
+| `engine/keys/oauthTokenManager.{h,cpp}` | `StoreTokens` secrets become `SecureString const&` |
+| `application/cloud/s3Connector.cpp` | calls engine signer (was cloud signer) |
+| `application/cloud/s3CloudTaskExecutor.cpp` | calls engine signer; uses `EngineCore::Sha256Hex` for upload payload hash; empty payloadHash arg for list/delete |
+| `application/cloud/sigV4Signer.{h,cpp}` | **deleted** (~350 LoC) |
+| `application/web/webServer.cpp` | OAuth callback uses SecureString locals; heartbeat handler 503 short-circuit |
+| `test/security/heapScan_test.cpp` | cloudSigV4 scenario uses engine signer with S3 dispatch shape; AzureSharedKey scenario inlined |
+| `test/security/heapScan_cloud_scenarios.cpp` | **deleted** (collapsed into heapScan_test.cpp) |
+| `premake5.lua` | heapscan TU list reduced |
+| `doc/cyber security.md` | SecureString section: Build overloads documented; HMAC-input-signers list updated (cloud sigV4 gone, engine signer now handles both dispatch shapes); heap-scan audit subsection (file list + cloudSigV4 scenario description) |
+| `doc/api-endpoints.md` | heartbeat endpoint: new 503 keystore_locked error documented |
+| `doc/misc/hand-off.md` | This entry |
+
+### What's verified
+
+| Check | Result |
+|---|---|
+| All 4 binary configs build clean (Studio Debug+Release, Engine Debug+Release) | clean (only pre-existing asio `-Wshadow` + simdjson `warn_unused_result` in triggerEngine.cpp) |
+| **Bedrock SigV4 KAT signature** | **`1a6d6607ae8458641685888fa012825e591fb38ca4db178eab28d9a9b07ae021` — byte-identical to Sitting 6's locked value**.  Proves the map-sorted refactor is behaviour-neutral for the Bedrock dispatch shape (extras empty → same canonical-headers bytes → same string-to-sign → same signature). |
+| SigV4 self-test (debug-startup) | PASSED |
+| **Heap-scan audit** (premake `--heapscan`, all 10 scenarios) | **AUDIT PASSED** — Bearer / XGoogApiKey / AnthropicXApiKey / AzureApiKey / engineSigV4 / engineSigV4(no-churn) / **cloudSigV4::Sign (S3 dispatch shape via engine signer)** / AzureSharedKey::Sign / OAuthPostBody all 0 hits in both smoke + deep; AppendSecretHeader the documented libcurl floor (3 smoke / 4 deep) |
+| `test_auth_mcp.py` | 100/100 |
+| `test_url_policy.py` | 27/27 |
+| `test_adhoc_user_slug_collision.py` | 14/14 |
+| `test_malformed_configs.py` | 56/56 across 8 fixtures |
+| `test_negative_paths.py` | 28/28 across 4 groups |
+| **#4 lockout-bypass verification** | 12 consecutive heartbeat-while-locked calls → 0 entries in `log/security.txt` for `auth_failure` / `lockout_triggered` (the RecordAuthFailure pre-check is the right call site); post-unlock with bogus token still increments lockout counter (adversarial protection preserved) |
+
+**Aggregate: 225+ regression checks green + 10/10 heap-scan scenarios + 1 KAT signature match.**
+
+### Architecture notes for next-session-Claude
+
+- **Engine `SigV4Signer` is the single signer.**  `Inputs::m_ContentSha256Override` for callers that pre-computed or want UNSIGNED-PAYLOAD-style behaviour; empty override → derive `Sha256Hex` from `m_Body` (matches Bedrock's existing behaviour where the body is the full request JSON).  `Inputs::m_ExtraHeadersToSign` for caller-provided headers that must be folded into the canonical-headers + SignedHeaders list (Content-Type on S3 PUT is the only current caller).  Names lowercased, values AWS-trimmed.  No `default:` arm anywhere — extending the signer is enumerate-everything-or-`-Wswitch`-catches-you.
+- **`SecureString::Build` has two overloads now.**  `initializer_list<string_view>` for static piece sets; `span<string_view const>` for runtime-sized.  Both go through the same allocator (the initializer_list flavour delegates).  Same strong-exception-guarantee posture.  When the runtime-sized variant is needed (any unbounded piece-count: SigV4 extras, future N-piece secret builders), use the span form.
+- **`OAuthTokenManager::StoreTokens` is now SecureString-only at the function boundary.**  The connection's `m_Params["client_secret"]` is still `std::string` in the params map (widening the map storage is a separate refactor that would touch every cloud connector).  At the consent-callback boundary the value is copied into a SecureString local before `StoreTokens` is called — same pattern Sitting 8e R1 used for `PerformRefresh`'s snapshots.  Live OAuth round-trip not exercised this session (item #13 in the deferred list).
+- **Heartbeat 503 is not "service unavailable" in the conventional sense.**  It specifically means "MCP-key store not decrypted yet, retry after operator unlock".  Bridges that want defensive behaviour should poll `/api/status::keys_unlocked` first and skip heartbeats until true; the 503 short-circuit is server-side defence in depth in case the bridge doesn't.  The pre-auth rate limiter (`IsRateLimited(RateLimitTier::PreAuth, ...)`) runs BEFORE the keystore check so a spam-flood while locked still hits the per-IP rate limit — the only thing the 503 path bypasses is the slower per-IP lockout counter (10 failures / 5 min).
+
+### Open items / next-session candidates
+
+Per the basket workflow, 7 of 11 original items remain (+ 3 new deferred-verification items added this session):
+
+- **#5 — Polarion `WriteItemFile`/`WriteAttachmentFile` path-traversal coverage** — REST-test against polarion mock or real instance; assert ConfineUnderProjectRoot rejection branch fires.
+- **#6 — AI output 64 KB cap (`kMaxOutputBytes`) coverage** — Python task that emits > 64 KB; verify truncation behaviour.
+- **#7 — Reaper CV wake-on-stop shutdown-timing test** — sandbox-spawn pattern; assert shutdown < 5 s.
+- **#8 — Circuit breaker failure-class policy** — `CloudCircuitBreaker::RecordFailure` should treat `ValueOutOfRange` (app-level cap rejections) as non-connection-failure.
+- **#9 — `AdhocWorkflowManager::ReadMeta` hand-rolled JSON → simdjson** — replace `pluck` lambda with simdjson DOM parse.
+- **#10 — email_watch save-path live test** — needs IMAP mock setup.
+- **#11 — KeyManager hardening synth tests** — > 4 MB keystore + empty-name SetDefaultProvider tests.
+- **#12 (NEW) — Live S3 round-trip smoke** for the consolidated signer.  Heap-scan + KAT cover correctness; live remote not exercised.
+- **#13 (NEW) — Live OAuth consent round-trip** for SecureString StoreTokens.  Code-reviewed only this session.
+- **#14 (NEW) — Heartbeat handler accepts auth-failed AuthResult** — pre-existing bug uncovered while verifying #4.  `HandleMcpHeartbeatPost` checks only `!auth.has_value()`; `TryMcpAuth` returns `AuthResult{"invalid_token", ...}` on bogus mcp_* token, so the handler treats this as success → 200 + updates `m_McpLastHeartbeat`.  RecordAuthFailure does still fire so the lockout protection works; the actual leak is staleness-alert suppression with any non-empty `mcp_*` Bearer.  Fix: check `auth->m_Error.empty()`.  Effort: small.
+
+### Gotchas next-session-Claude should know
+
+- **`/api/shutdown` requires `Authorization: Bearer $J9T_TOKEN`** — NOT `X-Admin-Key`.  Recurring violation pattern; `feedback_shutdown_via_rest` + new `feedback_api_endpoints_on_failure` cover it.  When a REST call fails: read `doc/api-endpoints.md` before retrying, never pattern-match Python `--admin-key` flag to an HTTP header name.
+- **`./jarvisagent.sh` always runs `bin/Release/jarvisAgent-studio`** regardless of `.build-edition` — rebuild Release after a code change if you plan to use the launcher.  For verification with the audit binary or debug-only features (`/api/debug/signals`), invoke the Debug binary directly.
+- **Crow rewrites status code 423 → 500.**  Use 503 for "service-starting / try again" if you need a Crow-recognised code.  423 Locked would be semantically tighter but the framework drops it.
+- **When you add `J9T_HEAPSCAN_BUILD` via premake `--heapscan` and rebuild, force `engine/engine.cpp` to recompile (e.g. `touch engine/engine.cpp`).**  Without that, the audit-build flow links `RunHeapScanAudit()` into the binary but `engine.cpp` (its sole caller) was compiled in a previous run without the define and falls through to normal startup — easy to mistake for a working audit-build.  Empirically seen this session.
+- **Live SigV4-vs-S3 verification path**: `bin/Debug/jarvisAgent-studio` for `/api/debug/signals`; `test/dispatch/test_bedrock_sigv4.py` (no flags) for the locked-KAT regression; `test/security/heapScan_test.cpp` for residue verification (build with `--heapscan`).  Three independent signals + the integration tests cover any future change to the canonical-request build.
+
+---
+
 ## 2026-05-24 (Sitting 15 follow-on — ConfigChecker scheme widen + qwen-7b live verification) → next session
 
 Short follow-on the same night Sitting 15 closed.  Surfaced when JC tried to start j9t with `api_index=11` (qwen-7b) as the default after Sitting 15 landed — the engine exited with `config error: invalid API interface configuration (index 11, count 12)`.

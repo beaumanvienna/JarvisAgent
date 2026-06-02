@@ -32,6 +32,7 @@
 
 #include "engine.h"
 #include "cloud/azureBlobCloudTaskExecutor.h"
+#include "cloud/connectorError.h"
 #include "cloud/azureBlobConnector.h"
 #include "cloud/azureSharedKeySigner.h"
 #include "cloud/connectorHttp.h"
@@ -291,6 +292,7 @@ AppendSecretHeader(headers, "Authorization: Bearer ", credentials.m_Token, authS
         {
             taskState.m_LastErrorMessage = "Failed to parse azure_blob task params JSON";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
 
@@ -309,6 +311,7 @@ AppendSecretHeader(headers, "Authorization: Bearer ", credentials.m_Token, authS
         {
             taskState.m_LastErrorMessage = "Missing required 'operation' in azure_blob task params (upload or download)";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
 
@@ -320,6 +323,7 @@ AppendSecretHeader(headers, "Authorization: Bearer ", credentials.m_Token, authS
             taskState.m_LastErrorMessage =
                 "Unknown azure_blob operation '" + operation + "'. Valid: upload, download";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
 
@@ -338,6 +342,7 @@ AppendSecretHeader(headers, "Authorization: Bearer ", credentials.m_Token, authS
         {
             taskState.m_LastErrorMessage = "No container specified (neither in task params nor connection)";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
 
@@ -348,6 +353,7 @@ AppendSecretHeader(headers, "Authorization: Bearer ", credentials.m_Token, authS
         {
             taskState.m_LastErrorMessage = "azure_blob task requires 'blob_name' and 'local_path'";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
 
@@ -361,6 +367,7 @@ AppendSecretHeader(headers, "Authorization: Bearer ", credentials.m_Token, authS
             taskState.m_LastErrorMessage = "Invalid Azure Blob container name: must match Azure naming rules "
                                            "([a-z0-9-], 3-63 chars, no consecutive/leading/trailing hyphens)";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             LOG_APP_ERROR("[azure_blob] task='{}' workflow='{}' run='{}': invalid container name (length={})",
                           taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId, container.size());
             ConnectorHttp::IncrementInputValidationRejection();
@@ -373,6 +380,7 @@ AppendSecretHeader(headers, "Authorization: Bearer ", credentials.m_Token, authS
             taskState.m_LastErrorMessage = "Invalid Azure Blob blob_name: must be 1-1024 chars, "
                                            "[A-Za-z0-9._-/ ] only, no `..` segments";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             LOG_APP_ERROR("[azure_blob] task='{}' workflow='{}' run='{}': invalid blob_name (length={})",
                           taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId, blobName.size());
             ConnectorHttp::IncrementInputValidationRejection();
@@ -394,6 +402,7 @@ AppendSecretHeader(headers, "Authorization: Bearer ", credentials.m_Token, authS
             taskState.m_LastErrorMessage =
                 "azure_blob: local_path is invalid or escapes the project tree";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             LOG_APP_ERROR("[azure_blob] task='{}' workflow='{}' run='{}': local_path rejected",
                           taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId);
             return false;
@@ -412,6 +421,7 @@ AppendSecretHeader(headers, "Authorization: Bearer ", credentials.m_Token, authS
             {
                 taskState.m_LastErrorMessage = "Cannot open file for upload: " + fullLocalPath.string();
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 return false;
             }
 
@@ -426,6 +436,7 @@ AppendSecretHeader(headers, "Authorization: Bearer ", credentials.m_Token, authS
                 taskState.m_LastErrorMessage = "azure_blob upload: file size " + std::to_string(static_cast<long long>(fileSize)) +
                                                " exceeds " + std::to_string(static_cast<long long>(kMaxAzureBlobUploadBytes)) + " byte cap";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::ValueOutOfRange;
                 LOG_APP_ERROR("[azure_blob] task='{}' workflow='{}' run='{}': upload size {} exceeds cap",
                               taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId,
                               static_cast<long long>(fileSize));
@@ -447,6 +458,7 @@ AppendSecretHeader(headers, "Authorization: Bearer ", credentials.m_Token, authS
             {
                 taskState.m_LastErrorMessage = "Azure Blob upload request failed";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::NetworkError;
                 return false;
             }
 
@@ -458,6 +470,9 @@ AppendSecretHeader(headers, "Authorization: Bearer ", credentials.m_Token, authS
                     taskState.m_LastErrorMessage += ": " + responseBody;
                 }
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = (httpCode == 401 || httpCode == 403)
+                                                  ? ConnectorErrorCode::AuthFailure
+                                                  : ConnectorErrorCode::HttpError;
                 return false;
             }
 
@@ -483,6 +498,7 @@ AppendSecretHeader(headers, "Authorization: Bearer ", credentials.m_Token, authS
             {
                 taskState.m_LastErrorMessage = "Azure Blob download failed: " + downloadError;
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::NetworkError;
                 return false;
             }
 

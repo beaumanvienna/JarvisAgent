@@ -30,6 +30,7 @@
 #include "simdjson/simdjson.h"
 
 #include "engine.h"
+#include "cloud/connectorError.h"
 #include "cloud/redmineCloudTaskExecutor.h"
 #include "cloud/redmineConnector.h"
 #include "cloud/connectorHttp.h"
@@ -201,6 +202,7 @@ namespace AIAssistant
         {
             taskState.m_LastErrorMessage = "Failed to parse redmine_issue task params JSON";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
 
@@ -219,6 +221,7 @@ namespace AIAssistant
         {
             taskState.m_LastErrorMessage = "Missing required 'operation' in redmine_issue task params";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
 
@@ -242,6 +245,7 @@ namespace AIAssistant
                 taskState.m_LastErrorMessage =
                     "redmine_issue/list_issues requires 'project_identifier' (in task params or connection params)";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 return false;
             }
             if (!IsValidRedmineProjectIdent(projectIdent))
@@ -249,6 +253,7 @@ namespace AIAssistant
                 taskState.m_LastErrorMessage = "redmine_issue/list_issues: invalid 'project_identifier' (must match "
                                                "[a-z0-9_-], 1-100 chars)";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 LOG_APP_ERROR("[redmine] invalid project_identifier task='{}' workflow='{}' run='{}': '{}'",
                               taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId, projectIdent);
                 return false;
@@ -264,6 +269,7 @@ namespace AIAssistant
                 taskState.m_LastErrorMessage = "redmine_issue/list_issues: invalid 'status' (must be 'open', 'closed', "
                                                "'*', or a positive integer)";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 LOG_APP_ERROR("[redmine] invalid status task='{}' workflow='{}' run='{}': '{}'", taskDefinition.m_Id,
                               workflowDefinition.m_Id, workflowRun.m_RunId, status);
                 return false;
@@ -284,6 +290,7 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "Redmine list_issues request failed (curl error)";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::NetworkError;
                 return false;
             }
             if (httpCode >= 400)
@@ -294,6 +301,9 @@ namespace AIAssistant
                     taskState.m_LastErrorMessage += ": " + responseBody;
                 }
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = (httpCode == 401 || httpCode == 403)
+                                                  ? ConnectorErrorCode::AuthFailure
+                                                  : ConnectorErrorCode::HttpError;
                 return false;
             }
 
@@ -314,6 +324,7 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "Missing required 'issue_id' in redmine_issue/update_issue task params";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 return false;
             }
             if (!IsValidRedmineIssueId(issueId))
@@ -321,6 +332,7 @@ namespace AIAssistant
                 taskState.m_LastErrorMessage =
                     "redmine_issue/update_issue: invalid 'issue_id' (must be a positive integer)";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 LOG_APP_ERROR("[redmine] invalid issue_id task='{}' workflow='{}' run='{}': '{}'", taskDefinition.m_Id,
                               workflowDefinition.m_Id, workflowRun.m_RunId, issueId);
                 return false;
@@ -339,6 +351,7 @@ namespace AIAssistant
                     taskState.m_LastErrorMessage =
                         "redmine_issue/update_issue: notes_file does not lie under the project root: " + notesFile;
                     taskState.m_State = TaskInstanceStateKind::Failed;
+                    taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                     LOG_APP_ERROR("[redmine] notes_file rejected task='{}' workflow='{}' run='{}': '{}'",
                                   taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId, notesFile);
                     return false;
@@ -348,6 +361,7 @@ namespace AIAssistant
                 {
                     taskState.m_LastErrorMessage = "redmine_issue/update_issue: cannot open notes_file '" + notesFile + "'";
                     taskState.m_State = TaskInstanceStateKind::Failed;
+                    taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                     LOG_APP_ERROR("[redmine] notes_file not readable task='{}' workflow='{}' run='{}': '{}'",
                                   taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId, notesFile);
                     return false;
@@ -376,6 +390,7 @@ namespace AIAssistant
                         "redmine_issue/update_issue: assigned_to_id_file does not lie under the project root: " +
                         assignedToIdFile;
                     taskState.m_State = TaskInstanceStateKind::Failed;
+                    taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                     LOG_APP_ERROR("[redmine] assigned_to_id_file rejected task='{}' workflow='{}' run='{}': '{}'",
                                   taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId, assignedToIdFile);
                     return false;
@@ -389,6 +404,7 @@ namespace AIAssistant
                 taskState.m_LastErrorMessage =
                     "redmine_issue/update_issue requires at least one of: notes, notes_file, assigned_to_id, assigned_to_id_file";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 return false;
             }
 
@@ -429,6 +445,7 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "Redmine update_issue request failed (curl error)";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::NetworkError;
                 return false;
             }
             if (httpCode >= 400)
@@ -439,6 +456,9 @@ namespace AIAssistant
                     taskState.m_LastErrorMessage += ": " + responseBody;
                 }
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = (httpCode == 401 || httpCode == 403)
+                                                  ? ConnectorErrorCode::AuthFailure
+                                                  : ConnectorErrorCode::HttpError;
                 return false;
             }
 
@@ -456,6 +476,7 @@ namespace AIAssistant
             taskState.m_LastErrorMessage =
                 "Unknown redmine_issue operation '" + operation + "'. Valid: list_issues, update_issue";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
 

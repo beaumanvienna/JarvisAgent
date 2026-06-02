@@ -200,6 +200,7 @@ namespace AIAssistant
         {
             taskState.m_LastErrorMessage = "Failed to parse snowflake_query task params JSON";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
 
@@ -218,6 +219,7 @@ namespace AIAssistant
         {
             taskState.m_LastErrorMessage = "Missing required 'query' in snowflake_query task params";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
 
@@ -270,6 +272,7 @@ namespace AIAssistant
         {
             taskState.m_LastErrorMessage = "Snowflake JWT contains CR/LF — refusing to send";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::CredentialInvalid;
             LOG_APP_ERROR("[snowflake] task='{}' workflow='{}' run='{}': JWT CRLF rejected",
                           taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId);
             ConnectorHttp::IncrementCredentialCrlfRejection();
@@ -335,6 +338,7 @@ namespace AIAssistant
             taskState.m_LastErrorMessage =
                 "Snowflake endpoint rejected: invalid account locator (see security log)";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidEndpoint;
             LOG_APP_ERROR("[snowflake] task='{}' workflow='{}' run='{}': endpoint rejected",
                           taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId);
             return false;
@@ -348,6 +352,7 @@ namespace AIAssistant
         {
             taskState.m_LastErrorMessage = "Snowflake statement submission failed (curl error)";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::NetworkError;
             return false;
         }
 
@@ -361,6 +366,9 @@ namespace AIAssistant
             // when the response is well-formed JSON.
             taskState.m_LastErrorMessage = "Snowflake statement submission failed: HTTP " + std::to_string(httpCode);
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = (httpCode == 401 || httpCode == 403)
+                                              ? ConnectorErrorCode::AuthFailure
+                                              : ConnectorErrorCode::HttpError;
             return false;
         }
 
@@ -393,6 +401,7 @@ namespace AIAssistant
         {
             taskState.m_LastErrorMessage = "Snowflake server returned an invalid statement handle";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             LOG_APP_ERROR("[snowflake] task='{}' workflow='{}' run='{}': server-supplied handle rejected (length={})",
                           taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId, handle.size());
             ConnectorHttp::IncrementInputValidationRejection();
@@ -444,6 +453,7 @@ namespace AIAssistant
                     taskState.m_LastErrorMessage =
                         "Snowflake query timed out after " + std::to_string(statementTimeout) + " seconds";
                     taskState.m_State = TaskInstanceStateKind::Failed;
+                    taskState.m_LastFailureCode = ConnectorErrorCode::ValueOutOfRange;
                     return false;
                 }
 
@@ -454,6 +464,7 @@ namespace AIAssistant
                 {
                     taskState.m_LastErrorMessage = "Snowflake poll request failed";
                     taskState.m_State = TaskInstanceStateKind::Failed;
+                    taskState.m_LastFailureCode = ConnectorErrorCode::NetworkError;
                     return false;
                 }
 
@@ -464,6 +475,9 @@ namespace AIAssistant
                     taskState.m_LastErrorMessage =
                         "Snowflake poll failed: HTTP " + std::to_string(httpCode);
                     taskState.m_State = TaskInstanceStateKind::Failed;
+                    taskState.m_LastFailureCode = (httpCode == 401 || httpCode == 403)
+                                                      ? ConnectorErrorCode::AuthFailure
+                                                      : ConnectorErrorCode::HttpError;
                     return false;
                 }
 
@@ -596,6 +610,7 @@ namespace AIAssistant
             taskState.m_LastErrorMessage =
                 "snowflake_query: output_file path is invalid or escapes the working directory";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             LOG_APP_ERROR("[snowflake] task='{}' workflow='{}' run='{}': output_file path rejected",
                           taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId);
             return false;

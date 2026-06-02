@@ -207,10 +207,10 @@ Tests the connection using the registered `ICloudConnector::TestConnection()`.
 
 ## 6. Frontend Changes (Phase 0)
 
-### Keys Page (formerly "AI Keys")
+### Keys Page
 
-The "AI Keys" nav button is renamed to "Keys". The `ProvidersSettingsView` now includes a **Credential Type** dropdown with four options:
-- **API Key** — shows API key input (same as before)
+The **Keys** nav button opens `ProvidersSettingsView`, which includes a **Credential Type** dropdown with four options:
+- **API Key** — shows the API key input
 - **OAuth 2.0** — shows scopes input + note about Connections page
 - **Key Pair (RSA)** — shows PEM textarea
 - **Username / Password** — shows username + password inputs
@@ -392,7 +392,7 @@ The `polarion_query` filter source now supports a `"connection"` field that refe
 }
 ```
 
-Inline `base_url`/`project_id`/`key_name` still works for backward compatibility.
+`base_url`/`project_id`/`key_name` may also be specified inline on the task instead of through a named connection.
 
 ### Workflow Editor UI
 
@@ -851,12 +851,19 @@ Polls an IMAP folder on a configurable interval.
 
 `EmailConnector::CheckForNewMail()` runs on each poll interval:
 
-1. Opens an IMAP connection and issues `SEARCH ALL` on the configured folder (uses `SEARCH ALL` instead of `UID SEARCH` for broad IMAP server compatibility, e.g. GreenMail).
+1. Opens an IMAP connection, issues `STATUS folder (UIDVALIDITY)` to capture the mailbox's current UIDVALIDITY (RFC 3501 §2.3.1.1), then `SEARCH ALL` on the configured folder (uses `SEARCH ALL` instead of `UID SEARCH` for broad IMAP server compatibility, e.g. GreenMail).
 2. Compares returned UIDs against the stored `m_LastSeenUid` watermark.
 3. On the **first poll**, seeds the watermark to the highest UID silently — does not fire the trigger for pre-existing mail.
 4. On subsequent polls, fires the trigger only when UIDs strictly greater than the watermark are found, then advances the watermark.
 5. IMAP network I/O runs **outside the trigger engine mutex** to avoid blocking other triggers during potentially slow connections.
 6. Watermarks persist across restart at `<queue_folder>/.email_watermarks.json` (atomic-rename per successful poll); mail that arrived during a restart window still fires the trigger on the next poll instead of being absorbed into the seed baseline.
+
+**Watermark integrity.**  UIDs are only meaningful within `(server, mailbox, UIDVALIDITY)`.  The persisted file (`format_version: 2`) records `connection_name`, `folder`, and `uid_validity` alongside `last_seen_uid` as load-bearing fields:
+
+- **Registration-time guard** — `TriggerEngine::AddEmailWatchTrigger` discards the saved UID with a WARN when the JCWF has been edited to repoint a trigger to a different connection or folder.  Without this, a UID from server A would be applied to server B's UID space (silent under/over-fire).
+- **Poll-time guard** — if the current mailbox UIDVALIDITY differs from the saved one (mailbox rename / delete+recreate / server restore from backup), the in-memory watermark is discarded with a WARN and the next poll re-seeds from current state without firing for pre-existing mail.
+- **Format gate** — `format_version: 1` files (the pre-UIDVALIDITY shape) are discarded at load with a WARN per `feedback_no_legacy`; no compat shim.  Triggers re-seed from current IMAP state on the next poll.
+- **Orphan prune** — before each write, `SavePersistedEmailWatermarksLocked` drops any persisted entry whose `(workflowId, triggerId)` no longer matches a live `m_EmailWatchTriggers` entry, so a removed workflow's watermark doesn't accumulate in the file indefinitely.  Workflow removal goes through `ClearAll()` + re-register, so the prune fires on the next surviving trigger's save (the survivors are re-registered before any save runs).
 
 ### Connections UI
 
@@ -983,7 +990,7 @@ Implements `ICloudConnector` for Google Sheets API v4. Supports API key auth (re
 
 ### Runtime Resilience (9a)
 
-- **CloudCircuitBreaker** — per-connection circuit breaker (Closed/Open/HalfOpen state machine). Tracks consecutive failures, short-circuits requests during outages, auto-recovers after 60s cooldown. Wired into `ICloudTaskExecutor::Execute()` — all cloud tasks automatically benefit.
+- **CloudCircuitBreaker** — per-connection circuit breaker (Closed/Open/HalfOpen state machine). Tracks consecutive failures, short-circuits requests during outages, auto-recovers after 60s cooldown. Wired into `ICloudTaskExecutor::Execute()` — all cloud tasks automatically benefit. Each executor reports a typed `ConnectorErrorCode` on failure; `IsConnectionFailure(code)` keeps app-level cap rejections (`ValueOutOfRange`) from ticking the failure counter so an operator hitting a cap doesn't self-trip the breaker on a healthy connection.
 - **CloudConnectionPool** — generic connection pool for persistent-connection providers (PostgreSQL libpq, future IMAP). Health-checks on acquire, evicts stale connections after 5 minutes idle.
 - **TaskCancellationToken** — wired into `WorkflowRun`. When `POST /api/workflow-runs/{runId}/cancel` is called, the token propagates to in-flight cloud tasks. Snowflake executor already checks this during async polling and sends a cancel request to Snowflake.
 - **ProviderRateLimitPolicy** — extends `CloudRetryPolicy` with per-provider rate-limit awareness (minimum request intervals, burst limits per window).

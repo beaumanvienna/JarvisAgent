@@ -18,6 +18,12 @@ Test groups:
 
   Group 1 — Size caps
     1.1  adhoc JCWF > 4 MB → 400 jcwf_too_large (kMaxJcwfBytes)
+    1.2  task output > 64 KiB with multibyte UTF-8 char straddling the cap
+         boundary → callback payload truncates to 64 KiB AND backs off to a
+         complete UTF-8 codepoint (no dangling lead byte).  Drives the
+         truncation path via the Debug-only /api/debug/build-callback-payload
+         endpoint so the SSRF gate's loopback rejection doesn't get in the
+         way.  Sub-test SKIPPED on Release builds (debug endpoint absent).
 
   Group 2 — Path confinement on JCWF-supplied surfaces
     2.1  adhoc submission with cntx_files source = "/etc/passwd"
@@ -28,6 +34,19 @@ Test groups:
     2.3  file_watch trigger path = "/etc/" → registry trigger
          registration drops the watch silently with an APP ERROR;
          workflow stays loaded but the trigger never fires.
+    2.4  polarion_write download_attachment file_path='/tmp/escape' →
+         ConfineUnderProjectRoot rejects pre-network; task fails with
+         "attachment output path does not resolve under project root"
+         + no escape file written.
+    2.5  polarion_write download_attachment work_item_id='../escape' →
+         IsValidPolarionId rejects '..' substring; task fails with
+         "invalid Polarion identifier".
+    2.6  polarion_query filter.id='../escape' → mock returns items,
+         per-item WriteItemFile rejected by IsValidFilesystemId
+         allowlist; ERROR log line "[polarion] WriteItemFile rejected
+         filter.m_Id '../escape' — fails allowlist" emitted per item.
+         (Sub-tests 2.4-2.6 require polarionMockup running at
+         :18080; skipped with a warning otherwise.)
 
   Group 3 — Concurrency
     3.1  WorkflowRegistry mutex stress: N parallel POST
@@ -46,10 +65,6 @@ Deferred to Sitting 16 (REST-undrivable from a shared host instance):
     file content read AFTER an AI call completes.  Drivable via a
     Python task that writes >64 KB to its output file, but the failure
     mode is internal-truncation not REST-observable rejection.
-  - Polarion WriteItemFile path-traversal: needs a live or mocked
-    Polarion connection + a hostile JCWF.  The existing Polarion mock
-    in `config.json` (api6 / aoai-api-simulator) doesn't cover this
-    surface directly.
   - Reaper CV wake-on-stop: only observable via shutdown timing, not
     on a shared host instance.  Could be tested by spawning a separate
     j9t in a sandbox dir (see test_malformed_configs.py harness) and
@@ -176,6 +191,93 @@ def group1_adhoc_jcwf_too_large(base, admin_key, results):
         revoke_key(base, admin_key, key["key_id"])
 
 
+def group1_output_cap_utf8_truncation(base, admin_key, results):
+    header("1.2  output > 64 KiB with UTF-8 multibyte at boundary → callback payload caps + UTF-8-safe")
+    # Probe whether the debug endpoint exists (Release builds strip it).
+    probe = http("GET", base, "/api/debug/build-callback-payload", key=admin_key)
+    if probe.status_code == 404:
+        warn("debug endpoint absent (Release build?) — skipping 1.2")
+        return
+    user = f"hardening-cap-{uuid.uuid4().hex[:8]}@example.com"
+    key = issue_key(base, admin_key, user)
+    try:
+        wfid = f"cap_{uuid.uuid4().hex[:8]}"
+        # 65538-byte file: 65535 'A' + 3-byte UTF-8 '€' (U+20AC = E2 82 AC).
+        # The '€' straddles the 65536-byte cap (lead at byte 65535,
+        # continuations at 65536/65537).  Without the UTF-8-safe truncation
+        # the callback payload would end with the lead 0xE2 alone — invalid
+        # UTF-8 that detonates strict JSON validators + PyUnicode_FromString.
+        # File built by scripts/writeOutputCapCanary.py (python task).
+        jcwf = {
+            "id": wfid, "version": "1.0", "label": "output cap UTF-8 canary",
+            "manual_start": True,
+            "tasks": {"big": {
+                "id": "big", "type": "python",
+                "working_directory": f"{wfid}/big",
+                "params": {
+                    "module": "writeOutputCapCanary",
+                    "function": "write_canary",
+                },
+                "file_outputs": ["big.txt"],
+                "outputs": {"content": {"type": "string"}},
+            }},
+        }
+        r = http("POST", base, "/api/workflows/run-adhoc", key=key["api_key"],
+                 json={"jcwf": jcwf, "cleanup_policy": "ttl_1h"})
+        expect(r.status_code == 202, f"adhoc submit → 202 (got {r.status_code})", results)
+        if r.status_code != 202:
+            expect_status_ok(base, admin_key, results)
+            return
+        run_id = r.json().get("runId")
+        state, task_err = _poll_terminal(base, key["api_key"], run_id, deadline_s=15)
+        info(f"run state = {state!r}, task error = {task_err[:120]!r}")
+        expect(state == "succeeded", f"run terminal = succeeded (got {state!r})", results)
+        if state != "succeeded":
+            expect_status_ok(base, admin_key, results)
+            return
+
+        r = http("GET", base, f"/api/debug/build-callback-payload?runId={run_id}", key=admin_key)
+        expect(r.status_code == 200, f"debug payload endpoint → 200 (got {r.status_code})", results)
+        if r.status_code != 200:
+            expect_status_ok(base, admin_key, results)
+            return
+        payload = r.json()
+        outputs = payload.get("tasks", {}).get("big", {}).get("outputs", {})
+        # The python executor first copies the function's return dict into
+        # m_OutputValues (here: "ok", "bytes_written"), then derivedOutputs
+        # fills missing JCWF-declared slots ("content" → abs path to big.txt).
+        # Look the slot up by name — first-iter order is insertion-dependent.
+        info(f"output slots present: {sorted(outputs.keys())}")
+        content = outputs.get("content")
+        if content is None:
+            fail(f"callback payload missing 'content' slot for task 'big' (got slots={sorted(outputs.keys())})")
+            results[1] += 1
+            expect_status_ok(base, admin_key, results)
+            return
+
+        content_bytes = content.encode("utf-8")
+        info(f"content_bytes = {len(content_bytes)} bytes (file on disk = 65538)")
+        expect(len(content_bytes) <= 65536,
+               f"content ≤ 64 KiB cap (got {len(content_bytes)})", results)
+        expect(len(content_bytes) < 65538,
+               f"content was truncated (got {len(content_bytes)}, file is 65538)", results)
+        # With the UTF-8-safe fix, the partial '€' is dropped → 65535 'A' bytes.
+        # Without the fix, content would be 65536 bytes ending with the lead 0xE2.
+        expect(len(content_bytes) == 65535,
+               f"content == 65535 (65535 'A's; partial '€' dropped) — UTF-8-safe truncation "
+               f"(got {len(content_bytes)})", results)
+        try:
+            content_bytes.decode("utf-8", errors="strict")
+            ok("content is well-formed UTF-8 (no dangling lead byte)")
+            results[0] += 1
+        except UnicodeDecodeError as e:
+            fail(f"content has invalid UTF-8: {e}")
+            results[1] += 1
+        expect_status_ok(base, admin_key, results)
+    finally:
+        revoke_key(base, admin_key, key["key_id"])
+
+
 # =====================================================================
 # Group 2 — Path confinement on JCWF-supplied surfaces
 # =====================================================================
@@ -275,6 +377,170 @@ def group2_file_watch_path_traversal(base, admin_key, results):
     expect_status_ok(base, admin_key, results)
 
 
+def _polarion_mock_reachable(base, admin_key) -> bool:
+    """True iff my-polarion connection passes /test (polarionMockup is up + connection registered)."""
+    r = http("POST", base, "/api/connections/my-polarion/test", key=admin_key)
+    return r.status_code == 200 and r.json().get("ok") is True
+
+
+def group2_polarion_download_outputpath(base, admin_key, results):
+    header("2.4  polarion_write download_attachment file_path='/tmp/...' → "
+           "ConfineUnderProjectRoot rejects pre-network")
+    if not _polarion_mock_reachable(base, admin_key):
+        warn("my-polarion connection unreachable (polarionMockup down?) — skipping 2.4")
+        return
+    user = f"hardening-poldl-{uuid.uuid4().hex[:8]}@example.com"
+    key = issue_key(base, admin_key, user)
+    escape_path = "/tmp/j9t_polarion_escape_canary.bin"
+    try:
+        wfid = f"pol_{uuid.uuid4().hex[:8]}_dl"
+        jcwf = {
+            "id": wfid, "version": "1.0", "label": "polarion download path escape canary",
+            "manual_start": True,
+            "tasks": {"dl": {
+                "id": "dl", "type": "polarion_write",
+                "working_directory": f"{wfid}/dl",
+                "params": {
+                    "connection": "my-polarion",
+                    "operation": "download_attachment",
+                    "work_item_id": "REQ-003",
+                    "attachment_id": "attachment-1",
+                    "file_path": escape_path,
+                },
+            }},
+        }
+        r = http("POST", base, "/api/workflows/run-adhoc", key=key["api_key"],
+                 json={"jcwf": jcwf, "cleanup_policy": "on_completion"})
+        expect(r.status_code == 202, f"adhoc submit → 202 (got {r.status_code})", results)
+        if r.status_code != 202:
+            expect_status_ok(base, admin_key, results)
+            return
+        run_id = r.json().get("runId")
+        state, task_err = _poll_terminal(base, key["api_key"], run_id, deadline_s=10)
+        info(f"run state = {state!r}, task error = {task_err[:200]!r}")
+        expect(state == "failed", f"run terminal = failed (got {state!r})", results)
+        expect("attachment output path does not resolve under project root" in task_err,
+               f"task error names outputPath rejection (got {task_err[:200]!r})", results)
+        if os.path.exists(escape_path):
+            fail(f"escape file written outside project root: {escape_path}")
+            results[1] += 1
+            os.remove(escape_path)
+        else:
+            ok(f"no escape file at {escape_path}")
+            results[0] += 1
+        expect_status_ok(base, admin_key, results)
+    finally:
+        revoke_key(base, admin_key, key["key_id"])
+
+
+def group2_polarion_id_allowlist(base, admin_key, results):
+    header("2.5  polarion_write download_attachment work_item_id='../escape' → "
+           "IsValidPolarionId rejects '..' substring")
+    if not _polarion_mock_reachable(base, admin_key):
+        warn("my-polarion connection unreachable (polarionMockup down?) — skipping 2.5")
+        return
+    user = f"hardening-polid-{uuid.uuid4().hex[:8]}@example.com"
+    key = issue_key(base, admin_key, user)
+    try:
+        wfid = f"pol_{uuid.uuid4().hex[:8]}_id"
+        jcwf = {
+            "id": wfid, "version": "1.0", "label": "polarion id allowlist canary",
+            "manual_start": True,
+            "tasks": {"dl": {
+                "id": "dl", "type": "polarion_write",
+                "working_directory": f"{wfid}/dl",
+                "params": {
+                    "connection": "my-polarion",
+                    "operation": "download_attachment",
+                    "work_item_id": "../escape",
+                    "attachment_id": "attachment-1",
+                    "file_path": "ok_canary.bin",
+                },
+            }},
+        }
+        r = http("POST", base, "/api/workflows/run-adhoc", key=key["api_key"],
+                 json={"jcwf": jcwf, "cleanup_policy": "on_completion"})
+        expect(r.status_code == 202, f"adhoc submit → 202 (got {r.status_code})", results)
+        if r.status_code != 202:
+            expect_status_ok(base, admin_key, results)
+            return
+        run_id = r.json().get("runId")
+        state, task_err = _poll_terminal(base, key["api_key"], run_id, deadline_s=10)
+        info(f"run state = {state!r}, task error = {task_err[:200]!r}")
+        expect(state == "failed", f"run terminal = failed (got {state!r})", results)
+        expect("invalid Polarion identifier" in task_err,
+               f"task error names IsValidPolarionId rejection (got {task_err[:200]!r})", results)
+        expect_status_ok(base, admin_key, results)
+    finally:
+        revoke_key(base, admin_key, key["key_id"])
+
+
+def group2_polarion_writeitemfile_allowlist(base, admin_key, results):
+    header("2.6  polarion_query filter.id='../escape' → WriteItemFile rejects per item (ERROR log)")
+    if not _polarion_mock_reachable(base, admin_key):
+        warn("my-polarion connection unreachable (polarionMockup down?) — skipping 2.6")
+        return
+    user = f"hardening-polwif-{uuid.uuid4().hex[:8]}@example.com"
+    key = issue_key(base, admin_key, user)
+    try:
+        # Snapshot log byte offset so we grep only lines emitted by THIS run.
+        log_pre = http("GET", base, "/api/log?tail=1", key=admin_key)
+        start_offset = log_pre.json().get("byteOffset", 0) if log_pre.status_code == 200 else 0
+
+        wfid = f"pol_{uuid.uuid4().hex[:8]}_wif"
+        bad_filter_id = "../escape"
+        jcwf = {
+            "id": wfid, "version": "1.0", "label": "WriteItemFile allowlist canary",
+            "manual_start": True,
+            "filters": [{
+                "id": bad_filter_id,
+                "source": {
+                    "kind": "polarion_query",
+                    "connection": "my-polarion",
+                    "query": "type:requirement",
+                    "page_size": 5,
+                },
+                "binding": "req",
+                "max_items": 1,
+            }],
+            "tasks": {"consume": {
+                "id": "consume", "type": "shell",
+                "mode": "per_item",
+                "filter": bad_filter_id,
+                "working_directory": f"{wfid}/consume",
+                "params": {
+                    "command": "/bin/true",
+                },
+            }},
+        }
+        r = http("POST", base, "/api/workflows/run-adhoc", key=key["api_key"],
+                 json={"jcwf": jcwf, "cleanup_policy": "on_completion"})
+        if r.status_code == 400:
+            # If a future change moves the allowlist to parse time, the
+            # rejection happens here — still correct (defense moved earlier).
+            ok(f"parse-time rejection (acceptable hardening): {r.json().get('error','?')!r}")
+            results[0] += 1
+            expect_status_ok(base, admin_key, results)
+            return
+        expect(r.status_code == 202, f"adhoc submit → 202 (got {r.status_code})", results)
+        if r.status_code != 202:
+            expect_status_ok(base, admin_key, results)
+            return
+        run_id = r.json().get("runId")
+        state, _ = _poll_terminal(base, key["api_key"], run_id, deadline_s=20)
+        info(f"run state = {state!r}")
+
+        log_post = http("GET", base, f"/api/log?offset={start_offset}", key=admin_key)
+        log_text = "\n".join(log_post.json().get("lines", [])) if log_post.status_code == 200 else ""
+        expect("WriteItemFile rejected filter.m_Id '../escape'" in log_text,
+               "ERROR log line names WriteItemFile allowlist rejection with the hostile filter id", results)
+        expect("fails allowlist" in log_text,
+               "ERROR log line mentions 'fails allowlist'", results)
+        expect_status_ok(base, admin_key, results)
+    finally:
+        revoke_key(base, admin_key, key["key_id"])
+
+
 # =====================================================================
 # Group 3 — Concurrency
 # =====================================================================
@@ -333,20 +599,6 @@ def _db_query_jcwf(wfid, task_params):
             "params": task_params,
         }},
     }
-
-
-def _warm_up_connection(base, admin_key, connection_name) -> bool:
-    """POST /api/connections/<name>/test to reset the breaker before a cap test.
-
-    The breaker counts every failed task against the connection — including
-    expected-app-level failures like "exceeds max_rows".  Five consecutive
-    such failures trip the breaker open and short-circuit all subsequent
-    requests with "circuit_open".  This helper performs a clean connection
-    probe which both verifies the connection is reachable AND resets the
-    breaker on success.  Returns True iff the connection is now healthy.
-    """
-    r = http("POST", base, f"/api/connections/{connection_name}/test", key=admin_key)
-    return r.status_code == 200 and r.json().get("ok") is True
 
 
 def _poll_terminal(base, key, run_id, deadline_s=10):
@@ -423,9 +675,6 @@ def group4_db_query_row_cap(base, admin_key, results):
     user = f"hardening-dbrows-{uuid.uuid4().hex[:8]}@example.com"
     key = issue_key(base, admin_key, user)
     try:
-        if not _warm_up_connection(base, admin_key, "local-pg"):
-            warn("local-pg connection test failed — skipping cap assertion")
-            return
         wfid = f"dbq_{uuid.uuid4().hex[:8]}_rows"
         jcwf = _db_query_jcwf(wfid, {
             "connection": "local-pg",
@@ -464,9 +713,6 @@ def group4_db_query_timeout(base, admin_key, results):
     user = f"hardening-dbtmo-{uuid.uuid4().hex[:8]}@example.com"
     key = issue_key(base, admin_key, user)
     try:
-        if not _warm_up_connection(base, admin_key, "local-pg"):
-            warn("local-pg connection test failed — skipping timeout assertion")
-            return
         wfid = f"dbq_{uuid.uuid4().hex[:8]}_tmo"
         jcwf = _db_query_jcwf(wfid, {
             "connection": "local-pg",
@@ -496,6 +742,90 @@ def group4_db_query_timeout(base, admin_key, results):
         # routes that through PostgreSQL query failed: <message>.
         expect("statement timeout" in task_err.lower() or "canceling" in task_err.lower(),
                f"task error mentions 'statement timeout' or 'canceling' (got {task_err[:120]!r})", results)
+        expect_status_ok(base, admin_key, results)
+    finally:
+        revoke_key(base, admin_key, key["key_id"])
+
+
+def group4_db_query_breaker_app_level_classification(base, admin_key, results):
+    header("4.4  N consecutive max_rows cap rejections → breaker stays Closed "
+           "(IsConnectionFailure(ValueOutOfRange) == false)")
+    # Probes the typed-failure-code policy: a db_query that exceeds max_rows
+    # is an app-level rejection (the connection is healthy, the query just
+    # produced too many rows), so the circuit breaker must NOT decrement the
+    # connection's health budget.  Without this policy, 5 consecutive cap
+    # rejections would trip the breaker open and lock the user out of the
+    # connection for 60 s.  No warm-up — the assertion IS that no warm-up is
+    # needed.
+    def _fetch_health():
+        r = http("GET", base, "/api/status", key=admin_key)
+        if r.status_code != 200:
+            return None
+        for ch in r.json().get("connection_health", []):
+            if ch.get("name") == "local-pg":
+                return ch
+        return None
+
+    baseline = _fetch_health()
+    if baseline is None:
+        warn("local-pg not in connection_health — skipping cap-classification test")
+        return
+    if baseline.get("circuit_state") != "closed":
+        warn(f"local-pg breaker not Closed at baseline ({baseline.get('circuit_state')!r}) — "
+             f"skipping (run /api/connections/local-pg/test to reset)")
+        return
+    baseline_failures = baseline.get("consecutive_failures", 0)
+    info(f"baseline: state={baseline.get('circuit_state')!r}, "
+         f"consecutive_failures={baseline_failures}")
+
+    user = f"hardening-brc-{uuid.uuid4().hex[:8]}@example.com"
+    key = issue_key(base, admin_key, user)
+    try:
+        N = 6  # one more than the default failure threshold (5)
+        ran = 0
+        for i in range(N):
+            wfid = f"dbq_{uuid.uuid4().hex[:8]}_brc{i}"
+            jcwf = _db_query_jcwf(wfid, {
+                "connection": "local-pg",
+                "query": "SELECT generate_series(1, 100) AS x",
+                "max_rows": 5,
+                "format": "csv",
+                "output_file": "rows_canary.csv",
+            })
+            r = http("POST", base, "/api/workflows/run-adhoc", key=key["api_key"],
+                     json={"jcwf": jcwf, "cleanup_policy": "on_completion"})
+            if r.status_code != 202:
+                warn(f"adhoc submit {i+1}/{N} → {r.status_code} (skipping rest)")
+                break
+            state, task_err = _poll_terminal(base, key["api_key"], r.json().get("runId"))
+            if state is None:
+                warn(f"run {i+1}/{N} did not reach terminal state — aborting test")
+                return
+            # A connection-class failure here (e.g. local-pg unreachable) WOULD
+            # legitimately tick the breaker; bail out so we don't accidentally
+            # blame the wrong subsystem.
+            if "exceeds max_rows=5" not in task_err:
+                warn(f"run {i+1}/{N} did not hit the cap branch (err={task_err[:120]!r}) "
+                     f"— skipping cap-classification assertion")
+                return
+            ran += 1
+
+        expect(ran == N, f"all {N} runs hit the max_rows cap branch (ran={ran})", results)
+
+        after = _fetch_health()
+        expect(after is not None, "local-pg still present in connection_health", results)
+        if after is None:
+            return
+        expect(after.get("circuit_state") == "closed",
+               f"breaker still Closed after {N} cap rejections (got {after.get('circuit_state')!r})",
+               results)
+        expect(after.get("consecutive_failures", 0) == baseline_failures,
+               f"consecutive_failures unchanged from baseline "
+               f"(baseline={baseline_failures}, after={after.get('consecutive_failures', 0)})",
+               results)
+        expect(after.get("last_failure_code") == "value_out_of_range",
+               f"last_failure_code reflects the typed code "
+               f"(got {after.get('last_failure_code')!r})", results)
         expect_status_ok(base, admin_key, results)
     finally:
         revoke_key(base, admin_key, key["key_id"])
@@ -558,12 +888,14 @@ def group3_inflight_counter_leak(base, admin_key, results):
 # =====================================================================
 
 GROUPS = {
-    1: [group1_adhoc_jcwf_too_large],
+    1: [group1_adhoc_jcwf_too_large, group1_output_cap_utf8_truncation],
     2: [group2_aicall_cntx_path_traversal, group2_workflow_id_traversal,
-        group2_file_watch_path_traversal],
+        group2_file_watch_path_traversal,
+        group2_polarion_download_outputpath, group2_polarion_id_allowlist,
+        group2_polarion_writeitemfile_allowlist],
     3: [group3_registry_mutex_stress, group3_inflight_counter_leak],
     4: [group4_db_query_output_traversal, group4_db_query_row_cap,
-        group4_db_query_timeout],
+        group4_db_query_timeout, group4_db_query_breaker_app_level_classification],
 }
 
 

@@ -443,15 +443,40 @@ namespace AIAssistant
         return uids;
     }
 
+    uint32_t EmailConnector::ParseStatusUidValidity(std::string const& statusResponse)
+    {
+        // RFC 3501 §6.3.10: `* STATUS "INBOX" (UIDVALIDITY 12345)` — the value
+        // is a non-negative 32-bit unsigned integer (RFC 3501 §2.3.1.1).
+        // The mailbox name may be quoted with `"..."` or atom-form; we anchor
+        // on the `UIDVALIDITY ` token, not the mailbox part, so quoting style
+        // doesn't matter.
+        auto const pos = statusResponse.find("UIDVALIDITY ");
+        if (pos == std::string::npos) return 0;
+        char const* p = statusResponse.c_str() + pos + std::string("UIDVALIDITY ").size();
+        char const* const end = statusResponse.c_str() + statusResponse.size();
+        uint64_t value = 0;
+        bool any = false;
+        while (p < end && *p >= '0' && *p <= '9')
+        {
+            value = value * 10 + static_cast<uint64_t>(*p - '0');
+            ++p;
+            any = true;
+            if (value > 0xFFFFFFFFull) return 0; // out of 32-bit range — malformed
+        }
+        return any ? static_cast<uint32_t>(value) : 0;
+    }
+
     std::string EmailConnector::CheckForNewMail(CloudConnection const& connection,
                                                 CloudCredentials const& credentials,
                                                 std::string const& folder,
                                                 std::string const& subjectFilter,
                                                 std::string const& lastSeenUid,
                                                 bool& hasNewMail,
+                                                uint32_t& uidValidityOut,
                                                 std::string& errorMessage)
     {
         hasNewMail = false;
+        uidValidityOut = 0;
 
         // Defense-in-depth folder validation.  The executor already validates
         // upstream, but the connector's public API can be invoked from future
@@ -497,6 +522,30 @@ namespace AIAssistant
         }
         auto sslIt = connection.m_Params.find("use_ssl");
         bool useSsl = (sslIt == connection.m_Params.end() || sslIt->second != "false");
+
+        // Query UIDVALIDITY first — issued against the base URL (no folder in
+        // path) with the folder name in the STATUS command itself so libcurl
+        // doesn't perform an extra SELECT we don't need.  Folder has already
+        // been allowlist-validated above (`IsValidImapFolder`) so quoting it
+        // here is safe.  If STATUS fails the caller still gets the SEARCH
+        // result with uidValidityOut=0 — the caller's UIDVALIDITY-mismatch
+        // guard treats 0 as "no UIDVALIDITY captured" (seed-fresh path).
+        {
+            std::string statusUrl = imapBaseUrl + "/";
+            std::string statusCommand = "STATUS \"" + folder + "\" (UIDVALIDITY)";
+            std::string statusResponse;
+            std::string statusErr;
+            if (ImapCommand(statusUrl, credentials.m_Username, credentials.m_Password,
+                            statusCommand, statusResponse, statusErr, useSsl))
+            {
+                uidValidityOut = ParseStatusUidValidity(statusResponse);
+            }
+            else
+            {
+                LOG_APP_WARN("[email_watch] connection='{}' folder='{}' STATUS failed (continuing without "
+                             "UIDVALIDITY): {}", connection.m_Name, folder, statusErr);
+            }
+        }
 
         std::string searchUrl = imapBaseUrl + "/" + folder;
 

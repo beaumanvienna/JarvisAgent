@@ -41,6 +41,18 @@ namespace AIAssistant
 {
     class WorkflowRegistry;
 
+    // Builds the JSON body POSTed to a workflow's completion callback URL.
+    // Shape: {"workflowId","runId","state","ok","completedAt","tasks":{<taskId>:{...,"outputs":{...}?}}}.
+    // When includeOutputs is true, each succeeded task with file-backed outputs
+    // gets up to 64 KiB of file content embedded per output slot; the truncation
+    // is UTF-8-safe (TruncateUtf8Safe), so the resulting JSON never carries a
+    // partial multibyte sequence.  Pure function: reads workflowRun, returns
+    // the payload string, no I/O beyond reading the output files referenced
+    // by m_OutputValues.  Same impl that FireCompletionCallback uses; exposed
+    // here so the Debug-only /api/debug/build-callback-payload endpoint can
+    // return the rendered body without firing an outbound HTTP POST.
+    [[nodiscard]] std::string BuildCallbackPayload(WorkflowRun const& workflowRun, bool includeOutputs);
+
     // Tick-based workflow runtime.
     //
     // This manager must not block the main thread. It is designed to be called

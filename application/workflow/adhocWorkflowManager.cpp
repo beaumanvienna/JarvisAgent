@@ -365,31 +365,48 @@ namespace AIAssistant
     std::optional<AdhocWorkflowManager::RunMeta>
     AdhocWorkflowManager::ReadMeta(std::filesystem::path const& folder) const
     {
-        std::ifstream is(folder / kMetaFileName);
+        // Parse `meta.json` via simdjson DOM — symmetric to `WriteMeta`'s
+        // `JsonHelper::EscapeJsonString` output and structurally aware where
+        // the prior `pluck` lambda did `string::find`-based substring scans
+        // without JSON-unescape (theoretical-only weakness today since the
+        // four field values are upstream-validated by McpKeyManager / policy
+        // whitelist and write/read paths used symmetric escape handling, but
+        // a hand-rolled parser in a security-critical attribution path
+        // violates the simdjson-only discipline).  Same DOM idiom as
+        // `RewriteWorkflowId` above in this file.
+        std::filesystem::path const metaPath = folder / kMetaFileName;
+        std::ifstream is(metaPath);
         if (!is) return std::nullopt;
         std::stringstream ss;
         ss << is.rdbuf();
         std::string const content = ss.str();
 
-        // Simple extract of "field": "value" — the file is written by us in a known shape.
-        auto pluck = [&](char const* field) -> std::string {
-            std::string needle = std::string("\"") + field + "\"";
-            auto k = content.find(needle);
-            if (k == std::string::npos) return {};
-            auto colon = content.find(':', k);
-            if (colon == std::string::npos) return {};
-            auto quoteOpen = content.find('"', colon);
-            if (quoteOpen == std::string::npos) return {};
-            auto quoteClose = content.find('"', quoteOpen + 1);
-            if (quoteClose == std::string::npos) return {};
-            return content.substr(quoteOpen + 1, quoteClose - quoteOpen - 1);
+        using namespace simdjson;
+        dom::parser parser;
+        dom::element root;
+        if (auto err = parser.parse(content).get(root); err != simdjson::SUCCESS)
+        {
+            LOG_APP_ERROR("[adhoc] ReadMeta: simdjson parse failed for '{}': {}",
+                          metaPath.string(), error_message(err));
+            return std::nullopt;
+        }
+        if (!root.is_object())
+        {
+            LOG_APP_ERROR("[adhoc] ReadMeta: root is not an object in '{}'", metaPath.string());
+            return std::nullopt;
+        }
+
+        auto getString = [&](char const* field) -> std::string {
+            std::string_view sv;
+            if (root[field].get_string().get(sv) == simdjson::SUCCESS) return std::string(sv);
+            return {};
         };
 
         RunMeta meta;
-        meta.m_User = pluck("user");
-        meta.m_Role = pluck("role");
-        meta.m_CleanupPolicy = pluck("cleanup_policy");
-        meta.m_OwnerSlug = pluck("owner_slug");
+        meta.m_User = getString("user");
+        meta.m_Role = getString("role");
+        meta.m_CleanupPolicy = getString("cleanup_policy");
+        meta.m_OwnerSlug = getString("owner_slug");
         // Backfill owner_slug for meta files written by earlier builds — read
         // the slug from the folder's parent directory name, which IS the slug
         // used at write time.  Re-running SanitizeUserSlug on m_User would
@@ -789,9 +806,11 @@ namespace AIAssistant
         std::scoped_lock<std::mutex> const lifecycleLock(m_ReaperLifecycleMutex);
         if (!m_ReaperRunning.exchange(false)) return;
         // Wake the reaper out of its CV wait so it observes the new flag and
-        // returns immediately instead of sleeping out the next interval.
+        // returns immediately instead of sleeping out the 60 s interval.  Notify
+        // under the dedicated CV mutex (not m_Mutex) so the wake can't block
+        // behind a mid-flight Reap() holding the manager-wide lock.
         {
-            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            std::scoped_lock<std::mutex> const lock(m_ReaperCvMutex);
             m_ReaperCv.notify_all();
         }
         if (m_ReaperThread.joinable()) m_ReaperThread.join();
@@ -799,18 +818,11 @@ namespace AIAssistant
 
     void AdhocWorkflowManager::ReaperLoop()
     {
+        // Reap-first ordering: sweep once immediately on start so a restart with
+        // already-past-delete-at folders in flight cleans them up at once instead
+        // of lingering an extra 60 s before the first sweep.
         while (m_ReaperRunning.load())
         {
-            // CV-based sleep: wait up to 60 s, but Stop() can wake us
-            // immediately by notifying after flipping m_ReaperRunning.  The
-            // lambda predicate also returns true on stop so spurious wakeups
-            // don't cause busy-loops.
-            {
-                std::unique_lock<std::mutex> lock(m_Mutex);
-                m_ReaperCv.wait_for(lock, std::chrono::seconds(60),
-                                    [this]() { return !m_ReaperRunning.load(); });
-            }
-            if (!m_ReaperRunning.load()) break;
             try
             {
                 Reap();
@@ -819,6 +831,15 @@ namespace AIAssistant
             {
                 LOG_APP_ERROR("[adhoc] Reaper exception: {}", e.what());
             }
+
+            // CV-based sleep: wait up to 60 s, but Stop() can wake us immediately
+            // by notifying after flipping m_ReaperRunning.  The predicate also
+            // returns true on stop so spurious wakeups don't cause busy-loops, and
+            // a stop flipped between the Reap above and this wait is seen at once
+            // (no lost wakeup — the flag is checked under the CV mutex).
+            std::unique_lock<std::mutex> lock(m_ReaperCvMutex);
+            m_ReaperCv.wait_for(lock, std::chrono::seconds(60),
+                                [this]() { return !m_ReaperRunning.load(); });
         }
     }
 

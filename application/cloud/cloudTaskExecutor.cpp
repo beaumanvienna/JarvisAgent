@@ -181,14 +181,18 @@ namespace AIAssistant
         bool success = ExecuteCloud(workflowDefinition, workflowRun, expandedTaskDef, taskState, *connection,
                                     credentials, cancellationToken);
 
-        // Record result in circuit breaker
+        // Record result in circuit breaker.  On failure, pass through the
+        // subclass-populated typed code (TaskState::m_LastFailureCode) so the
+        // breaker can apply its connection-vs-app-level policy.  Subclasses
+        // that haven't been migrated leave it nullopt → legacy "any failure
+        // counts" posture preserved (breaker treats nullopt as connection-class).
         if (success)
         {
             circuitBreaker.RecordSuccess(connectionName);
         }
         else
         {
-            circuitBreaker.RecordFailure(connectionName);
+            circuitBreaker.RecordFailure(connectionName, taskState.m_LastFailureCode);
         }
 
         return success;

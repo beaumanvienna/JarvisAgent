@@ -29,6 +29,7 @@
 #include "simdjson/simdjson.h"
 
 #include "engine.h"
+#include "cloud/connectorError.h"
 #include "cloud/jiraCloudTaskExecutor.h"
 #include "cloud/jiraConnector.h"
 #include "cloud/connectorHttp.h"
@@ -221,6 +222,7 @@ namespace AIAssistant
         {
             taskState.m_LastErrorMessage = "Failed to parse jira_issue task params JSON";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
 
@@ -239,6 +241,7 @@ namespace AIAssistant
         {
             taskState.m_LastErrorMessage = "Missing required 'operation' in jira_issue task params";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
 
@@ -261,6 +264,7 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "jira_issue 'create' requires 'project_key'";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 return false;
             }
             if (!IsValidJiraProjectKey(projectKey))
@@ -268,6 +272,7 @@ namespace AIAssistant
                 taskState.m_LastErrorMessage = "jira_issue 'create': invalid 'project_key' (must match "
                                                "[A-Z][A-Z0-9_]+, 2-32 chars)";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 LOG_APP_ERROR("[jira] invalid project_key task='{}' workflow='{}' run='{}': '{}'", taskDefinition.m_Id,
                               workflowDefinition.m_Id, workflowRun.m_RunId, projectKey);
                 return false;
@@ -278,6 +283,7 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "jira_issue 'create' requires 'summary'";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 return false;
             }
 
@@ -304,6 +310,7 @@ namespace AIAssistant
                         "jira_issue 'create': description_file does not lie under the project root: " +
                         descriptionFile;
                     taskState.m_State = TaskInstanceStateKind::Failed;
+                    taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                     LOG_APP_ERROR("[jira] description_file rejected task='{}' workflow='{}' run='{}': '{}'",
                                   taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId, descriptionFile);
                     return false;
@@ -314,6 +321,7 @@ namespace AIAssistant
                     taskState.m_LastErrorMessage =
                         "jira_issue 'create': description_file not readable: " + descriptionFile;
                     taskState.m_State = TaskInstanceStateKind::Failed;
+                    taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                     LOG_APP_ERROR("[jira] description_file not readable task='{}' workflow='{}' run='{}': '{}'",
                                   taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId, descriptionFile);
                     return false;
@@ -382,6 +390,7 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "Jira create issue request failed";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::NetworkError;
                 return false;
             }
 
@@ -393,6 +402,9 @@ namespace AIAssistant
                     taskState.m_LastErrorMessage += ": " + responseBody;
                 }
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = (httpCode == 401 || httpCode == 403)
+                                                  ? ConnectorErrorCode::AuthFailure
+                                                  : ConnectorErrorCode::HttpError;
                 return false;
             }
 
@@ -405,6 +417,7 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "jira_issue 'update' requires 'issue_key'";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 return false;
             }
             if (!IsValidJiraIssueKey(issueKey))
@@ -412,6 +425,7 @@ namespace AIAssistant
                 taskState.m_LastErrorMessage = "jira_issue 'update': invalid 'issue_key' (must match "
                                                "[A-Z][A-Z0-9_]+-\\d+, e.g. 'PROJ-123')";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 LOG_APP_ERROR("[jira] invalid issue_key task='{}' workflow='{}' run='{}': '{}'", taskDefinition.m_Id,
                               workflowDefinition.m_Id, workflowRun.m_RunId, issueKey);
                 return false;
@@ -423,6 +437,7 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "jira_issue 'update' requires 'fields' (JSON object)";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 return false;
             }
 
@@ -438,6 +453,7 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "Jira update issue request failed";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::NetworkError;
                 return false;
             }
 
@@ -449,6 +465,9 @@ namespace AIAssistant
                     taskState.m_LastErrorMessage += ": " + responseBody;
                 }
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = (httpCode == 401 || httpCode == 403)
+                                                  ? ConnectorErrorCode::AuthFailure
+                                                  : ConnectorErrorCode::HttpError;
                 return false;
             }
 
@@ -468,6 +487,7 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "jira_issue 'transition' requires 'issue_key' and 'transition_id'";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 return false;
             }
             if (!IsValidJiraIssueKey(issueKey))
@@ -475,6 +495,7 @@ namespace AIAssistant
                 taskState.m_LastErrorMessage = "jira_issue 'transition': invalid 'issue_key' (must match "
                                                "[A-Z][A-Z0-9_]+-\\d+)";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 LOG_APP_ERROR("[jira] invalid issue_key task='{}' workflow='{}' run='{}': '{}'", taskDefinition.m_Id,
                               workflowDefinition.m_Id, workflowRun.m_RunId, issueKey);
                 return false;
@@ -484,6 +505,7 @@ namespace AIAssistant
                 taskState.m_LastErrorMessage = "jira_issue 'transition': invalid 'transition_id' (must be a positive "
                                                "integer)";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 LOG_APP_ERROR("[jira] invalid transition_id task='{}' workflow='{}' run='{}': '{}'", taskDefinition.m_Id,
                               workflowDefinition.m_Id, workflowRun.m_RunId, transitionId);
                 return false;
@@ -497,6 +519,7 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "Jira transition request failed";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::NetworkError;
                 return false;
             }
 
@@ -504,6 +527,9 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "Jira transition failed: HTTP " + std::to_string(httpCode);
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = (httpCode == 401 || httpCode == 403)
+                                                  ? ConnectorErrorCode::AuthFailure
+                                                  : ConnectorErrorCode::HttpError;
                 return false;
             }
 
@@ -523,6 +549,7 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "jira_issue 'comment' requires 'issue_key' and 'body'";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 return false;
             }
             if (!IsValidJiraIssueKey(issueKey))
@@ -530,6 +557,7 @@ namespace AIAssistant
                 taskState.m_LastErrorMessage = "jira_issue 'comment': invalid 'issue_key' (must match "
                                                "[A-Z][A-Z0-9_]+-\\d+)";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 LOG_APP_ERROR("[jira] invalid issue_key task='{}' workflow='{}' run='{}': '{}'", taskDefinition.m_Id,
                               workflowDefinition.m_Id, workflowRun.m_RunId, issueKey);
                 return false;
@@ -544,6 +572,7 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "Jira comment request failed";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::NetworkError;
                 return false;
             }
 
@@ -551,6 +580,9 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "Jira comment failed: HTTP " + std::to_string(httpCode);
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = (httpCode == 401 || httpCode == 403)
+                                                  ? ConnectorErrorCode::AuthFailure
+                                                  : ConnectorErrorCode::HttpError;
                 return false;
             }
 
@@ -563,6 +595,7 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "jira_issue 'get' requires 'issue_key'";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 return false;
             }
             if (!IsValidJiraIssueKey(issueKey))
@@ -570,6 +603,7 @@ namespace AIAssistant
                 taskState.m_LastErrorMessage = "jira_issue 'get': invalid 'issue_key' (must match "
                                                "[A-Z][A-Z0-9_]+-\\d+)";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 LOG_APP_ERROR("[jira] invalid issue_key task='{}' workflow='{}' run='{}': '{}'", taskDefinition.m_Id,
                               workflowDefinition.m_Id, workflowRun.m_RunId, issueKey);
                 return false;
@@ -582,6 +616,7 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "Jira get issue request failed";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::NetworkError;
                 return false;
             }
 
@@ -589,6 +624,9 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "Jira get issue failed: HTTP " + std::to_string(httpCode);
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = (httpCode == 401 || httpCode == 403)
+                                                  ? ConnectorErrorCode::AuthFailure
+                                                  : ConnectorErrorCode::HttpError;
                 return false;
             }
 
@@ -599,6 +637,7 @@ namespace AIAssistant
             taskState.m_LastErrorMessage =
                 "Unknown jira_issue operation '" + operation + "'. Valid: create, update, transition, comment, get";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
 

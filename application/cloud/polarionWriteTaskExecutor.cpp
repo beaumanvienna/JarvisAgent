@@ -60,6 +60,7 @@ namespace AIAssistant
         {
             taskState.m_LastErrorMessage = "Failed to parse polarion_write params JSON";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
 
@@ -70,6 +71,7 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "Missing required 'operation' in polarion_write params";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 return false;
             }
             operation = std::string(sv);
@@ -81,6 +83,7 @@ namespace AIAssistant
         {
             taskState.m_LastErrorMessage = "Connection '" + connection.m_Name + "' missing project_id param";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
         std::string const& projectId = projectIt->second;
@@ -111,6 +114,7 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "polarion_write 'update' requires 'work_item_id'";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 return false;
             }
 
@@ -125,6 +129,7 @@ namespace AIAssistant
                         taskState.m_LastErrorMessage =
                             "polarion_write 'update': cannot open field_value_file '" + fieldValueFile + "'";
                         taskState.m_State = TaskInstanceStateKind::Failed;
+                        taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                         return false;
                     }
                     fieldValue.assign(std::istreambuf_iterator<char>(ifs), std::istreambuf_iterator<char>());
@@ -135,6 +140,7 @@ namespace AIAssistant
                     taskState.m_LastErrorMessage =
                         "polarion_write 'update' with field_name requires field_value or field_value_file";
                     taskState.m_State = TaskInstanceStateKind::Failed;
+                    taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                     return false;
                 }
 
@@ -146,6 +152,7 @@ namespace AIAssistant
                 taskState.m_LastErrorMessage =
                     "polarion_write 'update' requires 'body' or 'field_name' + 'field_value'/'field_value_file'";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 return false;
             }
 
@@ -167,6 +174,7 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "polarion_write 'create' requires 'body' (JSON:API post body)";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 return false;
             }
 
@@ -189,12 +197,14 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "polarion_write 'upload_attachment' requires 'work_item_id'";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 return false;
             }
             if (filePath.empty())
             {
                 taskState.m_LastErrorMessage = "polarion_write 'upload_attachment' requires 'file_path'";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 return false;
             }
 
@@ -224,6 +234,7 @@ namespace AIAssistant
                 taskState.m_LastErrorMessage =
                     "polarion_write 'download_attachment' requires 'work_item_id', 'attachment_id', 'file_path'";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 return false;
             }
 
@@ -246,6 +257,7 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "polarion_write 'linked_items' requires 'work_item_id'";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 return false;
             }
 
@@ -265,6 +277,7 @@ namespace AIAssistant
                 "Unknown polarion_write operation '" + operation +
                 "'. Valid: update, create, upload_attachment, download_attachment, linked_items";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
 

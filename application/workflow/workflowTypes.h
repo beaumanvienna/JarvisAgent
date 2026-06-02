@@ -27,11 +27,13 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 #include "engine.h"
+#include "cloud/connectorError.h"
 #include "cloud/taskCancellationToken.h"
 
 namespace AIAssistant
@@ -697,6 +699,18 @@ namespace AIAssistant
 
         // Last error message, if any.
         std::string m_LastErrorMessage;
+
+        // Typed failure category for the most recent failure of this task, set
+        // by cloud-task subclasses on failure so the circuit breaker can apply
+        // its connection-vs-app-level policy (see IsConnectionFailure).  Stays
+        // nullopt for subclasses that haven't been migrated to emit a code, OR
+        // for failures the subclass can't classify — the base-class wiring at
+        // ICloudTaskExecutor::Execute passes nullopt through to RecordFailure,
+        // which preserves the legacy "every failure counts" posture for those
+        // call sites.  Only the db_query cap-rejection branches (max_rows,
+        // max_output_bytes, statement_timeout) currently populate it; extend
+        // as other connectors gain similar app-level rejection semantics.
+        std::optional<ConnectorErrorCode> m_LastFailureCode;
 
         // Captured shell task output (first 1024 characters of stdout/stderr).
         // Written to stdout.txt / stderr.txt in the task working directory (full size).

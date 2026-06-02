@@ -633,6 +633,27 @@ class Runner:
         self.expect(body.get("error") == "missing_scripts",
                     f"error == 'missing_scripts' (got {body.get('error')!r})")
 
+    def test_heartbeat_rejects_bogus_mcp_token(self):
+        header("/api/mcp/heartbeat rejects a bogus mcp_ token (auth->m_Error check)")
+        # Regression for the pre-existing bug where HandleMcpHeartbeatPost checked
+        # only !auth.has_value() and not auth->m_Error: TryMcpAuth returns a
+        # populated AuthResult{m_Error="invalid_token"} for a syntactically-mcp
+        # bogus token, so the handler treated it as success (200 + pinned
+        # m_McpLastHeartbeat / IsMcpConnected()). Must now be a 403.
+        bogus = "mcp_" + "0" * 48
+        r = self.post("/api/mcp/heartbeat", key=bogus)
+        # 403 forbidden (invalid token); 503 only if the keystore is still locked
+        # — tests run against an unlocked server, so 503 here is itself a failure.
+        self.expect(r.status_code == 403,
+                    f"bogus mcp_ heartbeat → 403 (got {r.status_code})")
+        body = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+        self.expect(body.get("ok") is False and body.get("error") == "forbidden",
+                    "bogus heartbeat body is {ok:false, error:forbidden}")
+        # Positive control: a freshly issued, valid mcp key heartbeats with 200.
+        good = self.issue_key(f"hb_{uuid.uuid4().hex[:8]}", role="operator")["api_key"]
+        r = self.post("/api/mcp/heartbeat", key=good)
+        self.expect(r.status_code == 200, f"valid mcp heartbeat → 200 (got {r.status_code})")
+
     def test_status_exposes_adhoc_stats(self):
         header("/api/status exposes adhoc_runs_active + adhoc_disk_usage_bytes")
         r = self.get("/api/status")
@@ -654,6 +675,7 @@ class Runner:
         self.test_revoke()
         self.test_session_login_logout()
         self.test_status_exposes_adhoc_stats()
+        self.test_heartbeat_rejects_bogus_mcp_token()
         self.test_adhoc_missing_flag()
         self.test_adhoc_bad_policy()
         self.test_adhoc_policy_ceiling()

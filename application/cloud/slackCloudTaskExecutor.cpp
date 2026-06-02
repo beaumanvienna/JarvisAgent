@@ -86,6 +86,7 @@ namespace AIAssistant
         {
             taskState.m_LastErrorMessage = std::string(contextLabel) + ": curl_easy_init() failed";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::NetworkError;
             return false;
         }
 
@@ -119,6 +120,7 @@ namespace AIAssistant
         {
             taskState.m_LastErrorMessage = std::string(contextLabel) + " failed: " + curl_easy_strerror(res);
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::NetworkError;
             return false;
         }
 
@@ -127,6 +129,9 @@ namespace AIAssistant
             taskState.m_LastErrorMessage =
                 std::string(contextLabel) + " failed: HTTP " + std::to_string(httpCode);
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = (httpCode == 401 || httpCode == 403)
+                                              ? ConnectorErrorCode::AuthFailure
+                                              : ConnectorErrorCode::HttpError;
             return false;
         }
 
@@ -200,6 +205,7 @@ namespace AIAssistant
         {
             taskState.m_LastErrorMessage = "Failed to parse slack_message task params JSON";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
 
@@ -218,6 +224,7 @@ namespace AIAssistant
         {
             taskState.m_LastErrorMessage = "Missing required 'channel' in slack_message task params";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
 
@@ -234,6 +241,7 @@ namespace AIAssistant
                 taskState.m_LastErrorMessage =
                     "slack_message: text_file does not lie under the project root: " + textFile;
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 LOG_APP_ERROR("[slack] text_file rejected task='{}' workflow='{}': '{}'", taskDefinition.m_Id,
                               workflowDefinition.m_Id, textFile);
                 return false;
@@ -243,6 +251,7 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "slack_message: cannot open or empty text_file '" + textFile + "'";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 LOG_APP_ERROR("[slack] text_file not readable task='{}' workflow='{}': '{}'", taskDefinition.m_Id,
                               workflowDefinition.m_Id, textFile);
                 return false;
@@ -253,6 +262,7 @@ namespace AIAssistant
         {
             taskState.m_LastErrorMessage = "Missing required 'text' or 'text_file' in slack_message task params";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
 
@@ -266,6 +276,7 @@ namespace AIAssistant
                 taskState.m_LastErrorMessage =
                     "slack_message: thread_ts_file does not lie under the project root: " + threadTsFile;
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 LOG_APP_ERROR("[slack] thread_ts_file rejected task='{}' workflow='{}': '{}'", taskDefinition.m_Id,
                               workflowDefinition.m_Id, threadTsFile);
                 return false;
@@ -328,6 +339,7 @@ namespace AIAssistant
         {
             taskState.m_LastErrorMessage = "Failed to parse slack_read task params JSON";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
 
@@ -362,6 +374,7 @@ namespace AIAssistant
         {
             taskState.m_LastErrorMessage = "Missing required 'channel' in slack_read task params";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
         if (channel[0] == '#')
@@ -369,6 +382,7 @@ namespace AIAssistant
             taskState.m_LastErrorMessage =
                 "slack_read 'channel' must be a channel ID (e.g. C01ABCDEF), not a name like '" + channel + "'";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
 

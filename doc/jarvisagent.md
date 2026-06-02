@@ -321,15 +321,7 @@ Shipped defaults (`per_1k_output=5.0`, `safety_margin=4.0`, `min=60s`, `max=1800
 
 ## ENVIRONMENT
 
-- **`OPENAI_API_KEY`** — Bootstrapping fallback. If no encrypted keys file is found and this variable is set, JarvisAgent creates a single `openai` provider entry using the key value. This is a convenience for simple single-provider setups; encrypt keys as soon as practical.
-
-The master password for `keys.json.enc` and `mcp_keys.json.enc` is supplied **only** at runtime via the dashboard login flow or `POST /api/settings/keys/unlock`. There is no environment-variable shortcut — the password is held exclusively in `mlock()`-protected memory (`SecureString`) and never lands in process listings, `docker inspect`, or crash dumps.
-
-**API key priority order:**
-
-1. Encrypted keys file (`keys.json.enc`) — unlocked at runtime via dashboard login or `POST /api/settings/keys/unlock`.
-2. Plaintext keys file (`keys.json`) — development fallback only.
-3. `OPENAI_API_KEY` environment variable.
+JarvisAgent reads **no credentials from the environment**. Provider keys come exclusively from the encrypted `keys.json.enc`, and the master password is supplied **only** at runtime via the dashboard login flow or `POST /api/settings/keys/unlock` — there is no env-var shortcut for either. An env-var key would sit in plaintext in the process environment (readable via `/proc/PID/environ`, `docker inspect`, or a crash dump), which is exactly the unsecured exposure the encrypted keystore exists to prevent. The master password is held exclusively in `mlock()`-protected memory (`SecureString`) and never lands in process listings or core dumps.
 
 ## FIRST STEPS AFTER RESTART
 
@@ -618,8 +610,7 @@ For the complete security model, threat analysis, and operator responsibilities,
 ## FILES
 
 - **`config.json`** — Main configuration file (must exist in the working directory).
-- **`keys.json.enc`** — Encrypted AI provider credentials (AES-256-GCM, master-password protected).
-- **`keys.json`** — Plaintext API keys (development fallback, gitignored).
+- **`keys.json.enc`** — Encrypted AI provider credentials (AES-256-GCM, master-password protected). The only on-disk credential store; there is no plaintext-keystore path.
 - **`mcp_keys.json.enc`** — Encrypted MCP API key store (same master password as `keys.json.enc`; only SHA-256 hashes of keys are persisted).
 - **`workflows/`** — Directory containing `.jcwf` workflow definition files.
 - **`_adhoc/`** — Per-run folders for adhoc workflow submissions (auto-cleaned per the configured retention policy).

@@ -25,6 +25,7 @@
 
 #include <cstddef>
 #include <initializer_list>
+#include <span>
 #include <string>
 #include <string_view>
 
@@ -78,6 +79,13 @@ namespace AIAssistant
         // return.  Empty pieces (size 0) are handled correctly (no-op for that
         // piece).
         void Build(std::initializer_list<std::string_view> pieces);
+
+        // Runtime-sized variant of Build: same semantics (mlock'd buffer, strong
+        // exception guarantee, trailing NUL) but consumes a span so the piece set
+        // can be assembled dynamically.  Required where the secret-bearing string
+        // has a piece count that depends on runtime state (e.g. SigV4 canonical
+        // headers with an extra-headers map of unbounded size).
+        void Build(std::span<std::string_view const> pieces);
 
         // View into the locked buffer. Valid until the next Set()/Format()/Clear()/destruction.
         // Returns an empty view when the string is empty.

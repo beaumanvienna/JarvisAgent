@@ -30,6 +30,7 @@
 
 #include "auxiliary/file.h"
 #include "engine.h"
+#include "cloud/connectorError.h"
 #include "cloud/gitHubCloudTaskExecutor.h"
 #include "cloud/gitHubConnector.h"
 #include "cloud/connectorHttp.h"
@@ -241,6 +242,7 @@ namespace AIAssistant
         {
             taskState.m_LastErrorMessage = "Failed to parse github_issue task params JSON";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
 
@@ -259,6 +261,7 @@ namespace AIAssistant
         {
             taskState.m_LastErrorMessage = "Missing required 'operation' in github_issue task params";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
 
@@ -283,6 +286,7 @@ namespace AIAssistant
             taskState.m_LastErrorMessage = "github_issue: invalid 'owner' (must match [A-Za-z0-9._-], 1-100 chars, not "
                                            "starting with '-' or '.')";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             LOG_APP_ERROR("[github] invalid owner task='{}' workflow='{}' run='{}': '{}'", taskDefinition.m_Id,
                           workflowDefinition.m_Id, workflowRun.m_RunId, owner);
             return false;
@@ -292,6 +296,7 @@ namespace AIAssistant
             taskState.m_LastErrorMessage = "github_issue: invalid 'repo' (must match [A-Za-z0-9._-], 1-100 chars, not "
                                            "starting with '-' or '.')";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             LOG_APP_ERROR("[github] invalid repo task='{}' workflow='{}' run='{}': '{}'", taskDefinition.m_Id,
                           workflowDefinition.m_Id, workflowRun.m_RunId, repo);
             return false;
@@ -315,6 +320,7 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "github_issue 'create' requires 'owner' and 'repo'";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 return false;
             }
 
@@ -324,6 +330,7 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "github_issue 'create' requires 'title'";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 return false;
             }
 
@@ -359,6 +366,7 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "GitHub create issue request failed";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::NetworkError;
                 return false;
             }
 
@@ -370,6 +378,9 @@ namespace AIAssistant
                     taskState.m_LastErrorMessage += ": " + responseBody;
                 }
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = (httpCode == 401 || httpCode == 403)
+                                                  ? ConnectorErrorCode::AuthFailure
+                                                  : ConnectorErrorCode::HttpError;
                 return false;
             }
 
@@ -383,12 +394,14 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "github_issue 'comment' requires 'issue_number' and 'body'";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 return false;
             }
             if (!IsValidIssueNumber(issueNumber))
             {
                 taskState.m_LastErrorMessage = "github_issue 'comment': 'issue_number' must be a positive integer";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 LOG_APP_ERROR("[github] invalid issue_number task='{}' workflow='{}' run='{}': '{}'", taskDefinition.m_Id,
                               workflowDefinition.m_Id, workflowRun.m_RunId, issueNumber);
                 return false;
@@ -401,6 +414,7 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "GitHub comment request failed";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::NetworkError;
                 return false;
             }
 
@@ -408,6 +422,9 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "GitHub comment failed: HTTP " + std::to_string(httpCode);
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = (httpCode == 401 || httpCode == 403)
+                                                  ? ConnectorErrorCode::AuthFailure
+                                                  : ConnectorErrorCode::HttpError;
                 return false;
             }
 
@@ -420,12 +437,14 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "github_issue 'close' requires 'issue_number'";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 return false;
             }
             if (!IsValidIssueNumber(issueNumber))
             {
                 taskState.m_LastErrorMessage = "github_issue 'close': 'issue_number' must be a positive integer";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 LOG_APP_ERROR("[github] invalid issue_number task='{}' workflow='{}' run='{}': '{}'", taskDefinition.m_Id,
                               workflowDefinition.m_Id, workflowRun.m_RunId, issueNumber);
                 return false;
@@ -438,6 +457,7 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "GitHub close issue request failed";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::NetworkError;
                 return false;
             }
 
@@ -445,6 +465,9 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "GitHub close failed: HTTP " + std::to_string(httpCode);
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = (httpCode == 401 || httpCode == 403)
+                                                  ? ConnectorErrorCode::AuthFailure
+                                                  : ConnectorErrorCode::HttpError;
                 return false;
             }
 
@@ -457,6 +480,7 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "github_issue 'get_file' requires 'path'";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 return false;
             }
 
@@ -472,6 +496,7 @@ namespace AIAssistant
                 taskState.m_LastErrorMessage =
                     "github_issue 'get_file': invalid 'path' (" + pathEncodeError + ")";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 LOG_APP_ERROR("[github] invalid get_file path task='{}' workflow='{}' run='{}': '{}' ({})",
                               taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId, path,
                               pathEncodeError);
@@ -487,6 +512,7 @@ namespace AIAssistant
                     taskState.m_LastErrorMessage = "github_issue 'get_file': invalid 'ref' (must match git-check-ref-"
                                                    "format-ish: [A-Za-z0-9._/-], no '..' segment, 1-255 chars)";
                     taskState.m_State = TaskInstanceStateKind::Failed;
+                    taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                     LOG_APP_ERROR("[github] invalid get_file ref task='{}' workflow='{}' run='{}': '{}'",
                                   taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId, ref);
                     return false;
@@ -499,6 +525,7 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "GitHub get_file request failed";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::NetworkError;
                 return false;
             }
 
@@ -506,6 +533,9 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "GitHub get_file failed: HTTP " + std::to_string(httpCode);
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = (httpCode == 401 || httpCode == 403)
+                                                  ? ConnectorErrorCode::AuthFailure
+                                                  : ConnectorErrorCode::HttpError;
                 return false;
             }
 
@@ -544,6 +574,7 @@ namespace AIAssistant
                         taskState.m_LastErrorMessage =
                             "github_issue 'get_file': cannot derive a filename from 'path'";
                         taskState.m_State = TaskInstanceStateKind::Failed;
+                        taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                         LOG_APP_ERROR("[github] cannot derive filename task='{}' workflow='{}' run='{}': '{}'",
                                       taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId, path);
                         return false;
@@ -555,6 +586,7 @@ namespace AIAssistant
                         taskState.m_LastErrorMessage =
                             "github_issue 'get_file': resolved write path does not lie under the project root";
                         taskState.m_State = TaskInstanceStateKind::Failed;
+                        taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                         LOG_APP_ERROR("[github] write path rejected task='{}' workflow='{}' run='{}' path='{}'",
                                       taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId,
                                       writePathRaw.string());
@@ -584,6 +616,7 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "GitHub list_issues request failed";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::NetworkError;
                 return false;
             }
 
@@ -591,6 +624,9 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "GitHub list_issues failed: HTTP " + std::to_string(httpCode);
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = (httpCode == 401 || httpCode == 403)
+                                                  ? ConnectorErrorCode::AuthFailure
+                                                  : ConnectorErrorCode::HttpError;
                 return false;
             }
 
@@ -601,6 +637,7 @@ namespace AIAssistant
             taskState.m_LastErrorMessage =
                 "Unknown github_issue operation '" + operation + "'. Valid: create, comment, close, get_file, list_issues";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
 

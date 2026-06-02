@@ -99,11 +99,27 @@ namespace AIAssistant
         std::lock_guard lock(m_Mutex);
         auto& circuit = m_Circuits[connectionName];
 
-        ++circuit.m_ConsecutiveFailures;
+        // Always store the typed code for display (m_LastFailureCode is surfaced
+        // via /api/status::connection_health[].last_failure_code regardless of
+        // whether the failure is connection-class or app-level).
         if (errorCode.has_value())
         {
             circuit.m_LastFailureCode = errorCode;
         }
+
+        // Failure-class policy: app-level rejections (e.g. db_query row/byte/
+        // statement_timeout cap exceeded) don't decrement the breaker's health
+        // budget — the connection itself is healthy.  Legacy untyped callers
+        // (errorCode == nullopt) are treated as connection-class so the
+        // existing "every failure counts" posture is preserved until each call
+        // site is migrated to emit a typed code.  See connectorError.h::
+        // IsConnectionFailure for the per-code classification.
+        if (errorCode.has_value() && !IsConnectionFailure(*errorCode))
+        {
+            return;
+        }
+
+        ++circuit.m_ConsecutiveFailures;
 
         switch (circuit.m_State)
         {

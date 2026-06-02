@@ -334,11 +334,12 @@ namespace AIAssistant
             std::string m_WorkflowId;
             std::string m_TriggerId;
             std::string m_ConnectionName;
-            std::string m_Folder;         // IMAP folder (default: "INBOX")
-            std::string m_SubjectFilter;  // Subject pattern filter (empty = all)
+            std::string m_Folder;            // IMAP folder (default: "INBOX")
+            std::string m_SubjectFilter;     // Subject pattern filter (empty = all)
             std::chrono::seconds m_PollInterval{300};
             std::chrono::steady_clock::time_point m_NextPollTime{};
-            std::string m_LastSeenUid;    // Last processed message UID
+            std::string m_LastSeenUid;       // Last processed message UID
+            uint32_t    m_LastSeenUidValidity{0};  // UIDVALIDITY when m_LastSeenUid was captured
             bool m_IsEnabled{true};
         };
 
@@ -420,11 +421,19 @@ namespace AIAssistant
         // a message that arrived during the restart window still fires the
         // trigger on the next poll instead of being silently absorbed into
         // the seed baseline.  Key: `<workflowId>|<triggerId>`.
+        // All four `m_ConnectionName` / `m_Folder` / `m_UidValidity` / `m_LastSeenUid`
+        // fields are LOAD-BEARING at restore time — the UID watermark is only
+        // applied when the triple (connection, folder, UIDVALIDITY) matches the
+        // trigger's current targeting AND the current IMAP-SELECT response.
+        // UIDs are only meaningful within `(server, mailbox-UIDVALIDITY)` — a
+        // change in any of the three invalidates the saved UID.  Mismatches
+        // discard the saved entry (WARN log) and seed fresh from the next poll.
         struct PersistedEmailWatermark
         {
-            std::string m_ConnectionName;  // informational; helps debug stale entries
-            std::string m_Folder;          // informational
-            std::string m_LastSeenUid;     // the load-bearing field
+            std::string m_ConnectionName;
+            std::string m_Folder;
+            uint32_t    m_UidValidity{0};  // IMAP UIDVALIDITY per RFC 3501 §2.3.1.1
+            std::string m_LastSeenUid;
             std::string m_UpdatedAtIso;    // informational
         };
         std::unordered_map<std::string, PersistedEmailWatermark> m_PersistedEmailWatermarks;

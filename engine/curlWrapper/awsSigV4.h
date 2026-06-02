@@ -24,6 +24,7 @@
 #include "curlWrapper/authSigner.h"
 #include "keys/secureString.h"
 
+#include <map>
 #include <string>
 
 namespace AIAssistant
@@ -47,17 +48,31 @@ namespace AIAssistant
         // (typically Apply, which pulls from AwsCredential::m_SecretAccessKey /
         // m_SessionToken) and the HMAC chain.  m_AccessKey stays std::string —
         // public per AWS conventions, logged for audit.
+        //
+        // m_ContentSha256Override: when non-empty, used verbatim as the request
+        // payload hash; when empty, Sha256Hex(m_Body) is computed.  S3 callers
+        // that already have the payload hash (uploads where the body was hashed
+        // up front, list/delete requests where the empty-string hash is the
+        // canonical answer) pass it explicitly; Bedrock leaves it empty and the
+        // signer derives it from m_Body.
+        //
+        // m_ExtraHeadersToSign: optional non-secret headers that must be folded
+        // into the canonical-headers + SignedHeaders=... list (e.g. Content-Type
+        // on S3 PUT).  Names are lowercased before sorting; values are trimmed
+        // per the AWS SigV4 canonical-request spec.  Empty for Bedrock dispatch.
         struct Inputs
         {
-            std::string  m_Method;        // "POST"
+            std::string  m_Method;        // "POST" / "GET" / "PUT" / "DELETE" / "HEAD"
             std::string  m_Url;           // full URL
             std::string  m_Body;          // request body bytes (may be empty)
             std::string  m_AccessKey;     // AKIA... (public per AWS conventions)
             SecureString m_SecretKey;     // 40-char secret access key
             SecureString m_SessionToken;  // optional STS session token (secret)
             std::string  m_Region;        // e.g. "us-east-1"
-            std::string  m_Service;       // e.g. "bedrock"
+            std::string  m_Service;       // e.g. "bedrock" / "s3"
             std::string  m_AmzDate;       // ISO8601 basic: YYYYMMDDTHHMMSSZ. Empty = use current UTC.
+            std::string  m_ContentSha256Override; // empty = compute from m_Body
+            std::map<std::string, std::string> m_ExtraHeadersToSign;
         };
 
         // SignedHeaders carries the wire-format header values.  m_SecurityToken

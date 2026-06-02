@@ -22,7 +22,7 @@
 */
 
 #include "cloud/s3Connector.h"
-#include "cloud/sigV4Signer.h"
+#include "curlWrapper/awsSigV4.h"
 
 #include <curl/curl.h>
 
@@ -166,8 +166,23 @@ namespace AIAssistant
         std::string endpointUrl = BuildEndpointUrl(connection, bucketIt->second);
         std::string url = endpointUrl + "/?list-type=2&max-keys=1";
 
-        auto signed_ = SigV4Signer::Sign("GET", url, regionIt->second, "s3", credentials.m_AccessKeyId,
-                                          credentials.m_SecretKey, SigV4Signer::EmptyPayloadHash());
+        SigV4Signer::Inputs sigInputs;
+        sigInputs.m_Method = "GET";
+        sigInputs.m_Url = url;
+        sigInputs.m_AccessKey = credentials.m_AccessKeyId;
+        sigInputs.m_SecretKey.Set(credentials.m_SecretKey.Get());
+        sigInputs.m_Region = regionIt->second;
+        sigInputs.m_Service = "s3";
+        // m_Body empty → signer computes Sha256Hex("") for the payload hash (the
+        // canonical empty-string SHA-256, matching what the old EmptyPayloadHash
+        // constant returned).
+        SigV4Signer::SignedHeaders signed_ = SigV4Signer::Sign(sigInputs);
+        if (signed_.m_Authorization.empty())
+        {
+            return std::unexpected(
+                ConnectorError::Make(ConnectorErrorCode::CredentialInvalid,
+                                     "SigV4 signing failed (OpenSSL HMAC/SHA256 primitive returned null)"));
+        }
 
         CURL* curl = curl_easy_init();
         if (!curl)
@@ -184,10 +199,10 @@ namespace AIAssistant
         ConnectorHttp::ApplyHardenedDefaults(curl, url);
 
         struct curl_slist* headers = nullptr;
-        for (auto const& [key, value] : signed_.m_Headers)
-        {
-            headers = curl_slist_append(headers, (key + ": " + value).c_str());
-        }
+        headers = curl_slist_append(headers, ("Host: " + signed_.m_Host).c_str());
+        headers = curl_slist_append(headers, ("X-Amz-Date: " + signed_.m_AmzDate).c_str());
+        headers = curl_slist_append(headers, ("X-Amz-Content-Sha256: " + signed_.m_ContentSha256).c_str());
+        headers = curl_slist_append(headers, ("Authorization: " + signed_.m_Authorization).c_str());
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
 
         CURLcode res = curl_easy_perform(curl);

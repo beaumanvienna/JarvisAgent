@@ -264,6 +264,7 @@ namespace AIAssistant
         {
             taskState.m_LastErrorMessage = "Failed to parse email_read task params JSON";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
 
@@ -291,6 +292,7 @@ namespace AIAssistant
             taskState.m_LastErrorMessage = "Invalid IMAP folder name: contains characters outside the allowed "
                                            "set [A-Za-z0-9._/-] or violates structural rules";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidEndpoint;
             LOG_APP_ERROR("[email_read] task='{}' workflow='{}': invalid folder name rejected (length={})",
                           taskDefinition.m_Id, workflowDefinition.m_Id, folder.size());
             ConnectorHttp::IncrementInputValidationRejection();
@@ -335,6 +337,7 @@ namespace AIAssistant
         {
             taskState.m_LastErrorMessage = "IMAP SEARCH failed: " + imapError;
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::NetworkError;
             return false;
         }
 
@@ -470,6 +473,7 @@ namespace AIAssistant
         {
             taskState.m_LastErrorMessage = "Failed to parse email_send task params JSON";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
 
@@ -488,6 +492,7 @@ namespace AIAssistant
         {
             taskState.m_LastErrorMessage = "Missing required 'to' in email_send task params";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
 
@@ -496,6 +501,7 @@ namespace AIAssistant
         {
             taskState.m_LastErrorMessage = "Missing required 'subject' in email_send task params";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
 
@@ -516,6 +522,7 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "email_send: body_file path is invalid or escapes the project tree";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 LOG_APP_ERROR("[email_send] task='{}' workflow='{}' run='{}': body_file path rejected",
                               taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId);
                 return false;
@@ -526,6 +533,7 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "email_send: cannot open body_file '" + fullBodyPath.string() + "'";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 return false;
             }
             body.assign(std::istreambuf_iterator<char>(ifs), std::istreambuf_iterator<char>());
@@ -534,6 +542,7 @@ namespace AIAssistant
         {
             taskState.m_LastErrorMessage = "Missing required 'body' or 'body_file' in email_send task params";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
 
@@ -556,6 +565,7 @@ namespace AIAssistant
             taskState.m_LastErrorMessage = "email_send: header field value contains CR/LF "
                                            "(from/to/cc/subject must not contain newlines)";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             LOG_APP_ERROR("[email_send] task='{}' workflow='{}' run='{}': CRLF rejected in header field",
                           taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId);
             LOG_SECURITY_WARN("[security] email_send_header_injection task='{}' workflow='{}' run='{}'",
@@ -639,6 +649,7 @@ namespace AIAssistant
         {
             taskState.m_LastErrorMessage = "curl_easy_init() failed";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::NetworkError;
             return false;
         }
 
@@ -721,6 +732,7 @@ namespace AIAssistant
         {
             taskState.m_LastErrorMessage = std::string("Email send failed: ") + curl_easy_strerror(res);
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::NetworkError;
             return false;
         }
 

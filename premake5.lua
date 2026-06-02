@@ -142,11 +142,6 @@ project "jarvisAgent"
         files {
             "test/security/heapScan_test.h",
             "test/security/heapScan_test.cpp",
-            -- Cloud-side scenarios live in an isolated TU because application/cloud/
-            -- sigV4Signer.h defines AIAssistant::SigV4Signer which collides with the
-            -- engine signer of the same name in engine/curlWrapper/awsSigV4.h.  No TU
-            -- includes both headers.
-            "test/security/heapScan_cloud_scenarios.cpp",
         }
         print(">>> Heap-scan audit: ENABLED  (binary will run audit then exit)")
     end

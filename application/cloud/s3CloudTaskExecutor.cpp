@@ -34,10 +34,12 @@
 #include "simdjson/simdjson.h"
 
 #include "engine.h"
+#include "auxiliary/sha256.h"
+#include "cloud/connectorError.h"
 #include "cloud/s3CloudTaskExecutor.h"
 #include "cloud/s3Connector.h"
 #include "keys/secureString.h"
-#include "cloud/sigV4Signer.h"
+#include "curlWrapper/awsSigV4.h"
 #include "cloud/connectorHttp.h"
 #include "curlWrapper/curlSlistHelper.h"
 #include "curlWrapper/curlWrapper.h"
@@ -110,7 +112,20 @@ namespace AIAssistant
                           std::map<std::string, std::string> const& extraHeaders = {},
                           char const* uploadData = nullptr, size_t uploadSize = 0)
     {
-        auto signed_ = SigV4Signer::Sign(method, url, region, "s3", accessKeyId, secretKey, payloadHash, extraHeaders);
+        SigV4Signer::Inputs sigInputs;
+        sigInputs.m_Method = method;
+        sigInputs.m_Url = url;
+        sigInputs.m_AccessKey = accessKeyId;
+        sigInputs.m_SecretKey.Set(secretKey.Get());
+        sigInputs.m_Region = region;
+        sigInputs.m_Service = "s3";
+        sigInputs.m_ContentSha256Override = payloadHash;
+        sigInputs.m_ExtraHeadersToSign = extraHeaders;
+        SigV4Signer::SignedHeaders signed_ = SigV4Signer::Sign(sigInputs);
+        if (signed_.m_Authorization.empty())
+        {
+            return false;
+        }
 
         CURL* curl = curl_easy_init();
         if (!curl)
@@ -159,10 +174,10 @@ namespace AIAssistant
         }
 
         struct curl_slist* headers = nullptr;
-        for (auto const& [key, value] : signed_.m_Headers)
-        {
-            headers = curl_slist_append(headers, (key + ": " + value).c_str());
-        }
+        headers = curl_slist_append(headers, ("Host: " + signed_.m_Host).c_str());
+        headers = curl_slist_append(headers, ("X-Amz-Date: " + signed_.m_AmzDate).c_str());
+        headers = curl_slist_append(headers, ("X-Amz-Content-Sha256: " + signed_.m_ContentSha256).c_str());
+        headers = curl_slist_append(headers, ("Authorization: " + signed_.m_Authorization).c_str());
         for (auto const& [key, value] : extraHeaders)
         {
             headers = curl_slist_append(headers, (key + ": " + value).c_str());
@@ -181,8 +196,20 @@ namespace AIAssistant
     static bool S3Download(std::string const& url, std::string const& region, std::string const& accessKeyId,
                            SecureString const& secretKey, std::string const& outputPath, std::string& errorMessage)
     {
-        auto signed_ = SigV4Signer::Sign("GET", url, region, "s3", accessKeyId, secretKey,
-                                          SigV4Signer::EmptyPayloadHash());
+        SigV4Signer::Inputs sigInputs;
+        sigInputs.m_Method = "GET";
+        sigInputs.m_Url = url;
+        sigInputs.m_AccessKey = accessKeyId;
+        sigInputs.m_SecretKey.Set(secretKey.Get());
+        sigInputs.m_Region = region;
+        sigInputs.m_Service = "s3";
+        // m_Body empty → signer derives the canonical empty-string SHA-256.
+        SigV4Signer::SignedHeaders signed_ = SigV4Signer::Sign(sigInputs);
+        if (signed_.m_Authorization.empty())
+        {
+            errorMessage = "SigV4 signing failed";
+            return false;
+        }
 
         CURL* curl = curl_easy_init();
         if (!curl)
@@ -210,10 +237,10 @@ namespace AIAssistant
         ConnectorHttp::ApplyExecutorRedirectDefaults(curl, url);
 
         struct curl_slist* headers = nullptr;
-        for (auto const& [key, value] : signed_.m_Headers)
-        {
-            headers = curl_slist_append(headers, (key + ": " + value).c_str());
-        }
+        headers = curl_slist_append(headers, ("Host: " + signed_.m_Host).c_str());
+        headers = curl_slist_append(headers, ("X-Amz-Date: " + signed_.m_AmzDate).c_str());
+        headers = curl_slist_append(headers, ("X-Amz-Content-Sha256: " + signed_.m_ContentSha256).c_str());
+        headers = curl_slist_append(headers, ("Authorization: " + signed_.m_Authorization).c_str());
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
 
         CURLcode res = curl_easy_perform(curl);
@@ -254,6 +281,7 @@ namespace AIAssistant
         {
             taskState.m_LastErrorMessage = "Failed to parse s3 task params JSON";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
 
@@ -272,6 +300,7 @@ namespace AIAssistant
         {
             taskState.m_LastErrorMessage = "Missing required 'operation' in s3 task params";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
 
@@ -297,6 +326,7 @@ namespace AIAssistant
         {
             taskState.m_LastErrorMessage = "No bucket specified (neither in task params nor connection)";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
 
@@ -316,6 +346,7 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "s3 'upload' requires 'key' and 'file_path'";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 return false;
             }
 
@@ -328,6 +359,7 @@ namespace AIAssistant
                 taskState.m_LastErrorMessage =
                     "s3 upload: file_path is invalid or escapes the project tree";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 LOG_APP_ERROR("[s3] task='{}' workflow='{}' run='{}': file_path rejected (upload)",
                               taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId);
                 return false;
@@ -340,6 +372,7 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "Cannot open file for upload: " + fullFilePath.string();
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 return false;
             }
 
@@ -353,6 +386,7 @@ namespace AIAssistant
                 taskState.m_LastErrorMessage = "s3 upload: file size " + std::to_string(static_cast<long long>(fileSize)) +
                                                " exceeds " + std::to_string(static_cast<long long>(kMaxS3UploadBytes)) + " byte cap";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::ValueOutOfRange;
                 LOG_APP_ERROR("[s3] task='{}' workflow='{}' run='{}': upload size {} exceeds cap",
                               taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId,
                               static_cast<long long>(fileSize));
@@ -363,7 +397,7 @@ namespace AIAssistant
             file.read(fileData.data(), fileSize);
             file.close();
 
-            std::string payloadHash = SigV4Signer::Sha256Hex(fileData);
+            std::string payloadHash = EngineCore::Sha256Hex(fileData);
             std::string url = endpointUrl + "/" + UrlEncodeS3Key(key);
 
             std::map<std::string, std::string> extraHeaders;
@@ -374,6 +408,7 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "S3 upload request failed";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::NetworkError;
                 return false;
             }
 
@@ -385,6 +420,9 @@ namespace AIAssistant
                     taskState.m_LastErrorMessage += ": " + responseBody;
                 }
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = (httpCode == 401 || httpCode == 403)
+                                                  ? ConnectorErrorCode::AuthFailure
+                                                  : ConnectorErrorCode::HttpError;
                 return false;
             }
 
@@ -402,6 +440,7 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "s3 'download' requires 'key' and 'file_path'";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 return false;
             }
 
@@ -414,6 +453,7 @@ namespace AIAssistant
                 taskState.m_LastErrorMessage =
                     "s3 download: file_path is invalid or escapes the project tree";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 LOG_APP_ERROR("[s3] task='{}' workflow='{}' run='{}': file_path rejected (download)",
                               taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId);
                 return false;
@@ -437,6 +477,7 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "S3 download failed: " + downloadError;
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::NetworkError;
                 return false;
             }
 
@@ -499,11 +540,14 @@ namespace AIAssistant
                 url += "&prefix=" + UrlEncodeS3Key(prefix);
             }
 
+            // Empty payload hash override → signer derives from m_Body (empty),
+            // producing the canonical empty-string SHA-256.
             if (!S3Request("GET", url, region, credentials.m_AccessKeyId, credentials.m_SecretKey,
-                           SigV4Signer::EmptyPayloadHash(), responseBody, httpCode))
+                           /*payloadHash=*/{}, responseBody, httpCode))
             {
                 taskState.m_LastErrorMessage = "S3 list request failed";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::NetworkError;
                 return false;
             }
 
@@ -511,6 +555,9 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "S3 list failed: HTTP " + std::to_string(httpCode);
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = (httpCode == 401 || httpCode == 403)
+                                                  ? ConnectorErrorCode::AuthFailure
+                                                  : ConnectorErrorCode::HttpError;
                 return false;
             }
 
@@ -523,16 +570,18 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "s3 'delete' requires 'key'";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 return false;
             }
 
             std::string url = endpointUrl + "/" + UrlEncodeS3Key(key);
 
             if (!S3Request("DELETE", url, region, credentials.m_AccessKeyId, credentials.m_SecretKey,
-                           SigV4Signer::EmptyPayloadHash(), responseBody, httpCode))
+                           /*payloadHash=*/{}, responseBody, httpCode))
             {
                 taskState.m_LastErrorMessage = "S3 delete request failed";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::NetworkError;
                 return false;
             }
 
@@ -540,6 +589,9 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "S3 delete failed: HTTP " + std::to_string(httpCode);
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = (httpCode == 401 || httpCode == 403)
+                                                  ? ConnectorErrorCode::AuthFailure
+                                                  : ConnectorErrorCode::HttpError;
                 return false;
             }
 
@@ -553,6 +605,7 @@ namespace AIAssistant
             taskState.m_LastErrorMessage =
                 "Unknown s3 operation '" + operation + "'. Valid: upload, download, list, delete";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
 

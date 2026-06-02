@@ -148,6 +148,11 @@ namespace AIAssistant
 
     void SecureString::Build(std::initializer_list<std::string_view> pieces)
     {
+        Build(std::span<std::string_view const>(pieces.begin(), pieces.size()));
+    }
+
+    void SecureString::Build(std::span<std::string_view const> pieces)
+    {
         size_t total = 0;
         for (auto const& p : pieces)
         {

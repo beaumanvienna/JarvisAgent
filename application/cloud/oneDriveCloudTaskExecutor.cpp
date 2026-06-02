@@ -236,6 +236,7 @@ namespace AIAssistant
         {
             taskState.m_LastErrorMessage = "Failed to parse onedrive task params JSON";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
 
@@ -254,6 +255,7 @@ namespace AIAssistant
         {
             taskState.m_LastErrorMessage = "Missing required 'operation' in onedrive task params (upload or download)";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
 
@@ -262,6 +264,7 @@ namespace AIAssistant
         {
             taskState.m_LastErrorMessage = "Missing required 'remote_path' in onedrive task params";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
 
@@ -274,6 +277,7 @@ namespace AIAssistant
             taskState.m_LastErrorMessage =
                 "Invalid OneDrive remote_path: must be alphanumeric + ._-/ + space, no `..` segments";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidEndpoint;
             LOG_APP_ERROR("[onedrive] task='{}' workflow='{}' run='{}': invalid remote_path (length={})",
                           taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId, remotePath.size());
             ConnectorHttp::IncrementInputValidationRejection();
@@ -287,6 +291,7 @@ namespace AIAssistant
         {
             taskState.m_LastErrorMessage = "Missing required 'local_path' in onedrive task params";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
 
@@ -303,6 +308,7 @@ namespace AIAssistant
             taskState.m_LastErrorMessage =
                 "onedrive: local_path is invalid or escapes the working directory";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             LOG_APP_ERROR("[onedrive] task='{}' workflow='{}' run='{}': local_path rejected",
                           taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId);
             return false;
@@ -321,6 +327,7 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "Cannot open file for upload: " + fullLocalPath.string();
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 return false;
             }
 
@@ -334,6 +341,7 @@ namespace AIAssistant
                 taskState.m_LastErrorMessage = "onedrive upload: file size " + std::to_string(static_cast<long long>(fileSize)) +
                                                " exceeds " + std::to_string(static_cast<long long>(kMaxOneDriveUploadBytes)) + " byte cap";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::ValueOutOfRange;
                 LOG_APP_ERROR("[onedrive] task='{}' workflow='{}' run='{}': upload size {} exceeds cap",
                               taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId,
                               static_cast<long long>(fileSize));
@@ -352,6 +360,7 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "OneDrive upload request failed";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::NetworkError;
                 return false;
             }
 
@@ -363,6 +372,9 @@ namespace AIAssistant
                     taskState.m_LastErrorMessage += ": " + responseBody;
                 }
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = (httpCode == 401 || httpCode == 403)
+                                                  ? ConnectorErrorCode::AuthFailure
+                                                  : ConnectorErrorCode::HttpError;
                 return false;
             }
 
@@ -389,6 +401,7 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "OneDrive download failed: " + downloadError;
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::NetworkError;
                 return false;
             }
 
@@ -401,6 +414,7 @@ namespace AIAssistant
             taskState.m_LastErrorMessage =
                 "Unknown onedrive operation '" + operation + "'. Valid: upload, download";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
 

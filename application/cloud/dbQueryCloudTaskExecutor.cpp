@@ -32,6 +32,7 @@
 #include "simdjson/simdjson.h"
 
 #include "engine.h"
+#include "cloud/connectorError.h"
 #include "cloud/dbQueryCloudTaskExecutor.h"
 #include "cloud/postgresConnector.h"
 #include "file/pathConfinement.h"
@@ -353,9 +354,19 @@ namespace AIAssistant
         ExecStatusType const status = PQresultStatus(res.get());
         if (status != PGRES_TUPLES_OK && status != PGRES_COMMAND_OK)
         {
+            // SQLSTATE 57014 (query_canceled) is what `SET statement_timeout`
+            // fires when the user-configured cap elapses — the connection is
+            // healthy, the query just took too long.  Tag as ValueOutOfRange
+            // so the circuit breaker treats it as an app-level rejection.
+            char const* sqlState = PQresultErrorField(res.get(), PG_DIAG_SQLSTATE);
+            bool const wasStatementTimeout = sqlState && std::string_view(sqlState) == "57014";
             std::string const truncated = TruncateLibpqError(PQresultErrorMessage(res.get()));
             taskState.m_LastErrorMessage = "PostgreSQL query failed: " + truncated;
             taskState.m_State = TaskInstanceStateKind::Failed;
+            if (wasStatementTimeout)
+            {
+                taskState.m_LastFailureCode = ConnectorErrorCode::ValueOutOfRange;
+            }
             LOG_APP_ERROR("[db_query] query failed task='{}' workflow='{}' run='{}': {}",
                           taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId, truncated);
             return false;
@@ -372,6 +383,7 @@ namespace AIAssistant
             taskState.m_LastErrorMessage = "Result set has " + std::to_string(nRows) +
                                            " rows, exceeds max_rows=" + std::to_string(maxRows);
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::ValueOutOfRange;
             LOG_APP_ERROR("[db_query] row cap exceeded task='{}' workflow='{}' run='{}' rows={} cap={}",
                           taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId, nRows, maxRows);
             return false;
@@ -390,6 +402,7 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "Output file exceeds max_output_bytes=" + std::to_string(maxOutputBytes);
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::ValueOutOfRange;
                 LOG_APP_ERROR("[db_query] output byte cap exceeded task='{}' workflow='{}' run='{}' bytes={} cap={}",
                               taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId,
                               writtenBytes, maxOutputBytes);

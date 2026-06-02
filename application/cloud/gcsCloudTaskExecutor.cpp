@@ -31,6 +31,7 @@
 #include "simdjson/simdjson.h"
 
 #include "engine.h"
+#include "cloud/connectorError.h"
 #include "cloud/gcsCloudTaskExecutor.h"
 #include "cloud/gcsConnector.h"
 #include "cloud/connectorHttp.h"
@@ -239,6 +240,7 @@ namespace AIAssistant
         {
             taskState.m_LastErrorMessage = "Failed to parse gcs task params JSON";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
 
@@ -257,6 +259,7 @@ namespace AIAssistant
         {
             taskState.m_LastErrorMessage = "Missing required 'operation' in gcs task params (upload or download)";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
 
@@ -268,6 +271,7 @@ namespace AIAssistant
             taskState.m_LastErrorMessage =
                 "Unknown gcs operation '" + operation + "'. Valid: upload, download";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
 
@@ -286,6 +290,7 @@ namespace AIAssistant
         {
             taskState.m_LastErrorMessage = "No bucket specified (neither in task params nor connection)";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
 
@@ -300,6 +305,7 @@ namespace AIAssistant
             taskState.m_LastErrorMessage = "Invalid GCS bucket name: must match GCS naming rules "
                                            "([a-z0-9._-], 3-63 chars, no leading/trailing hyphen)";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             LOG_APP_ERROR("[gcs] task='{}' workflow='{}' run='{}': invalid bucket name (length={})",
                           taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId, bucket.size());
             ConnectorHttp::IncrementInputValidationRejection();
@@ -315,6 +321,7 @@ namespace AIAssistant
         {
             taskState.m_LastErrorMessage = "gcs task requires 'object_name' and 'local_path'";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
 
@@ -331,6 +338,7 @@ namespace AIAssistant
             taskState.m_LastErrorMessage =
                 "gcs: local_path is invalid or escapes the project tree";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             LOG_APP_ERROR("[gcs] task='{}' workflow='{}' run='{}': local_path rejected",
                           taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId);
             return false;
@@ -357,6 +365,7 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "Cannot open file for upload: " + fullLocalPath.string();
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 return false;
             }
 
@@ -370,6 +379,7 @@ namespace AIAssistant
                 taskState.m_LastErrorMessage = "gcs upload: file size " + std::to_string(static_cast<long long>(fileSize)) +
                                                " exceeds " + std::to_string(static_cast<long long>(kMaxGcsUploadBytes)) + " byte cap";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::ValueOutOfRange;
                 LOG_APP_ERROR("[gcs] task='{}' workflow='{}' run='{}': upload size {} exceeds cap",
                               taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId,
                               static_cast<long long>(fileSize));
@@ -389,6 +399,7 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "GCS upload request failed";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::NetworkError;
                 return false;
             }
 
@@ -400,6 +411,9 @@ namespace AIAssistant
                     taskState.m_LastErrorMessage += ": " + responseBody;
                 }
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = (httpCode == 401 || httpCode == 403)
+                                                  ? ConnectorErrorCode::AuthFailure
+                                                  : ConnectorErrorCode::HttpError;
                 return false;
             }
 
@@ -427,6 +441,7 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "GCS download failed: " + downloadError;
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::NetworkError;
                 return false;
             }
 

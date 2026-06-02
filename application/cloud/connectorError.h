@@ -87,6 +87,16 @@ namespace AIAssistant
         // the status code + (truncated) response body when available.
         HttpError,
 
+        // App-level rejection where the connection itself is healthy and the
+        // call reached its endpoint — the local app then refused to accept
+        // the response (db_query result-set exceeds `max_rows`, output file
+        // exceeds `max_output_bytes`, query exceeded `statement_timeout`).
+        // Distinct from `NetworkError`/`AuthFailure`/`HttpError` so the
+        // circuit breaker can recognise these as known-good-connection
+        // failures and NOT decrement the connection's health budget.  See
+        // `IsConnectionFailure(code)` for the breaker-side policy.
+        ValueOutOfRange,
+
         // Backstop for code paths the discrete variants above don't cover.
         // Use sparingly — when in doubt, add a new variant rather than
         // collapse into this.  `-Wswitch` over a `default:`-free switch is
@@ -111,5 +121,17 @@ namespace AIAssistant
     // Human-readable label for the code itself (NOT the full Details).
     // Used in log lines as a stable identifier before the variable Details.
     std::string_view Describe(ConnectorErrorCode code);
+
+    // Classify a failure code for the circuit breaker.  Returns true when the
+    // code indicates the connection itself is unhealthy (transport, auth,
+    // credential, config) — these tick the breaker's consecutive-failure
+    // counter and can trip it Open.  Returns false for known-good-connection
+    // app-level rejections (e.g. `ValueOutOfRange` cap rejections in db_query)
+    // where the call reached its endpoint successfully and the local app
+    // refused the result — these are recorded for display but do not affect
+    // the breaker's state.  Switch is `default:`-free per CLAUDE.md discipline
+    // — adding a new variant forces a conscious connection-vs-app decision
+    // here via `-Wswitch`.
+    [[nodiscard]] bool IsConnectionFailure(ConnectorErrorCode code);
 
 } // namespace AIAssistant

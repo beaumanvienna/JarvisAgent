@@ -487,17 +487,42 @@ namespace AIAssistant
         auto const persistedIt = m_PersistedEmailWatermarks.find(persistKey);
         if (persistedIt != m_PersistedEmailWatermarks.end() && !persistedIt->second.m_LastSeenUid.empty())
         {
-            instance.m_LastSeenUid = persistedIt->second.m_LastSeenUid;
-            LOG_APP_INFO("[email_watch] restored persisted UID watermark '{}' for trigger '{}' workflow '{}'",
-                         instance.m_LastSeenUid, triggerId, workflowId);
+            // Registration-time guard: connection + folder must match the trigger's
+            // current targeting.  UIDs are only meaningful within (server, folder);
+            // a mismatch here means the JCWF was edited to repoint after the last
+            // save — discard the saved UID so the next poll seeds fresh from the
+            // new target.  UIDVALIDITY can't be checked here (we haven't polled
+            // yet); the poll-time guard at the dispatch site covers that.
+            PersistedEmailWatermark const& wm = persistedIt->second;
+            if (wm.m_ConnectionName != connectionName || wm.m_Folder != instance.m_Folder)
+            {
+                LOG_APP_WARN("[email_watch] discarding stale watermark for trigger '{}' workflow '{}' — "
+                             "trigger now targets connection='{}' folder='{}' but persisted entry is "
+                             "connection='{}' folder='{}' (UID '{}' applied to mismatched target would be "
+                             "meaningless)",
+                             triggerId, workflowId, connectionName, instance.m_Folder,
+                             wm.m_ConnectionName, wm.m_Folder, wm.m_LastSeenUid);
+            }
+            else
+            {
+                instance.m_LastSeenUid = wm.m_LastSeenUid;
+                instance.m_LastSeenUidValidity = wm.m_UidValidity;
+                LOG_APP_INFO("[email_watch] restored persisted UID watermark '{}' (UIDVALIDITY {}) for "
+                             "trigger '{}' workflow '{}'",
+                             instance.m_LastSeenUid, instance.m_LastSeenUidValidity, triggerId, workflowId);
+            }
         }
 
+        // Capture the resolved folder before the move — instance is moved-from
+        // after push_back, so reading instance.m_Folder in the log below would
+        // print an empty string.
+        std::string const resolvedFolder = instance.m_Folder;
         m_EmailWatchTriggers.push_back(std::move(instance));
 
         LOG_APP_INFO(
             "TriggerEngine::AddEmailWatchTrigger: registered email_watch trigger '{}' for workflow '{}' "
             "(connection={}, folder={}, subject_filter={}, interval={}s)",
-            triggerId, workflowId, connectionName, instance.m_Folder,
+            triggerId, workflowId, connectionName, resolvedFolder,
             subjectFilter.empty() ? "<all>" : subjectFilter, pollIntervalSeconds);
     }
 
@@ -687,6 +712,7 @@ namespace AIAssistant
             std::string m_Folder;
             std::string m_SubjectFilter;
             std::string m_LastSeenUid;
+            uint32_t    m_LastSeenUidValidity{0};
         };
         std::vector<EmailPollJob> emailPollJobs;
 
@@ -760,7 +786,8 @@ namespace AIAssistant
                 emailInstance.m_NextPollTime = steadyNow + emailInstance.m_PollInterval;
                 emailPollJobs.push_back({emailInstance.m_WorkflowId, emailInstance.m_TriggerId,
                                          emailInstance.m_ConnectionName, emailInstance.m_Folder,
-                                         emailInstance.m_SubjectFilter, emailInstance.m_LastSeenUid});
+                                         emailInstance.m_SubjectFilter, emailInstance.m_LastSeenUid,
+                                         emailInstance.m_LastSeenUidValidity});
             }
 
             // Azure Blob watch triggers (polling)
@@ -840,9 +867,31 @@ namespace AIAssistant
             }
 
             bool hasNewMail = false;
+            uint32_t currentUidValidity = 0;
             std::string highestUid = EmailConnector::CheckForNewMail(
                 *connection, credentials, job.m_Folder, job.m_SubjectFilter, job.m_LastSeenUid, hasNewMail,
-                errorMessage);
+                currentUidValidity, errorMessage);
+
+            // UIDVALIDITY-change guard: if the mailbox renumbered UIDs since
+            // we last saw it, our saved UID watermark is meaningless (RFC 3501
+            // §2.3.1.1).  Treat current state as the new baseline — clear the
+            // in-memory watermark so the upcoming hasNewMail check seeds fresh
+            // and the next save records the new UIDVALIDITY.  Skip the firing
+            // for this poll cycle (the current messages predate the trigger
+            // re-registration from the operator's standpoint).
+            if (currentUidValidity != 0 && job.m_LastSeenUidValidity != 0 &&
+                currentUidValidity != job.m_LastSeenUidValidity)
+            {
+                LOG_APP_WARN("[email_watch] connection='{}' folder='{}' UIDVALIDITY changed "
+                             "({} -> {}); discarding stale UID watermark '{}' and re-seeding from current state "
+                             "workflow='{}' trigger='{}'",
+                             job.m_ConnectionName, job.m_Folder, job.m_LastSeenUidValidity,
+                             currentUidValidity, job.m_LastSeenUid, job.m_WorkflowId, job.m_TriggerId);
+                hasNewMail = false;
+                // highestUid is left as returned; the per-job state at the
+                // update site below will record it as the new seed with the
+                // new UIDVALIDITY so future polls compare against it.
+            }
 
             if (highestUid.empty() && !errorMessage.empty())
             {
@@ -879,11 +928,13 @@ namespace AIAssistant
                 if (triggerIndex < m_EmailWatchTriggers.size())
                 {
                     m_EmailWatchTriggers[triggerIndex].m_LastSeenUid = highestUid;
+                    m_EmailWatchTriggers[triggerIndex].m_LastSeenUidValidity = currentUidValidity;
 
                     std::string const persistKey = job.m_WorkflowId + "|" + job.m_TriggerId;
                     PersistedEmailWatermark& entry = m_PersistedEmailWatermarks[persistKey];
                     entry.m_ConnectionName = job.m_ConnectionName;
                     entry.m_Folder = job.m_Folder;
+                    entry.m_UidValidity = currentUidValidity;
                     entry.m_LastSeenUid = highestUid;
                     {
                         std::time_t const t = std::time(nullptr);
@@ -1219,6 +1270,25 @@ namespace AIAssistant
             return;
         }
 
+        // Format-version gate.  Only version 2 is accepted — version 1 (the
+        // pre-UIDVALIDITY shape) is rejected with a WARN and start-fresh
+        // rather than partially-loaded with default UIDVALIDITY=0 (which would
+        // appear correct but defeat the mailbox-renumber guard on the first
+        // poll after upgrade).  Per `feedback_no_legacy`: no compat shims.
+        uint64_t formatVersion = 0;
+        if (auto err = doc["format_version"].get_uint64().get(formatVersion); err != simdjson::SUCCESS)
+        {
+            LOG_APP_WARN("[email_watch] '{}' missing 'format_version' — discarding (starting fresh)",
+                         path.string());
+            return;
+        }
+        if (formatVersion != 2)
+        {
+            LOG_APP_WARN("[email_watch] '{}' format_version={} (expected 2) — discarding (starting fresh; "
+                         "next poll re-seeds watermarks)", path.string(), formatVersion);
+            return;
+        }
+
         std::unordered_map<std::string, PersistedEmailWatermark> loaded;
         ondemand::array watermarks;
         if (auto err = doc["watermarks"].get_array().get(watermarks); err != simdjson::SUCCESS)
@@ -1232,17 +1302,29 @@ namespace AIAssistant
             ondemand::object obj;
             if (entry.get_object().get(obj) != simdjson::SUCCESS) continue;
             std::string_view workflowId, triggerId, connectionName, folder, lastSeenUid, updatedAt;
+            uint64_t uidValidity = 0;
             if (obj["workflow_id"].get_string().get(workflowId) != simdjson::SUCCESS) continue;
             if (obj["trigger_id"].get_string().get(triggerId) != simdjson::SUCCESS) continue;
             if (obj["last_seen_uid"].get_string().get(lastSeenUid) != simdjson::SUCCESS) continue;
-            // Informational fields — tolerate absence
-            (void)obj["connection_name"].get_string().get(connectionName);
-            (void)obj["folder"].get_string().get(folder);
-            (void)obj["updated_at"].get_string().get(updatedAt);
+            // Connection + folder + UIDVALIDITY are load-bearing in format v2 — skip
+            // entries missing any of them rather than silently defaulting (a missing
+            // uid_validity field with implicit 0 would skip the UIDVALIDITY guard).
+            if (obj["connection_name"].get_string().get(connectionName) != simdjson::SUCCESS) continue;
+            if (obj["folder"].get_string().get(folder) != simdjson::SUCCESS) continue;
+            if (obj["uid_validity"].get_uint64().get(uidValidity) != simdjson::SUCCESS) continue;
+            if (uidValidity > 0xFFFFFFFFull) continue; // out of 32-bit range
+            // updated_at is informational — tolerate absence (leave it empty on miss).
+            // Consume the [[nodiscard]] error_code via the condition: GCC's
+            // -Wunused-result is not silenced by a (void) cast.
+            if (obj["updated_at"].get_string().get(updatedAt) != simdjson::SUCCESS)
+            {
+                updatedAt = {};
+            }
 
             PersistedEmailWatermark wm;
             wm.m_ConnectionName = std::string(connectionName);
             wm.m_Folder = std::string(folder);
+            wm.m_UidValidity = static_cast<uint32_t>(uidValidity);
             wm.m_LastSeenUid = std::string(lastSeenUid);
             wm.m_UpdatedAtIso = std::string(updatedAt);
             loaded.emplace(std::string(workflowId) + "|" + std::string(triggerId), std::move(wm));
@@ -1261,8 +1343,37 @@ namespace AIAssistant
         std::filesystem::path const path = EmailWatermarksFilePath();
         if (path.empty()) return;
 
+        // Prune orphaned watermarks before writing.  Workflow removal goes through
+        // ClearAll() + RegisterAll() (the reload path), which re-adds the surviving
+        // workflows' triggers but silently drops the removed one's — leaving its
+        // persisted entry with no live trigger.  Without this prune the map (and the
+        // on-disk file) would grow unboundedly across removals.  By the time a save
+        // fires (only after a successful poll), RegisterAll has fully repopulated
+        // m_EmailWatchTriggers with the surviving triggers, so any persisted key with
+        // no matching live trigger is genuinely orphaned and safe to drop.
+        {
+            std::unordered_set<std::string> liveKeys;
+            liveKeys.reserve(m_EmailWatchTriggers.size());
+            for (auto const& instance : m_EmailWatchTriggers)
+            {
+                liveKeys.insert(instance.m_WorkflowId + "|" + instance.m_TriggerId);
+            }
+            for (auto it = m_PersistedEmailWatermarks.begin(); it != m_PersistedEmailWatermarks.end();)
+            {
+                if (!liveKeys.contains(it->first))
+                {
+                    LOG_APP_INFO("[email_watch] pruning orphaned watermark '{}' (no live trigger)", it->first);
+                    it = m_PersistedEmailWatermarks.erase(it);
+                }
+                else
+                {
+                    ++it;
+                }
+            }
+        }
+
         std::ostringstream body;
-        body << "{\n  \"format_version\": 1,\n  \"watermarks\": [";
+        body << "{\n  \"format_version\": 2,\n  \"watermarks\": [";
         bool first = true;
         for (auto const& [key, wm] : m_PersistedEmailWatermarks)
         {
@@ -1277,6 +1388,7 @@ namespace AIAssistant
                  << "\"trigger_id\": \""     << JsonHelper::EscapeJsonString(triggerId)         << "\", "
                  << "\"connection_name\": \""<< JsonHelper::EscapeJsonString(wm.m_ConnectionName) << "\", "
                  << "\"folder\": \""         << JsonHelper::EscapeJsonString(wm.m_Folder)         << "\", "
+                 << "\"uid_validity\": "     << wm.m_UidValidity                                 << ", "
                  << "\"last_seen_uid\": \""  << JsonHelper::EscapeJsonString(wm.m_LastSeenUid)    << "\", "
                  << "\"updated_at\": \""     << JsonHelper::EscapeJsonString(wm.m_UpdatedAtIso)   << "\""
                  << "}";

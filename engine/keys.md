@@ -1,21 +1,15 @@
-# Key Management System — Design & Change Plan
-
-Last updated: Feb 2026
+# Key Management System
 
 ---
 
-## 1. Problem Statement
+## 1. Overview
 
-Today JarvisAgent reads a single API key from the `OPENAI_API_KEY` environment variable
-(`engine/curlWrapper/curlWrapper.cpp:46`). This key is stored as a process-wide static
-(`CurlWrapper::m_ApiKey`) and used for every AI request regardless of provider, model, or task.
-
-This means:
-
-- Only one AI provider can be used at a time.
-- Switching providers requires restarting with a different env var.
-- No way for individual JCWF tasks to target different models/providers.
-- The API key lives in the shell environment with no encryption at rest.
+The KeyManager is a multi-provider AI-credential store. It keeps an in-memory registry mapping
+logical provider names to `{endpoint, api_key, default_model, api_type}`, populated at startup
+from the AES-256-GCM-encrypted `keys.json.enc` and unlocked at runtime with the master password.
+JCWF tasks select a backend via `"provider": "<name>"`; a `default_provider` covers tasks that
+don't specify one. Every credential is encrypted at rest — there is no plaintext-keystore path
+and no environment-variable credential path in any edition.
 
 ---
 
@@ -24,15 +18,18 @@ This means:
 1. **Multiple providers** — support OpenAI, Anthropic, Google, local (Ollama/vLLM), and arbitrary
    OpenAI-compatible endpoints, each with its own key and defaults.
 2. **Encrypted storage** — all keys in a single AES-256-GCM encrypted file (`keys.json.enc`) with
-   a master password. Plaintext `keys.json` only exists during development (gitignored).
+   a master password, unlocked at runtime. This is the **only** credential source in any edition:
+   no plaintext-keystore path and no env-var credential path. Every credential is encrypted at rest.
 3. **Provider registry** — an in-memory registry mapping logical provider names to
    `{endpoint, api_key, default_model, api_type}`, populated at startup from the decrypted keys.
 4. **Per-task provider selection** — JCWF tasks can specify `"provider": "<name>"` to route
    requests to a specific AI backend.
 5. **UI for key management** — a settings page in the React frontend to add/edit/remove providers
    and set the master password.
-6. **Backward compatibility** — if `keys.json.enc` does not exist, fall back to `OPENAI_API_KEY`
-   env var so existing setups keep working.
+6. **Encrypted-only, no unsecured fallback** — `keys.json.enc` is the sole credential source in
+   every edition; there is no plaintext-keystore path and no `OPENAI_API_KEY` env-var fallback
+   (an env-var key is plaintext in the process environment — visible via `/proc/PID/environ` /
+   `docker inspect` — which the "no unsecured keys" posture in `doc/cyber security.md` forbids).
 
 ---
 
@@ -40,8 +37,7 @@ This means:
 
 ```
 jarvisAgent/
-├── keys.json           # plaintext (gitignored, dev only)
-├── keys.json.enc       # AES-256-GCM encrypted (production)
+├── keys.json.enc       # AES-256-GCM encrypted keystore (the only on-disk credential store)
 ├── config.json         # updated: new "keys_file" field
 ├── engine/
 │   ├── keys/
@@ -68,7 +64,9 @@ jarvisAgent/
 
 ---
 
-## 4. keys.json Format
+## 4. Keystore JSON Format
+
+This is the credential schema held inside the encrypted `keys.json.enc` (the bytes `ParseProvidersJson` parses after decryption); it is never written to disk unencrypted.
 
 ```jsonc
 {
@@ -180,9 +178,6 @@ public:
     // Lifecycle: load/save the encrypted store with a master password.
     bool Load(std::filesystem::path const& keysFilePath, std::string_view masterPassword);
     bool Save(std::filesystem::path const& keysFilePath, std::string_view masterPassword);
-
-    // Backward compatibility: populate from OPENAI_API_KEY env var (creates an ApiKeyCredential).
-    bool LoadFromEnvironment(std::string const& endpoint, std::string const& model, std::string const& apiType);
 
     // Runtime unlock: decrypt the stored keys file path with a freshly-supplied password.
     bool Unlock(std::string_view masterPassword);
@@ -298,11 +293,11 @@ on-destruct invariant survives.
 
 ### Hardening guards
 
-- **Keystore size cap.** `Load` and `LoadPlaintext` reject files larger than `kMaxKeysFileBytes = 4 MB` before parsing.  Bounds OOM-via-hostile-keystore at the boundary; realistic keystores are < 100 KB.
+- **Encrypted-only keystore.** Credentials load exclusively from the AES-256-GCM `keys.json.enc` store (`Load`), unlocked at runtime with the master password.  There is no plaintext-keystore path and no `OPENAI_API_KEY` env-var path in any edition — every credential is encrypted at rest.  Matches the "same cyber-sec measures across editions" posture in `doc/cyber security.md`.
+- **Keystore size cap.** `Load` rejects files larger than `kMaxKeysFileBytes = 4 MB` before parsing.  Bounds OOM-via-hostile-keystore at the boundary; realistic keystores are < 100 KB.
 - **Provider count cap.** `ParseProvidersJson` aborts after `kMaxProviders = 1024` entries with a structured ERROR.  Bounds per-provider unique_ptr allocations.
 - **`SetDefaultProvider` rejects empty.** `[[nodiscard]]` return; empty / unknown names log a WARN and return false.  Use `ClearDefaultProvider()` for explicit clears so a hand-edit accident can't silently wipe the default by passing an empty string.
 - **`Unlock` TOCTOU closed.** The keys file path is captured under `m_KeysFilePathMutex` at function entry, so a concurrent `SetKeysFilePath` cannot swap the path between the existence check and the `Load` call.
-- **`LoadPlaintext` / `SavePlaintext` are Studio-only.** Both declarations + bodies and the lone caller in `engine.cpp` are wrapped in `#ifdef J9T_STUDIO`.  Engine binaries (the production server edition) carry no symbols for plaintext credential storage — verified with `nm`.
 
 ### 6.1 Startup sequence
 
@@ -314,12 +309,9 @@ on-destruct invariant survives.
       threads the password through the same unlock handler).
    b. On unlock: KeyManager::Load() decrypts, populates the provider registry, and
       also unlocks mcp_keys.json.enc with the same password (WebServer::InitMcpKeyStore).
-3. Else if OPENAI_API_KEY env var is set:
-   a. KeyManager::LoadFromEnvironment() creates a single "openai" provider entry
-      using the existing config.json API interfaces/index for endpoint/model/api_type
-4. Else:
+3. Else (no keys_file present):
    a. Log warning: no API keys configured
-   b. AI tasks will fail at dispatch time with a clear error
+   b. AI tasks will fail at dispatch time with a clear error until a keystore is created + unlocked
 ```
 
 ---
@@ -466,10 +458,9 @@ The selection is stored as `api_interface` on the task and preserved in `.jcwf` 
 2. ✅ Created `engine/keys/keyEncryption.h` and `keyEncryption.cpp` — AES-256-GCM encrypt/decrypt
    using vendored OpenSSL.
 3. ✅ Added `"keys_file"` field to `ConfigParser` / `EngineConfig`.
-4. ✅ `KeyManager::Load()` called in startup sequence.
-5. ✅ Falls back to `KeyManager::LoadFromEnvironment()` if no encrypted file.
-6. ✅ `keys.json` and `keys.json.enc` added to `.gitignore`.
-7. ✅ `premake5.lua` updated.
+4. ✅ `KeyManager::Load()` called at runtime unlock; no keystore → WARN (no env-var/plaintext fallback).
+5. ✅ `keys.json.enc` added to `.gitignore`.
+6. ✅ `premake5.lua` updated.
 
 ### Phase 2: Wire KeyManager into request pipeline — **DONE**
 
@@ -501,22 +492,21 @@ The selection is stored as `api_interface` on the task and preserved in `.jcwf` 
 
 ---
 
-## 13. Backward Compatibility
+## 13. Startup Behavior
 
 | Scenario                                    | Behavior                                           |
 |---------------------------------------------|----------------------------------------------------|
-| No `keys.json.enc`, `OPENAI_API_KEY` set    | Works exactly as today (single provider from env).  |
-| No `keys.json.enc`, no env var              | Warning logged; AI tasks fail with clear error.     |
-| `keys.json.enc` exists, password provided   | Full multi-provider support.                        |
-| `keys.json.enc` exists, wrong password      | Decryption fails; falls back to env var if present. |
-| JCWF task has no `"provider"` field         | Uses `default_provider` from keys.json.             |
+| No `keys.json.enc`                          | Warning logged; AI tasks fail with a clear error until a keystore is created + unlocked. |
+| `keys.json.enc` exists, not yet unlocked    | Store stays sealed (`NoPassword`); awaits `POST /api/settings/keys/unlock`. |
+| `keys.json.enc` exists, password provided   | Decrypts; full multi-provider support.              |
+| `keys.json.enc` exists, wrong password      | Decryption fails; store stays sealed (no fallback). |
+| JCWF task has no `"provider"` field         | Uses `default_provider` from the keystore.          |
 
 ---
 
 ## 14. Security Notes
 
-- **Plaintext `keys.json`** is gitignored and only used for development convenience.
-  Production uses `keys.json.enc` exclusively.
+- **Encrypted-only keystore.** Every edition uses `keys.json.enc` (AES-256-GCM) exclusively — there is no plaintext-keystore path and no `OPENAI_API_KEY` env-var path. Every credential is encrypted at rest; an env-var key (plaintext in the process environment, readable via `/proc/PID/environ` or `docker inspect`) is exactly the unsecured exposure the keystore exists to prevent.
 - **Master password** is never stored on disk and never read from an environment variable.
   It is supplied at runtime via `POST /api/settings/keys/unlock` (or the dashboard login
   flow, which posts to the same endpoint) and held in an `mlock()`-protected

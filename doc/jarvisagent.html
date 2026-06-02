@@ -306,55 +306,43 @@ Windows.</p>
 <td>LAN / internet</td>
 </tr>
 <tr class="even">
-<td><strong>Authentication</strong></td>
-<td>None</td>
-<td>Bearer token (admin), HMAC-SHA256 (webhooks)</td>
-</tr>
-<tr class="odd">
-<td><strong>RBAC</strong></td>
-<td>N/A</td>
-<td>3 roles: admin, operator, viewer</td>
-</tr>
-<tr class="even">
-<td><strong>Rate limiting</strong></td>
-<td>None</td>
-<td>Per-IP token bucket (100 req/min, burst 20)</td>
-</tr>
-<tr class="odd">
-<td><strong>Audit logging</strong></td>
-<td>None</td>
-<td><code>log/security.txt</code> (rotating, 10 MB x 5)</td>
-</tr>
-<tr class="even">
-<td><strong>Request body limit</strong></td>
-<td>None</td>
-<td>Configurable (default 10 MB)</td>
-</tr>
-<tr class="odd">
 <td><strong>Workflow CRUD</strong></td>
 <td>Full</td>
 <td>Not available (compile-time removed)</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td><strong>AI assistant</strong></td>
 <td>Full</td>
 <td>Not available (compile-time removed)</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td><strong>AI JCWF generation</strong></td>
 <td>Full</td>
 <td>Not available (compile-time removed)</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td><strong>Attack surface</strong></td>
 <td>Full feature set</td>
 <td>Minimal — runtime + monitoring only</td>
 </tr>
 </tbody>
 </table>
+<p><strong>Shared security posture (both editions):</strong> MCP API key
++ session-cookie + optional gateway-header auth funnel; 3-role RBAC
+(<code>admin</code>/<code>operator</code>/<code>viewer</code>); per-IP
+rate limiting (100 req/min, burst 20); failed-auth lockout (10 → 15-min
+IP ban); audit log at <code>log/security.txt</code> (rotating, 10 MB ×
+5); configurable request body cap (default 10 MB); CSP / X-Frame-Options
+/ HSTS response headers. The anonymous-localhost bypass that Studio used
+pre-§5i was removed in 2026-05; every endpoint now goes through the same
+auth gate regardless of edition. See <a href="#security">Security</a>
+and <a href="api-endpoints.md">doc/api-endpoints.md</a>
+Authentication.</p>
 <p>Studio is designed for single-developer use on a local machine.
-Engine is designed for production deployments behind an API gateway. See
-<a href="#security">Security</a> for details.</p>
+Engine is designed for production deployments behind an API gateway. The
+auth/RBAC/audit machinery is the same — Engine just drops the editing
+surface so the attack surface is smaller. See <a
+href="#security">Security</a> for details.</p>
 <h2 id="options">OPTIONS</h2>
 <p><strong>Launcher flags</strong> (for
 <code>jarvisagent.sh</code>):</p>
@@ -404,9 +392,12 @@ platforms:</p>
 </tr>
 </tbody>
 </table>
-<p>For building from source and detailed install/uninstall instructions
-for each package format, see the project <strong>README.md</strong> and
-<strong>packaging/packaging.md</strong>.</p>
+<p>For detailed install/uninstall instructions for each package format,
+see <strong><a href="../INSTALL.md">INSTALL.md</a></strong>. To build
+from source, see <strong><a
+href="../DEVELOPMENT.md">DEVELOPMENT.md</a></strong>. Packaging
+internals live in <strong><a
+href="../packaging/packaging.md">packaging/packaging.md</a></strong>.</p>
 <h3 id="shell-completions">Shell completions</h3>
 <p>Shell completion scripts for the launcher are included in
 <code>integration/completions/</code>:</p>
@@ -502,7 +493,20 @@ pool size. Default: 16. Valid range: 1–256.</li>
 <li><strong><code>"max inflight ai calls"</code></strong> — (number)
 Maximum concurrent AI requests dispatched via HTTP/2. Decoupled from
 thread pool size since requests are multiplexed on a single I/O thread.
-Default: 100. Valid range: 1–1000.</li>
+Default: 1000. Valid range: 1–10000.</li>
+<li><strong><code>"max_ai_calls_per_jcwf"</code></strong> — (number)
+Per-run cap on the total AI calls a single JCWF run can dispatch.
+<code>0</code> = unlimited. Default: 0. Tasks exceeding the cap fail
+fast (<code>AI call cap exceeded</code>). Set to a finite value
+(e.g. 1000) for adhoc / multi-tenant deployments to bound a single
+workflow’s AI-budget consumption.</li>
+<li><strong><code>"max_per_item_fan_out"</code></strong> — (number) Cap
+on the children spawned by a single per-item filter evaluation.
+<code>0</code> = unlimited. Default: 10000. Guards against DoS via a
+malicious or accidental filter that returns millions of items (each
+becomes a task child + downstream dispatch). When exceeded, the parent
+task fails with an ERROR-logged
+<code>runId</code>/<code>workflowId</code>/<code>taskId</code>.</li>
 <li><strong><code>"python engines"</code></strong> — (number) Number of
 Python sub-interpreters (each with its own GIL) for parallel Python task
 execution. Requires Python 3.12+. Default: 4. Valid range: 1–16.</li>
@@ -547,7 +551,18 @@ provider configurations. Each entry is an object with:
 <ul>
 <li><strong><code>"url"</code></strong> — (string,
 <strong>required</strong>) The API endpoint URL
-(e.g. <code>https://api.openai.com/v1/chat/completions</code>).</li>
+(e.g. <code>https://api.openai.com/v1/chat/completions</code>). Plain
+<code>http://</code> is loopback-only — accepted only when every
+resolved address falls in <code>127.0.0.0/8</code> or <code>::1</code>
+(the local-LLM case, e.g. <code>http://localhost:11434/...</code> for
+ollama / llama.cpp). A non-loopback <code>http://</code> URL is rejected
+at config-load (interface dropped from <code>m_ApiInterfaces</code> with
+<code>LOG_CORE_ERROR</code>) and at REST CRUD time (HTTP 400
+<code>url_policy_violation</code>). An <code>http://</code> URL combined
+with a non-empty <code>key_name</code> is always rejected
+(<code>credentialed_plaintext_http</code>) — a credential over plaintext
+would leak the Bearer token in transit on every dispatch. See
+<code>doc/cyber security.md</code> § “AI Interface URL Policy”.</li>
 <li><strong><code>"model"</code></strong> — (string) The model name
 (e.g. <code>gpt-4o</code>, <code>gemini-2.5-flash</code>).</li>
 <li><strong><code>"API"</code></strong> — (string) The reply parser
@@ -575,8 +590,6 @@ reply parser sniffs the response shape and delegates).</li>
 body identical to API1; the deployment URL is the full per-deployment
 URL,
 e.g. <code>https://{resource}.openai.azure.com/openai/deployments/{deployment}/chat/completions?api-version={ver}</code>).</li>
-<li><code>Test</code> — no-network fixture backend for integration tests
-(reads canned reply from the interface’s <code>url</code> field).</li>
 </ul></li>
 <li><strong><code>"max_context_tokens"</code></strong> — (integer,
 optional) Advisory context-window size for this interface. When set, j9t
@@ -595,6 +608,36 @@ description of this interface.</li>
 <li><strong><code>"key_name"</code></strong> — (string) Name of the API
 key provider to use from the encrypted keys file (e.g. “openai”,
 “google”, “anthropic”).</li>
+<li><strong><code>"is_mock"</code></strong> — (bool, optional) When
+<code>true</code>, the dispatcher routes calls to this interface through
+MockTransport (fixture replay) instead of LiveTransport (real HTTPS).
+Useful for hermetic tests, demos without provider credit, and CI.
+Admin-only — same access surface as <code>api_key</code>. Requires
+<code>fixture_path</code> to be set; the parser rejects
+<code>is_mock: true</code> without a non-empty <code>fixture_path</code>
+and marks the interface InvalidAPI.</li>
+<li><strong><code>"fixture_path"</code></strong> — (string, optional
+unless <code>is_mock: true</code>) Path to the on-disk fixture file
+MockTransport reads as the response body. The file must be a full
+API-shaped response (e.g. an OpenAI chat completion JSON for
+<code>api_type: "API1"</code>); the configured <code>api_type</code>’s
+ReplyParser parses it identically to a real response. Hardening: paths
+are resolved against the project root via
+<code>ConfineUnderProjectRoot</code> and rejected if they escape
+(absolute outside the root, symlink target outside, <code>..</code>
+traversal that lands outside). Fixture size is capped at 10 MiB;
+oversized files fail closed. An optional sibling
+<code>&lt;fixture&gt;.meta.json</code> overrides HTTP status + headers
+and pins SigV4 timing for KAT tests — <code>http_status</code> must be
+in <code>[200, 599]</code>; only <code>Content-Type</code> and
+<code>Retry-After</code> headers are allowlisted (others dropped with
+WARN); an optional <code>x_amz_date_override</code> field (format
+<code>"YYYYMMDDTHHMMSSZ"</code>) feeds
+<code>QueryData::m_AmzDateOverride</code> so SigV4 paths produce a
+byte-deterministic Authorization header (consumed by
+<code>test/dispatch/test_bedrock_sigv4.py</code>). PROV sidecar carries
+<code>"mocked": true</code> + the resolved <code>fixture_path</code> so
+post-mortem tooling distinguishes mock dispatches from live ones.</li>
 <li><strong><code>"rate_limit"</code></strong> — (object, optional)
 Per-interface adaptive rate-limit + size-aware in-flight budget knobs.
 All sub-fields optional; missing fields fall back to
@@ -625,7 +668,7 @@ optional <code>rate_limit</code> block on the interface:</p>
             &quot;fixed_overhead_seconds&quot;: 5.0,
             &quot;safety_margin_factor&quot;: 4.0,
             &quot;min_seconds&quot;: 60.0,
-            &quot;max_seconds&quot;: 600.0
+            &quot;max_seconds&quot;: 1800.0
         }
     }
 }</code></pre>
@@ -638,7 +681,9 @@ a Tier-1 Anthropic account; raise to 16+ for Tier-3+.</li>
 <li><code>max_concurrency</code> — hard ceiling AIMD growth never
 crosses, regardless of how many clean completions accumulate. Default 48
 (the HTTP/2 stream cap). Set lower to pace burn rate on cost-capped
-accounts (this is the only cost-shaping knob in 1.0).</li>
+accounts (this is the only cost-shaping knob in 1.0). <strong>Also feeds
+the request-budget formula</strong> below — see the size-aware budget
+section.</li>
 <li><code>max_retries_429</code> — number of attempts after a 429 before
 giving up. Default 10 (controller’s predictive gating means real 429s
 are rare in practice).</li>
@@ -653,8 +698,20 @@ formula:</p>
 <pre><code>seconds = (input_tokens / 1000 × per_1k_input_token_seconds)
         + (max_output_tokens / 1000 × per_1k_output_token_seconds)
         + fixed_overhead_seconds
-seconds *= safety_margin_factor
+seconds *= max_concurrency        # worst-case queue-depth multiplier
+seconds *= safety_margin_factor   # token-rate variance headroom
 seconds  = clamp(seconds, min_seconds, max_seconds)</code></pre>
+<p>The <code>max_concurrency</code> multiplier handles the case where a
+backend serializes (e.g., a local ollama daemon on a single GPU): a
+request that lands at position N in the backend’s queue takes N ×
+single-stream time. Multiplying by <code>max_concurrency</code> (the
+configured ceiling on simultaneous in-flight requests) guarantees the
+timeout covers the worst-case queue position. For truly-parallel
+backends (cloud providers like OpenAI / Anthropic) the multiplier
+over-allocates timeout harmlessly — the only side effect is slower
+detection of genuinely hung requests, which is rare and worth trading
+for never-timeouts-from-contention reliability. No per-user knob to
+fiddle with.</p>
 <p>Curl’s timeout only counts time <em>on the wire</em> — inbox waits,
 controller throttling, and retry-queue backoffs don’t burn the budget.
 Each retry creates a fresh easy handle with a fresh budget.</p>
@@ -707,9 +764,16 @@ dominant term for typical AI workloads):</p>
 </tbody>
 </table>
 <p>Shipped defaults (<code>per_1k_output=5.0</code>,
-<code>safety_margin=4.0</code>, <code>min=60s</code>) are calibrated for
-Sonnet, the slowest provider in active use. Fast providers finish well
-within the floor with no harm done.</p>
+<code>safety_margin=4.0</code>, <code>min=60s</code>,
+<code>max=1800s</code>) are calibrated to absorb the worst-case stack of
+(slowest cloud provider × full queue depth × token-rate variance). Fast
+providers finish well within the floor with no harm done; serializing
+local backends (e.g. ollama) get a budget that scales with
+<code>max_concurrency</code> so contention-induced queueing never trips
+the timeout. The 30 min <code>max_seconds</code> ceiling is the safety
+stop for pathological combinations (very large outputs × max queue depth
+× slow provider) — at that point the request is almost certainly hung
+rather than legitimately progressing.</p>
 <p><strong>Tuning examples:</strong></p>
 <p><em>Tier-1 Anthropic (free / starter, ~5 RPM Sonnet):</em></p>
 <pre class="jsonc"><code>&quot;rate_limit&quot;: { &quot;initial_concurrency_probe&quot;: 1, &quot;max_concurrency&quot;: 4 }</code></pre>
@@ -724,9 +788,17 @@ tokens):</em></p>
     &quot;request_budget&quot;: {
         &quot;per_1k_output_token_seconds&quot;: 15.0,
         &quot;min_seconds&quot;: 120.0,
-        &quot;max_seconds&quot;: 1200.0
+        &quot;max_seconds&quot;: 3600.0
     }
 }</code></pre>
+<p><em>Local serializing backend (ollama, llama.cpp, vLLM single-GPU) —
+no extra knobs needed:</em> the default <code>max_concurrency: 48</code>
+multiplier in the budget formula automatically gives each request enough
+wall-clock to clear a full queue. If your hardware can sustain higher
+concurrent throughput (e.g. <code>OLLAMA_NUM_PARALLEL=8</code>), lower
+<code>max_concurrency</code> to a value <code>j9t</code> won’t exceed
+simultaneously — the budget shrinks proportionally and you get faster
+hung-request detection.</p>
 <p><strong>Verifying tuning</strong> —
 <code>GET /api/debug/signals</code> (debug builds only) exposes
 per-<code>(host, modelFamily)</code> controller state at
@@ -735,30 +807,18 @@ last 429, last observation (remaining requests / tokens, reset times),
 last consumed input/output tokens. Use this to confirm the controller is
 doing what you expect before scaling up.</p>
 <h2 id="environment">ENVIRONMENT</h2>
-<ul>
-<li><strong><code>OPENAI_API_KEY</code></strong> — Bootstrapping
-fallback. If no encrypted keys file is found and this variable is set,
-JarvisAgent creates a single <code>openai</code> provider entry using
-the key value. This is a convenience for simple single-provider setups;
-encrypt keys as soon as practical.</li>
-</ul>
-<p>The master password for <code>keys.json.enc</code> and
-<code>mcp_keys.json.enc</code> is supplied <strong>only</strong> at
-runtime via the dashboard login flow or
-<code>POST /api/settings/keys/unlock</code>. There is no
-environment-variable shortcut — the password is held exclusively in
-<code>mlock()</code>-protected memory (<code>SecureString</code>) and
-never lands in process listings, <code>docker inspect</code>, or crash
+<p>JarvisAgent reads <strong>no credentials from the
+environment</strong>. Provider keys come exclusively from the encrypted
+<code>keys.json.enc</code>, and the master password is supplied
+<strong>only</strong> at runtime via the dashboard login flow or
+<code>POST /api/settings/keys/unlock</code> — there is no env-var
+shortcut for either. An env-var key would sit in plaintext in the
+process environment (readable via <code>/proc/PID/environ</code>,
+<code>docker inspect</code>, or a crash dump), which is exactly the
+unsecured exposure the encrypted keystore exists to prevent. The master
+password is held exclusively in <code>mlock()</code>-protected memory
+(<code>SecureString</code>) and never lands in process listings or core
 dumps.</p>
-<p><strong>API key priority order:</strong></p>
-<ol type="1">
-<li>Encrypted keys file (<code>keys.json.enc</code>) — unlocked at
-runtime via dashboard login or
-<code>POST /api/settings/keys/unlock</code>.</li>
-<li>Plaintext keys file (<code>keys.json</code>) — development fallback
-only.</li>
-<li><code>OPENAI_API_KEY</code> environment variable.</li>
-</ol>
 <h2 id="first-steps-after-restart">FIRST STEPS AFTER RESTART</h2>
 <p>Every time JarvisAgent starts (cold boot,
 <code>systemctl restart</code>, container restart), the encrypted key
@@ -961,10 +1021,18 @@ restart required. The MCP <code>list_scripts</code> tool and
 with its metadata; agents submitting adhoc JCWFs can reference
 it.</p></li>
 </ol>
-<p>Scripts without the <code>@jarvis-script</code> marker still appear
-in the catalog but are flagged — useful for flagging internal helper
-modules (e.g. <code>scripts/helpers/*.py</code>) that agents shouldn’t
-reference directly as task entries.</p>
+<p>The <code>@jarvis-script</code> marker is what registers a file.
+Files in <code>scripts/</code> without the marker are not catalogued and
+cannot be referenced by workflow tasks — for <strong>Python</strong>
+tasks specifically, the runtime allowlist in <code>PythonEngine</code>
+rejects unregistered modules at import time, so an internal helper that
+lacks the marker is invisible both to the catalog and to the import
+path. To keep helper modules importable by registered scripts but hidden
+from agents, place them in a sub-package (<code>scripts/helpers/</code>)
+and import them only from registered scripts above —
+<code>scripts/helpers/*.py</code> reached via relative import inside a
+registered <code>scripts/foo.py</code> works without needing its own
+marker.</p>
 <h3 id="im-an-admin-how-do-agents-use-adhoc-workflows">I’m an admin —
 how do agents use adhoc workflows?</h3>
 <p>An authorised agent (MCP key with <code>adhoc_enabled</code>, role
@@ -1287,9 +1355,8 @@ responsibilities, see <strong>doc/cyber security.md</strong>.</p>
 <li><strong><code>config.json</code></strong> — Main configuration file
 (must exist in the working directory).</li>
 <li><strong><code>keys.json.enc</code></strong> — Encrypted AI provider
-credentials (AES-256-GCM, master-password protected).</li>
-<li><strong><code>keys.json</code></strong> — Plaintext API keys
-(development fallback, gitignored).</li>
+credentials (AES-256-GCM, master-password protected). The only on-disk
+credential store; there is no plaintext-keystore path.</li>
 <li><strong><code>mcp_keys.json.enc</code></strong> — Encrypted MCP API
 key store (same master password as <code>keys.json.enc</code>; only
 SHA-256 hashes of keys are persisted).</li>

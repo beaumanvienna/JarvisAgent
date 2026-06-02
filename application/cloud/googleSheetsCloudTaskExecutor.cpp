@@ -296,6 +296,7 @@ namespace AIAssistant
         {
             taskState.m_LastErrorMessage = "Failed to parse sheets task params JSON";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
 
@@ -329,6 +330,7 @@ namespace AIAssistant
         {
             taskState.m_LastErrorMessage = "Missing 'spreadsheet_id' (in task params or connection)";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
 
@@ -337,6 +339,7 @@ namespace AIAssistant
         {
             taskState.m_LastErrorMessage = "Missing required 'range' in sheets task params";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
 
@@ -348,6 +351,7 @@ namespace AIAssistant
             taskState.m_LastErrorMessage = "Invalid Google Sheets spreadsheet_id: must be 1-128 chars, "
                                            "[A-Za-z0-9_-] only";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             LOG_APP_ERROR("[sheets] task='{}' workflow='{}' run='{}': invalid spreadsheet_id (length={})",
                           taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId, spreadsheetId.size());
             ConnectorHttp::IncrementInputValidationRejection();
@@ -360,6 +364,7 @@ namespace AIAssistant
             taskState.m_LastErrorMessage = "Invalid Google Sheets range: must be 1-256 chars, A1-notation chars only "
                                            "([A-Za-z0-9!:_$.\\- ' ])";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             LOG_APP_ERROR("[sheets] task='{}' workflow='{}' run='{}': invalid range (length={})",
                           taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId, range.size());
             ConnectorHttp::IncrementInputValidationRejection();
@@ -401,6 +406,7 @@ namespace AIAssistant
                 taskState.m_LastErrorMessage =
                     "sheets_read: output_file is invalid or escapes the working directory";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 LOG_APP_ERROR("[sheets] task='{}' workflow='{}' run='{}': output_file rejected",
                               taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId);
                 return false;
@@ -413,6 +419,7 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "Google Sheets read request failed";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::NetworkError;
                 return false;
             }
 
@@ -424,6 +431,9 @@ namespace AIAssistant
                     taskState.m_LastErrorMessage += ": " + responseBody;
                 }
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = (httpCode == 401 || httpCode == 403)
+                                                  ? ConnectorErrorCode::AuthFailure
+                                                  : ConnectorErrorCode::HttpError;
                 return false;
             }
 
@@ -526,6 +536,7 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "sheets_write requires 'input_file'";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 return false;
             }
 
@@ -537,6 +548,7 @@ namespace AIAssistant
                 taskState.m_LastErrorMessage =
                     "sheets_write: input_file is invalid or escapes the working directory";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 LOG_APP_ERROR("[sheets] task='{}' workflow='{}' run='{}': input_file rejected",
                               taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId);
                 return false;
@@ -552,6 +564,7 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "Cannot open input file: " + inputPath.string();
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
                 return false;
             }
 
@@ -592,6 +605,7 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "Google Sheets write request failed";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = ConnectorErrorCode::NetworkError;
                 return false;
             }
 
@@ -603,6 +617,9 @@ namespace AIAssistant
                     taskState.m_LastErrorMessage += ": " + responseBody;
                 }
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastFailureCode = (httpCode == 401 || httpCode == 403)
+                                                  ? ConnectorErrorCode::AuthFailure
+                                                  : ConnectorErrorCode::HttpError;
                 return false;
             }
 
@@ -617,6 +634,7 @@ namespace AIAssistant
             taskState.m_LastErrorMessage =
                 "Unknown sheets operation '" + operation + "'. Valid: read, write";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastFailureCode = ConnectorErrorCode::InvalidConfig;
             return false;
         }
 

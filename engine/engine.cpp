@@ -55,7 +55,7 @@ static void PrintHelp()
               << "Before starting:\n"
               << "  - Review and adjust config.json in the working directory\n"
               << "  - Install dependencies as described in README.md\n"
-              << "  - Provide API keys via keys.json.enc, keys.json, or OPENAI_API_KEY env var\n"
+              << "  - Provide API keys in the encrypted keys.json.enc and unlock it at runtime via the dashboard or POST /api/settings/keys/unlock\n"
               << "\n"
               << "Python virtual environment:\n"
               << "  Packaged installs create a .venv/ in the working directory.\n"
@@ -152,76 +152,33 @@ int engine(int argc, char* argv[])
         return EXIT_FAILURE;
     }
 
-    // Initialize key manager: try encrypted keys file, then plaintext, then env var fallback
+    // Initialize key manager.  Credentials load exclusively from the AES-256-GCM
+    // keys.json.enc, unlocked at runtime via POST /api/settings/keys/unlock.  There is
+    // no plaintext-keystore path and no env-var credential path in any edition — every
+    // on-disk credential is encrypted at rest (per doc/cyber security.md).
     {
         auto& keyManager = Core::g_Core->GetKeyManager();
         std::filesystem::path const keysFilePathAbsolute =
             Core::g_Core->GetLaunchCWDAbsolute() / engineConfig.m_KeysFilePath;
-        std::filesystem::path const plaintextKeysPathAbsolute = Core::g_Core->GetLaunchCWDAbsolute() / "keys.json";
 
-        // Always store the encrypted keys file path for potential runtime unlock
         keyManager.SetKeysFilePath(keysFilePathAbsolute);
-
-        bool keysLoaded = false;
 
         if (std::filesystem::exists(keysFilePathAbsolute))
         {
             // The master password is supplied at runtime via POST /api/settings/keys/unlock
-            // (see doc/cyber security.md §"Master password after restart"). There is no
-            // environment-variable auto-unlock path — that was removed so the password is
-            // held exclusively in mlock()-protected memory (SecureString) and never leaks
-            // through env vars, process listings, or docker inspect.
+            // (see doc/cyber security.md §"Master password after restart").  It is held
+            // exclusively in mlock()-protected memory (SecureString) and never read from an
+            // env var, so it never leaks through process listings or docker inspect.
             keyManager.SetKeyLoadStatus(KeyManager::KeyLoadStatus::NoPassword);
             LOG_CORE_INFO("KeyManager: '{}' present — awaiting master password via "
                           "POST /api/settings/keys/unlock",
                           keysFilePathAbsolute.string());
         }
-
-#ifdef J9T_STUDIO
-        // Try plaintext keys.json — Studio editions only.  Production
-        // Engine builds strip both the call site and the declaration so a
-        // plaintext keystore can't be loaded even if one is present on
-        // disk.
-        if (!keysLoaded && std::filesystem::exists(plaintextKeysPathAbsolute))
+        else
         {
-            keysLoaded = keyManager.LoadPlaintext(plaintextKeysPathAbsolute);
-            if (keysLoaded)
-            {
-                keyManager.SetKeyLoadStatus(KeyManager::KeyLoadStatus::Ok);
-            }
-        }
-#endif
-
-        // Fall back to OPENAI_API_KEY environment variable (bootstrap convenience).
-        // We only consider this fallback when there is NO encrypted keys file at
-        // all — otherwise the env-var-loaded provider would silently mask the
-        // sealed-store state, and the dashboard's status endpoint would report
-        // "ok" while the MCP key store is still locked (breaking the master-
-        // password prompt flow and leaving every MCP auth request rejected).
-        if (!keysLoaded && !std::filesystem::exists(keysFilePathAbsolute))
-        {
-            std::string endpoint;
-            std::string model;
-            std::string apiType;
-
-            if (engineConfig.m_ApiIndex < engineConfig.m_ApiInterfaces.size())
-            {
-                auto const& iface = engineConfig.m_ApiInterfaces[engineConfig.m_ApiIndex];
-                endpoint = iface.m_Url;
-                model = iface.m_Model;
-                apiType = (iface.m_InterfaceType == ConfigParser::EngineConfig::InterfaceType::API1) ? "API1" : "API2";
-            }
-
-            keysLoaded = keyManager.LoadFromEnvironment(endpoint, model, apiType);
-            if (keysLoaded)
-            {
-                keyManager.SetKeyLoadStatus(KeyManager::KeyLoadStatus::Ok);
-            }
-        }
-
-        if (!keysLoaded && keyManager.GetKeyLoadStatus() != KeyManager::KeyLoadStatus::NoPassword)
-        {
-            LOG_CORE_WARN("KeyManager: no API keys configured — AI tasks will fail at dispatch time");
+            LOG_CORE_WARN("KeyManager: no '{}' present — AI tasks will fail at dispatch time until a "
+                          "keystore is created and unlocked",
+                          keysFilePathAbsolute.string());
         }
     }
 

@@ -37,11 +37,39 @@ namespace AIAssistant
             case ConnectorErrorCode::NetworkError:       return "network_error";
             case ConnectorErrorCode::AuthFailure:        return "auth_failure";
             case ConnectorErrorCode::HttpError:          return "http_error";
+            case ConnectorErrorCode::ValueOutOfRange:    return "value_out_of_range";
             case ConnectorErrorCode::UnknownError:       return "unknown_error";
         }
         // Reachable only if a new ConnectorErrorCode is added without extending
         // the switch above.  -Wswitch catches it at compile time on most builds;
         // this fallback is the runtime backstop for the rest.
         return "unhandled_code";
+    }
+
+    bool IsConnectionFailure(ConnectorErrorCode code)
+    {
+        switch (code)
+        {
+            case ConnectorErrorCode::InvalidConfig:
+            case ConnectorErrorCode::InvalidEndpoint:
+            case ConnectorErrorCode::CredentialMissing:
+            case ConnectorErrorCode::CredentialInvalid:
+            case ConnectorErrorCode::OAuthError:
+            case ConnectorErrorCode::NetworkError:
+            case ConnectorErrorCode::AuthFailure:
+            case ConnectorErrorCode::HttpError:
+                return true;
+            case ConnectorErrorCode::ValueOutOfRange:
+                return false;
+            case ConnectorErrorCode::UnknownError:
+                // Conservative default — a bare `UnknownError` (no specific
+                // classification by the emitter) is treated as connection-class
+                // so a regression in code-tagging doesn't silently bypass the
+                // breaker.  Better to spuriously open than to fail to detect a
+                // real connection-health degradation.
+                return true;
+        }
+        // Reachable only on a new variant — same -Wswitch posture as Describe.
+        return true;
     }
 } // namespace AIAssistant
