@@ -3,7 +3,7 @@
 §14 Tier B hermetic test — IRateLimitStrategy::Get() dispatch table.
 
 Asserts that each InterfaceType maps to the correct strategy in the switch
-at `engine/curlWrapper/rateLimitStrategy.cpp:377`.  Drives every InterfaceType
+at `code/backend/engine/curlWrapper/rateLimitStrategy.cpp:377`.  Drives every InterfaceType
 through POST /api/debug/parse-rate-limit-headers (already shipped for Tier A)
 with two distinct header shapes — OpenAI-style and Anthropic-style — and
 verifies each one is parsed only by the strategy that owns its shape.

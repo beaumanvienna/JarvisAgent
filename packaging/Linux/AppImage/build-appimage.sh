@@ -47,12 +47,12 @@ if [[ "$DRY_RUN" == false ]]; then
     make -j"$(nproc)" config=release
 
     echo "==> Building React dashboard ..."
-    cd "$REPO_ROOT/dashboard/ui"
+    cd "$REPO_ROOT/code/frontend/dashboard/ui"
     npm install
     npm run build
 
     echo "==> Building React workflow editor ..."
-    cd "$REPO_ROOT/workflow-editor/ui"
+    cd "$REPO_ROOT/code/frontend/workflow-editor/ui"
     npm install
     npm run build
 fi
@@ -74,18 +74,18 @@ for bin in jarvisAgent-studio jarvisAgent-engine; do
 done
 
 # React UIs
-if [[ -d "$REPO_ROOT/dashboard/ui/dist" ]]; then
+if [[ -d "$REPO_ROOT/code/frontend/dashboard/ui/dist" ]]; then
     mkdir -p "$SHARE/dashboard/ui"
-    cp -r "$REPO_ROOT/dashboard/ui/dist" "$SHARE/dashboard/ui/dist"
+    cp -r "$REPO_ROOT/code/frontend/dashboard/ui/dist" "$SHARE/dashboard/ui/dist"
 else
-    echo "WARNING: dashboard/ui/dist not found (expected in dry-run)"
+    echo "WARNING: code/frontend/dashboard/ui/dist not found (expected in dry-run)"
 fi
 
-if [[ -d "$REPO_ROOT/workflow-editor/ui/dist" ]]; then
+if [[ -d "$REPO_ROOT/code/frontend/workflow-editor/ui/dist" ]]; then
     mkdir -p "$SHARE/workflow-editor/ui"
-    cp -r "$REPO_ROOT/workflow-editor/ui/dist" "$SHARE/workflow-editor/ui/dist"
+    cp -r "$REPO_ROOT/code/frontend/workflow-editor/ui/dist" "$SHARE/workflow-editor/ui/dist"
 else
-    echo "WARNING: workflow-editor/ui/dist not found (expected in dry-run)"
+    echo "WARNING: code/frontend/workflow-editor/ui/dist not found (expected in dry-run)"
 fi
 
 # Scripts (excluding __pycache__)

@@ -37,29 +37,37 @@ node_modules/
 
 compile_commands.json
 .cache/
-vendor/curl/lib/curl_config.h
+code/vendor/curl/lib/curl_config.h
 
 # Generated at build time by the Premake prebuild step.
 # Source of truth: doc/jcwf.schema.json and doc/jcwf_generation_guide.md.
-application/json/*.generated.h
-log/*
+code/backend/application/json/*.generated.h
 test/log.txt
 *.tsbuildinfo
 .DS_Store
-dashboard/ui/vite.config.d.ts
-dashboard/ui/vite.config.js
+code/frontend/dashboard/ui/vite.config.d.ts
+code/frontend/dashboard/ui/vite.config.js
 .vs
 *.sln
 *.vcxproj
 *.vcxproj.filters
 *.vcxproj.user
-vendor/curl/bin
-vendor/curl/bin-int
-vendor/openssl/bin
-vendor/openssl/bin-int
-vendor/pdcursesmod/bin
-vendor/pdcursesmod/bin-int
+code/vendor/curl/bin
+code/vendor/curl/bin-int
+code/vendor/openssl/bin
+code/vendor/openssl/bin-int
+code/vendor/pdcursesmod/bin
+code/vendor/pdcursesmod/bin-int
 .venv
 .claude/
 connections.json
-_adhoc
+
+# Runtime-owned folders — created on demand at startup (queue/workflows by
+# ConfigChecker, assistant/sessions by the assistant subsystem, .npm-tools by
+# jarvisagent.sh). Never tracked; never shown empty on GitHub.
+/queue/
+/workflows/
+/assistant/
+/log/
+/.npm-tools/
+/_adhoc/

@@ -1088,7 +1088,7 @@ The orchestrator or UI MAY expose a “clean” action that simply runs this tas
 
 #### 3.3.7 AI Provider Configuration
 
-`ai_call` tasks target a named **provider** from JarvisAgent's provider registry. The provider registry maps logical names to connection details (endpoint URL, API key, default model, API type). Providers are configured outside the JCWF file — either via JarvisAgent's encrypted key store (`keys.json.enc`) or the Settings UI. See `engine/keys.md` for the key management design.
+`ai_call` tasks target a named **provider** from JarvisAgent's provider registry. The provider registry maps logical names to connection details (endpoint URL, API key, default model, API type). Providers are configured outside the JCWF file — either via JarvisAgent's encrypted key store (`keys.json.enc`) or the Settings UI. See `code/backend/engine/keys.md` for the key management design.
 
 **Resolution order** for `ai_call` tasks:
 
@@ -2379,7 +2379,7 @@ The JCWF JSON Schema lives at **[`doc/jcwf.schema.json`](jcwf.schema.json)** (Dr
 
 It is intentionally a pragmatic subset — sufficient for the editor's generate/validate flow and for schema-enforced output (`output_schema` on `ai_call`, §3.3.6). The runtime `WorkflowValidator` handles semantic checks that go beyond JSON Schema's reach (cycle detection, dataflow slot matching, path resolution).
 
-The schema is compiled into the binary at build time via the Premake prebuild step (`tools/generateEmbeddedHeaders.py` → `application/json/jcwfSchema.generated.h`), so runtime consumers never read it from disk.
+The schema is compiled into the binary at build time via the Premake prebuild step (`premake5.lua`'s `embedAsHeader` → `code/backend/application/json/jcwfSchema.generated.h`), so runtime consumers never read it from disk.
 
 ---
 
@@ -2387,7 +2387,7 @@ The schema is compiled into the binary at build time via the Premake prebuild st
 
 - `shell` tasks can be dangerous; JarvisAgent SHOULD provide configuration flags to disable or restrict them and MUST enforce the `scripts/` prefix rule.  
 - `ai_call` tasks send data to external services; sensitive data MUST be handled carefully.  
-- **API keys** MUST NOT be stored in JCWF files or `config.json`. They are managed in JarvisAgent's encrypted key store (`keys.json.enc`, AES-256-GCM with a master password) or provided via environment variables. See `engine/keys.md` for the key management design.  
+- **API keys** MUST NOT be stored in JCWF files or `config.json`. They are managed in JarvisAgent's encrypted key store (`keys.json.enc`, AES-256-GCM with a master password) or provided via environment variables. See `code/backend/engine/keys.md` for the key management design.  
 - JCWF files SHOULD be sourced from trusted locations; tampering can change automation behavior.  
 - Structure-based iteration over external documents and XLS files SHOULD validate inputs to avoid unexpected expansion or injection.
 - Filter nodes with `max_items: 0` (no limit) SHOULD be used with caution; unbounded expansion can exhaust system resources.
@@ -2585,7 +2585,7 @@ This keeps queue artifacts isolated from workflow-owned artifacts and makes debu
 
 **Policy:** _Only AI tasks may write into the queue folder._
 
-This is a **JarvisAgent enforcement rule (engine/runtime)**, not a JCWF spec rule. JCWF merely provides file paths; JarvisAgent decides whether a task is allowed to create/write a given path.
+This is a **JarvisAgent enforcement rule (code/backend/engine/runtime)**, not a JCWF spec rule. JCWF merely provides file paths; JarvisAgent decides whether a task is allowed to create/write a given path.
 
 ### Scripts folder policy (JarvisAgent runtime)
 

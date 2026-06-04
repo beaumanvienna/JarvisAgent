@@ -40,10 +40,10 @@ j9t accepts exactly three auth mechanisms; there is no legacy bearer-token fallb
 
 | Method | Path | Edition | Description |
 |--------|------|---------|-------------|
-| GET | `/` | Both | Serves the dashboard (React SPA from `dashboard/ui/dist`). |
-| GET | `/dash-assets/<path>` | Both | Serves Vite-built static assets for the dashboard. Path is canonicalised under `dashboard/ui/dist`; `..`-traversal returns `400 Bad Request`. |
-| GET | `/editor` | Studio | Serves the Workflow Editor (React SPA from `workflow-editor/ui/dist`). |
-| GET | `/assets/<path>` | Studio | Serves Vite-built static assets for the editor. Path is canonicalised under `workflow-editor/ui/dist/assets`; `..`-traversal returns `400 Bad Request`. |
+| GET | `/` | Both | Serves the dashboard (React SPA from `code/frontend/dashboard/ui/dist`). |
+| GET | `/dash-assets/<path>` | Both | Serves Vite-built static assets for the dashboard. Path is canonicalised under `code/frontend/dashboard/ui/dist`; `..`-traversal returns `400 Bad Request`. |
+| GET | `/editor` | Studio | Serves the Workflow Editor (React SPA from `code/frontend/workflow-editor/ui/dist`). |
+| GET | `/assets/<path>` | Studio | Serves Vite-built static assets for the editor. Path is canonicalised under `code/frontend/workflow-editor/ui/dist/assets`; `..`-traversal returns `400 Bad Request`. |
 | GET | `/editor/<path>` | Studio | SPA fallback — serves the editor index for any sub-route. |
 
 ---

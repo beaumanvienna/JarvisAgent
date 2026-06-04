@@ -46,7 +46,7 @@ build() {
     make -j$(nproc) config=release
 
     # Build React dashboard
-    cd dashboard/ui
+    cd code/frontend/dashboard/ui
     npm install
     npm run build
 
@@ -68,10 +68,10 @@ package() {
 
     # ---- React UIs (pre-built dist/) ----
     install -dm755 "$_instdir/dashboard/ui"
-    cp -r dashboard/ui/dist "$_instdir/dashboard/ui/dist"
+    cp -r code/frontend/dashboard/ui/dist "$_instdir/dashboard/ui/dist"
 
     install -dm755 "$_instdir/workflow-editor/ui"
-    cp -r workflow-editor/ui/dist "$_instdir/workflow-editor/ui/dist"
+    cp -r code/frontend/workflow-editor/ui/dist "$_instdir/workflow-editor/ui/dist"
 
     # ---- Scripts (shell + Python, excluding __pycache__) ----
     cp -r scripts "$_instdir/scripts"

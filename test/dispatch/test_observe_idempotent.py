@@ -2,7 +2,7 @@
 """
 §14 Tier B hermetic test — RateLimitController::Observe() idempotent merge.
 
-Asserts the contract documented in `engine/curlWrapper/rateLimitController.h`:
+Asserts the contract documented in `code/backend/engine/curlWrapper/rateLimitController.h`:
 
     > MUST be idempotent by replacement: a known field overwrites the prior
     > value, an unknown field preserves it.  Multiple Observe() calls per

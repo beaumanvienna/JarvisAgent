@@ -7,11 +7,11 @@ Files: *
 Copyright: 2024-2026 JC <beaumanvienna@gmail.com>
 License: GPL-3.0+
 
-Files: vendor/openssl/*
+Files: code/vendor/openssl/*
 Copyright: 1998-2024 The OpenSSL Project Authors
 License: Apache-2.0
 
-Files: vendor/pdcursesmod/*
+Files: code/vendor/pdcursesmod/*
 Copyright: Public Domain
 License: public-domain
 

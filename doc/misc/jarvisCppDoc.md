@@ -1,6 +1,6 @@
 # jarvisCppDocu — header → cpp pairing review
 
-Walked `engine/` and `application/` — found 141 headers and 121 cpp files (excluding the two generated headers under `application/json/`).
+Walked `code/backend/engine/` and `code/backend/application/` — found 141 headers and 121 cpp files (excluding the two generated headers under `code/backend/application/json/`).
 Pairing rule: a header pairs with the .cpp of the same stem in the same directory.  Additional files in a row's second column are bundled into the same ai_call so the auditor sees the base class or critical helper alongside the primary file (without bundling, an audit of `azureBlobConnector.cpp` would not see the `ICloudConnector` contract it implements; an audit of `pythonTaskExecutor.cpp` would not see the `ConfineUnderProjectRoot` security gate it depends on).
 
 | Header (.h) | Paired cpp (same dir, same stem) |
@@ -45,7 +45,6 @@ Pairing rule: a header pairs with the .cpp of the same stem in the same director
 | `application/cloud/redmineConnector.h` | `application/cloud/redmineConnector.cpp`, `application/cloud/cloudConnector.h` |
 | `application/cloud/s3CloudTaskExecutor.h` | `application/cloud/s3CloudTaskExecutor.cpp`, `application/cloud/cloudTaskExecutor.h` |
 | `application/cloud/s3Connector.h` | `application/cloud/s3Connector.cpp`, `application/cloud/cloudConnector.h` |
-| `application/cloud/sigV4Signer.h` | `application/cloud/sigV4Signer.cpp` |
 | `application/cloud/slackCloudTaskExecutor.h` | `application/cloud/slackCloudTaskExecutor.cpp`, `application/cloud/cloudTaskExecutor.h` |
 | `application/cloud/slackConnector.h` | `application/cloud/slackConnector.cpp`, `application/cloud/cloudConnector.h` |
 | `application/cloud/snowflakeCloudTaskExecutor.h` | `application/cloud/snowflakeCloudTaskExecutor.cpp`, `application/cloud/cloudTaskExecutor.h` |

@@ -59,7 +59,7 @@ Empirically measured (140 ai_call tasks):
 | `claude-opus-4-7` | ~45–60 min | ~5–10× higher |
 | `gpt-4.1` | ~5–8 min | lowest |
 
-Numbers vary with how chatty the model is on a given file. The dispatcher's adaptive rate-limit controller (`engine/curlWrapper/rateLimitController`) keeps concurrency at the provider's safe ceiling, so the run won't melt under tier-1 quotas.
+Numbers vary with how chatty the model is on a given file. The dispatcher's adaptive rate-limit controller (`code/backend/engine/curlWrapper/rateLimitController`) keeps concurrency at the provider's safe ceiling, so the run won't melt under tier-1 quotas.
 
 ## Reading the output
 

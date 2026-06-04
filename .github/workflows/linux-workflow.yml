@@ -88,13 +88,13 @@ jobs:
 
       - name: Build React dashboard
         run: |
-          cd dashboard/ui
+          cd code/frontend/dashboard/ui
           npm install
           npm run build
 
       - name: Build React workflow editor
         run: |
-          cd workflow-editor/ui
+          cd code/frontend/workflow-editor/ui
           npm install
           npm run build
 
@@ -105,8 +105,8 @@ jobs:
           path: |
             bin/Release/jarvisAgent-studio
             bin/Release/jarvisAgent-engine
-            dashboard/ui/dist/
-            workflow-editor/ui/dist/
+            code/frontend/dashboard/ui/dist/
+            code/frontend/workflow-editor/ui/dist/
 
   package-deb:
     needs: build-linux
@@ -342,8 +342,8 @@ jobs:
 
       - name: Pre-build React UIs
         run: |
-          cd dashboard/ui && npm install && npm run build && cd ../..
-          cd workflow-editor/ui && npm install && npm run build
+          cd code/frontend/dashboard/ui && npm install && npm run build && cd ../../../..
+          cd code/frontend/workflow-editor/ui && npm install && npm run build
 
       - name: Patch manifest for local source
         run: |

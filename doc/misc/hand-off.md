@@ -15,6 +15,72 @@ Keep entries self-contained — a fresh-context Claude should be able to read ju
 
 ---
 
+## 2026-06-03 (repo-layout hygiene — `code/` subtree reorg, single big working-tree change) → next session
+
+Executed the full root-folder-cleanup refactor planned in `doc/misc/repo-layout refactor.md`.  **One uncommitted working-tree change** (JC's call: one big reorg commit); JC commits.  4292 files changed, 4235 git-rename-detected.
+
+### What landed
+- **All source under `code/`**: `code/backend/{application,engine}`, `code/frontend/{dashboard,workflow-editor,shared-ui}`, `code/mcp`, `code/vendor`.  Root is now minimal (`certs .clangd .clang-format CLAUDE.md code config.json doc .dockerignore .editorconfig example .github .gitignore integration jarvisagent.sh LICENSE packaging premake5.lua README.md scripts test todo.md .vscode`).
+- **Backend move = 0 C++ source edits** — every include is relative-to-includedir, so only `premake5.lua` `files`/`removefiles`/`includedirs`/`embedAsHeader` retargeted.  **Frontend move = 0 config edits** — `@shared = ../../shared-ui` stays valid (the three UIs stay siblings under `code/frontend/`).  **Vendor move = 0 vendor-script edits** — the six `code/vendor/*.lua` are self-relative; premake's `include` runs them in their own dir context (verified: curl_config copy works).
+- **Static-serve resolver** (`WebServerHelpers::ResolveUiDistRoot`, used by the 4 dashboard/editor serve sites): tries flat `<ui>/ui/dist` (installed layout — packaging install dests kept flat) then `code/frontend/<ui>/ui/dist` (dev layout).  Decouples runtime from source layout.
+- **Runtime folders untracked** (`queue/ workflows/ log/ assistant/ .npm-tools/ _adhoc/` → `.gitignore`; per-dir `.gitignore` placeholders + `.npm-tools/package.json` stub deleted).  Prereq fix: `ConfigChecker::Check` now **creates** `queue/`+`workflows/` on demand (ensure→create→re-validate) — previously it rejected a missing dir, so a fresh/cleaned checkout failed config-parse with "queue folder is not a directory".  Confirmed live by JC earlier.
+- **Root cleanup**: `DEVELOPMENT.md`+`INSTALL.md` → `doc/`; Docker cluster (`Dockerfile`, `docker-compose.example.yml`, `docker-entrypoint.sh`) → `packaging/Docker/` (`.dockerignore` stays at root — Docker reads it only from context root; CI `docker-publish.yml` got `file: ./packaging/Docker/Dockerfile`; Dockerfile COPYs retargeted, install layout flat); `tools/` dissolved (`clang-format.sh` → `scripts/`, find-paths retargeted; 4 unused scripts deleted); `jarvis_agent.example.env` deleted (stale env-cred path).  `todo.md` **stays at root** (JC's call).
+- **Reference sweep**: a throwaway `scripts/check_path_refs.py` (MIME-aware straggler checker + `--fix`) drove the sweep to **0 stragglers**, then was deleted (job done).  Auto-fixed doc/comment path refs across CLAUDE.md + doc/* + source-tree `.md`/comments + test `.py`.  Manually fixed packaging (Ubuntu deb/launchpad/ppa + `debian/rules`+`copyright` — source→code/, binary-install dests flat; ppa/launchpad source-tarballs mirror repo so both sides → code/).  Corrected 3 stale `tools/generateEmbeddedHeaders.py` refs (the embed is `premake5.lua`'s `embedAsHeader`).
+
+### Three drive-by fixes (separate from the move, same working tree)
+1. **`ConfigChecker::Check` creates the `queue/`+`workflows/` roots on demand** (ensure→create→re-validate) — the prereq that makes untracking them safe; previously a missing dir failed config-parse.  Confirmed live (JC deleted both, they auto-regenerated).
+2. **AI `TestInterface` probe timeout 30 s → 90 s** (`aiRequestPool.cpp` `kTestTimeoutMs`).  A local Ollama/vLLM endpoint cold-loading a large model (a 32B spilling to CPU on a 16 GB GPU) blew past 30 s and false-failed a healthy interface; shipped users run slower HW than the dev box.  Now `qwen2.5-coder:7b/32b` test online.
+3. **`premake5.lua` clean block no longer touches `node_modules`** — premake's `os.rmdir` can't delete symlink-containing trees (npm `.bin/*`), so it deleted *partway* and left a broken `node_modules` that failed `npm run build`.  Clean now wipes only `dist/`; the (gitignored) dep cache survives so a post-clean `npm run build` needs no reinstall.
+
+### What's verified (refactor fully validated end-to-end)
+- **All 4 binaries** build + link warning-free — studio D/R + engine D/R, including a **from-scratch `premake5 clean` build** (full vendor recompile, 0 warnings) JC + I both ran.
+- **Dashboard + editor + mcp** clean `npm install` + build (`@shared` resolves at new location; the resolver's "UI not built → run `cd code/frontend/...`" message is correct — JC pasted it verbatim and it worked).
+- **AI backends online** (incl. the 90 s timeout fix), **13/14 cloud connectors** online (Snowflake = expired trial, not an artifact).
+- **JCWF runtime execution** — JC ran several JCWFs on API index 11 (qwen-7b), all successful.  Exercises DAG scheduling, `ai_call` dispatch, queue materialization, AI request pool, output writeback from the relocated tree.
+- `check_path_refs.py` = 0 stragglers.  `.mcp.json` updated to `code/mcp/dist/index.js`.  `compile_commands.json` regenerated via Bear (backend TUs, code/ paths).
+- **Full REST-API regression sweep — green.**  `test_auth_mcp` 103/103, `test_negative_paths` 55, `test_url_policy` 27, `test_adhoc_slug` 14, `test_malformed_configs` 56, `test_keymanager_caps` 4, `test_edition_contract` 49, `test_assistant`(non-AI) 28, `test_s3_roundtrip`, `test_bedrock_sigv4` KAT, the whole `test/dispatch/` suite (mock-errors api1–6, hermetic, envelope, relaxed-env, cross-workflow, markitdown, ws-ai-call-failed 8/8, both UTF-8 TUI-stress tests), **and** the 9 `/api/debug/signals` tests (aimd-cap, curlopt-timeout, tcp-keepalive, chunking-fanout, size-aware-budget, quota-key-isolation, rate-limit-observation, token-bucket-mirror, output-schema-roundtrip) — the last needed a **debug** build (signals are debug-only); ran them against `bin/Debug/jarvisAgent-studio`.  **TUI confirmed by eye** under the malformed-UTF-8 stress test (the one surface no automated check covers).  Not run: 3 `*_live.py` (cloud cost) + `test_email_watch_persistence` (drives server restart-cycles — run standalone; a `timeout`-wrapped run SIGTERMs it past its `finally`, orphaning the j9t it launched via `jarvisagent.sh` → don't `timeout`-wrap it).
+- **Two more refactor stragglers the literal-slash checker missed** (component-style paths) — both fixed: `test_schema_covers_parser.py` built the parser path from `"application"` string components (→ `"code","backend","application"`); `docker-compose.example.yml` `build: ./mcp` (→ `./code/mcp`).
+- **jarvisCppDocu/CyberSecAudit/SafetyAudit JCWFs regenerated** for the new tree: `buildJarvisCppDocu.py` `SOURCE_PREFIX` → `../../../code/backend/` (single change covers application/ + engine/, both under code/backend/); table rows + task ids stay module-relative (clean folder names).  **Surfaced a pre-existing table-staleness bug**: `jarvisCppDoc.md` listed `application/cloud/sigV4Signer.{h,cpp}`, deleted in `c61e34c` (SigV4 consolidated into `engine/curlWrapper/awsSigV4`) — removed the dead row (144→143 tasks).  Live-validated: jarvisCppDocu ran on qwen-7b, tasks reading `code/backend/...` source and producing docu output.
+
+### Still open (low priority)
+- **Packaging untested at runtime** (Docker/deb/rpm/arch/flatpak/ppa) — paths retargeted but no build/install exercised; review before a release.
+- **jarvisCppDocu doc-gen pipeline** (`scripts/{combineDocumentation,buildJarvisCppDocu}.py` + `.jcwf` SOURCE_PREFIX/file-refs) intentionally NOT rewritten — JC-owned mapping; revisit when regenerating combined docs.
+- `doc/jarvisagent.{1,html}` path-substituted directly (consistent with `.md`); regenerate via pandoc if desired.
+
+---
+
+## 2026-06-01 (Part 7 — post-closeout: encrypted-only keystore, no-legacy doc sweep, portfolioDividendAnalysis grounding) → next session
+
+Follow-on the same day as the Sitting-16 closeout, after JC questioned a CLAUDE.md note.  Three threads, all committed in `c61e34c` ("pre-1_0_follow-ups, sitting 16 closeout + encrypted-only keystore") + pushed.
+
+### What landed
+
+1. **Encrypted-only keystore (cyber-sec-doc alignment).**  Surfaced while writing the #11 KeyManager-cap test: the Studio-only plaintext `keys.json` loader (`KeyManager::LoadPlaintext` + dead `SavePlaintext` + the `engine.cpp` `#ifdef J9T_STUDIO` block) AND the `OPENAI_API_KEY` env-var credential fallback (`LoadFromEnvironment`) both violated the "same cyber-sec across editions / no unsecured keys" posture in `doc/cyber security.md` (lines 9/95/105).  **Both purged** — `keys.json.enc` (runtime-unlocked) is now the *sole* credential source in every edition.  #11 test reworked to drive the caps on the **encrypted** path (`test_keymanager_caps.py` crafts a real `keys.json.enc` via the `JKEY` AES-256-GCM wire format — see gotcha).  New auto-memory `feedback_flag_cybersec_doc_violations` (TOP-TIER): cyber-sec-doc drift is a violation to remove, never normalize.
+2. **No-legacy doc sweep.**  Per `feedback_no_legacy`, removed "backward compatibility / Legacy / originally" framing from the official docs that described *removed* paths (keys.md, jarvisagent.{md,1,html}, cyber security.md) and reworded the same framing on *live* features (cloud-integration inline params, JCWF `environment` / per_item fan-out, api-endpoints offset-polling) to current-state descriptions — JC's call was keep-the-feature, drop-the-legacy-wording.  `doc/jarvisagent.1` + `.html` regenerated via `pandoc … -V pagetitle=jarvisagent` (the `.1` is hand-maintained, so it got a targeted edit, not a regen).
+3. **portfolioDividendAnalysis grounded on real data + bulletproof total.**  The run was failing on a 30 s timeout (`global.json defaults.timeout_ms: 30000`, removed → size-aware budget) AND producing ~2-yr-stale/hallucinated dividend figures (per the workflow's own §12).  Implemented §12.3: **Stage-0 `exportPlannerData`** (`scripts/export_dividends.py`) joins `port62pos.csv` with the sibling `planner` app's `tickers` table → `port62pos_enriched.csv` (live yield/per-share/price/AsOf); the per-item `ai_call` now **copies the authoritative numbers verbatim** (depends_on Stage-0).  Added **Stage-3 `stampPortfolioTotals`** (`scripts/portfolio_totals.py`): recomputes the exact allocation-weighted yield from the enriched CSV and prepends a "Verified Portfolio Totals" block to the AI summary → `portfolio_report.md`.  The `.jcwf` (now 4 tasks) + its `.md` were rewritten to the 4-stage design and the `.md`'s §12 "KNOWN ISSUE" pointers removed.
+
+### What's verified
+
+- All **4 binary configs** rebuilt from scratch (`premake5 clean` → engine D/R → studio D/R) **warning-free** — fixed the lone non-vendor warning (`triggerEngine.cpp:1316` simdjson `[-Wunused-result]`: consumed the `[[nodiscard]]` via an `if (… != SUCCESS)` since GCC ignores `(void)` for `warn_unused_result`).  React (dashboard + editor) + `mcp/dist` rebuilt (premake clean wipes them).
+- Live test sweep green on the merged tree: `test_auth_mcp` 103 (incl new heartbeat case), `test_negative_paths` 55, `test_email_watch_persistence` 19 (incl S6 prune), `test_keymanager_caps` 4, `test_s3_roundtrip` 6, url-policy 27, slug 14, malformed-configs 56, SigV4 KAT, heap-scan 9/0/1.
+- **#13 live OAuth** confirmed by JC (Google Sheets consent → `StoreTokens`, 0 plaintext tokens in logs/keystore).
+- **portfolioDividendAnalysis** ran green on Claude Sonnet (api_index 9): accurate figures (BA $0.00 suspended, AVGO $2.60, MMM $3.12), `AsOf` populated, and the Stage-3 header stamps the exact **3.77%** while the AI's own summation drifted to 3.04–3.46% across runs.
+
+### Gotchas next-session-Claude should know
+
+- **`test_keymanager_caps.py` couples to the `keys.json.enc` wire format** (`engine/keys/keyEncryption.h`: 33-byte `JKEY` header + PBKDF2-HMAC-SHA256 600k + AES-256-GCM, header as AAD).  If that format bumps to V3, regenerate the T2 fixture.
+- **Python task scripts hot-reload** — `pythonEngine.cpp:846` evicts the module from `sys.modules` before each import, so editing a `scripts/*.py` does NOT need a j9t restart (verified; my earlier "restart needed" claim was wrong, JC caught it).
+- **j9t CSV filter does not strip trailing `\r`** — a CRLF CSV leaves the last column bound as `Header\r`, breaking `{{pos.LastColumn}}`.  Python task scripts that write CSVs the filter reads must use `csv.writer(…, lineterminator="\n")` (bit `export_dividends.py`'s `AsOf` column).
+- **portfolioDividendAnalysis depends on the external `planner` app** (`~/dev/planner/backend/planner.db`, `PLANNER_DB`-overridable).  It's JC's sibling project; the workflow is a demo of real-data-grounding, not a self-contained example.
+- **LLMs drift summing dozens of figures** — Sonnet's portfolio grand total varied 3.04–3.46% across runs vs the exact 3.77%.  The reusable pattern (documented in the workflow `.md` §8.4): deterministic Python bookends own the facts + load-bearing arithmetic; the model owns language + per-item formatting.
+
+### Open items
+
+- **Sitting-16 basket: closed** (every item).  No refactor work deferred.
+- `todo.md` pre-1.0 product tail remains (landing page, promo video, dogfooding, repo-layout hygiene) — separate from the engineering closeout.
+
+---
+
 ## 2026-06-01 (Sitting 16 — Part 6: full closeout, items #11–#17 + drive-by + verification gate) → next session
 
 Closed the **entire remaining Sitting-16 basket** (the 7 items #11–#17) plus the noted `triggerEngine.cpp:521` drive-by, then ran the full closeout verification gate on the merged working tree.  The Sitting-16 incidental-findings basket is now **empty** — every item closed.  JC's standing call all along was "commit at full Sitting-16 closeout"; this is that point.  JC handles the commit.

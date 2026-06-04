@@ -376,7 +376,7 @@ If you lose the key, there is no way to recover it — ask the admin for a fresh
 
 ### I'm a user — how do I use my key with Claude Code?
 
-The MCP sidecar (`mcp/dist/index.js`) reads the key from two sources, in order:
+The MCP sidecar (`code/mcp/dist/index.js`) reads the key from two sources, in order:
 
 - `J9T_TOKEN` environment variable, *or*
 - `J9T_TOKEN_FILE` environment variable pointing to a file whose contents are the raw key (with `chmod 600`, gitignored).
@@ -627,7 +627,7 @@ For the complete security model, threat analysis, and operator responsibilities,
 - **JC Workflow Specification** — [doc/JC_Workflow_Specification.md](https://github.com/beaumanvienna/JarvisAgent/blob/main/doc/JC_Workflow_Specification.md)
 - **REST API reference** — [doc/api-endpoints.md](https://github.com/beaumanvienna/JarvisAgent/blob/main/doc/api-endpoints.md)
 - **Cyber security model** — [doc/cyber security.md](https://github.com/beaumanvienna/JarvisAgent/blob/main/doc/cyber%20security.md)
-- **Key management internals** — [engine/keys.md](https://github.com/beaumanvienna/JarvisAgent/blob/main/engine/keys.md)
+- **Key management internals** — [code/backend/engine/keys.md](https://github.com/beaumanvienna/JarvisAgent/blob/main/engine/keys.md)
 
 ---
 

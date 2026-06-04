@@ -647,7 +647,7 @@ def test_ai_search(c: AssistantClient):
 @suite.test("AI: tool call — read_file", requires_ai=True)
 def test_ai_read_file(c: AssistantClient):
     resp = c.send_message(
-        "Read the first 10 lines of application/assistant/ai-assistant.md using the read_file tool."
+        "Read the first 10 lines of code/backend/application/assistant/ai-assistant.md using the read_file tool."
     )
     check(resp is not None, "No assistant_done response")
     text = resp.get("text", "")
@@ -657,7 +657,7 @@ def test_ai_read_file(c: AssistantClient):
 @suite.test("AI: tool call — list_files", requires_ai=True)
 def test_ai_list_files(c: AssistantClient):
     resp = c.send_message(
-        "List the files in the application/assistant/ directory using list_files."
+        "List the files in the code/backend/application/assistant/ directory using list_files."
     )
     check(resp is not None, "No assistant_done response")
     text = resp.get("text", "")
@@ -826,7 +826,7 @@ def test_ai_get_task_output(c: AssistantClient):
 @suite.test("AI: tool call — get_file_summary", requires_ai=True)
 def test_ai_get_file_summary(c: AssistantClient):
     resp = c.send_message(
-        "Use get_file_summary on 'application/assistant/assistantController.h' "
+        "Use get_file_summary on 'code/backend/application/assistant/assistantController.h' "
         "and show the summary."
     )
     check(resp is not None, "No assistant_done response")
@@ -841,7 +841,7 @@ def test_ai_get_file_summary(c: AssistantClient):
 @suite.test("AI: tool call — get_folder_summary", requires_ai=True)
 def test_ai_get_folder_summary(c: AssistantClient):
     resp = c.send_message(
-        "Use get_folder_summary on 'application/assistant/' and describe what you find."
+        "Use get_folder_summary on 'code/backend/application/assistant/' and describe what you find."
     )
     check(resp is not None, "No assistant_done response")
     check(len(resp.get("text", "")) > 20, "get_folder_summary response too short")
@@ -1013,7 +1013,7 @@ def test_ai_memory_delete_nonexistent(c: AssistantClient):
 @suite.test("AI: read_file — nonexistent file", requires_ai=True)
 def test_ai_read_file_nonexistent(c: AssistantClient):
     resp = c.send_message(
-        "Use read_file to read 'application/assistant/does_not_exist_xyzzy.txt'. "
+        "Use read_file to read 'code/backend/application/assistant/does_not_exist_xyzzy.txt'. "
         "Report exactly what the tool returns."
     )
     check(resp is not None, "No assistant_done response")
@@ -1361,7 +1361,7 @@ def test_ai_hallucinated_path_warning(c: AssistantClient):
     # The response validator will detect the path, confirm it doesn't exist, and
     # append "Note: <path> was not found in the workspace."
     c.new_session()
-    fake_path = "application/docs/nonexistent_xyzzy_hallucination.h"
+    fake_path = "code/backend/application/docs/nonexistent_xyzzy_hallucination.h"
     resp = c.send_message(
         f"Without using any tools, write one sentence describing what "
         f"'{fake_path}' might contain."

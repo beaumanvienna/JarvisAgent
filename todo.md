@@ -5,7 +5,7 @@ Open items consolidated 2026-04-28.  Closed-items history archived in `doc/misc/
 - `doc/misc/application-workflow-todo.md` — backend workflow archive
 - `doc/misc/workflow-editor-todo.md` — frontend archive
 
-The two scope-specific live files (`application/workflow/doc/todo.md`, `workflow-editor/todo.md`) currently hold only headers — no open items.
+The two scope-specific live files (`code/backend/application/workflow/doc/todo.md`, `code/frontend/workflow-editor/todo.md`) currently hold only headers — no open items.
 
 **See also:**
 - `doc/misc/hand-off.md` — session hand-off log; read latest entry first when picking up.
@@ -24,8 +24,11 @@ Write a few non-trivial JCWFs **directly in the editor** rather than as raw JSON
 ### Dogfood the AI assistant (JC)
 Drive a real conversation through the assistant chat surface: multi-turn tool-use loop, approval flow for mutating tools, the eight `jcwf_*` tools (read / explain / validate / read_plan / write_plan / generate / fix_task / write_script), runtime-control tools (`workflow_pause/resume/stop`, `get_dashboard_status`), slash commands, ghost-text auto-completion, history search, persistent session save/load.  Cross-references §18 D2 hardening triage: the assistant is exactly where the cyber-sec audit found its densest CRITICAL cluster (`assistantTools.h` has five shell-injection findings in a single file + the tool-approval bypass in `assistantController.h`).  Findings reachable in real use should jump the §18 D2 queue; findings unreachable in any plausible workflow get a "skip with reason" entry.  Two-for-one: dogfood validation **and** sharper hardening triage.
 
-### Repository layout + root-folder hygiene
-Group sources under `code/{backend,frontend,mcp}`; gitignore runtime folders (`queue/`, `workflows/`); prune root artefacts (`.npm-tools/`, `jarvis_agent.example.env`); consider moving Docker files to `packaging/Docker/`.  Rollout in 4 phases (runtime folders → root cleanup → Docker relocation → source tree reorg).  GitHub first impression matters before 1.0.
+### Verify packaging end-to-end (pre-release)
+The `code/` subtree reorg (done 2026-06-03 — see hand-off) retargeted every packaging path, but none of the packagers were actually built/installed afterward.  Before a release, exercise each on a clean checkout: Docker image build (`packaging/Docker/Dockerfile`, context = repo root), deb/rpm/arch/flatpak, and the Ubuntu ppa/launchpad source-package flows.  All copy UI `dist/` from `code/frontend/...` into a **flat** install layout (`<root>/dashboard/ui/dist`) that the binary's `ResolveUiDistRoot` resolver expects — verify the served UIs load in each package.
+
+### AI interface probe timeout — consider per-interface config (post-1.0, low)
+`AiRequestPool::TestInterface` uses a fixed `kTestTimeoutMs` (bumped 30→90 s on 2026-06-03 to cover local-LLM cold-loads on slow HW).  A per-interface override in `config.json` would let cloud interfaces keep a snappy probe while local Ollama/vLLM endpoints get a long cold-load window.  Not urgent; the 90 s blanket value is fine for now.
 
 ### Landing page for new users
 Welcoming landing page / website explaining what JarvisAgent is, key features, screenshots, download links.  Target: first-time visitors who discover the project.

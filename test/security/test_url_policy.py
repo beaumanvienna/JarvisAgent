@@ -3,11 +3,11 @@
 End-to-end test for the AI-interface URL policy gate (Sitting 15).
 
 The policy: plain http:// is loopback-only AND never with a key_name.  The
-reference implementation lives in `application/network/urlPolicy.h` and is
+reference implementation lives in `code/backend/application/network/urlPolicy.h` and is
 wired in at:
 
-  - `engine/json/configParser.cpp::ParseInterfaces` (config-load enforcement)
-  - `application/web/webServer.cpp::HandleAiInterfaceCreatePost`
+  - `code/backend/engine/json/configParser.cpp::ParseInterfaces` (config-load enforcement)
+  - `code/backend/application/web/webServer.cpp::HandleAiInterfaceCreatePost`
     + `HandleAiInterfaceUpdatePut` (REST enforcement)
 
 This test drives the REST surface against a running JarvisAgent and verifies:

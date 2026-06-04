@@ -26,13 +26,13 @@ Abstract interface for all cloud service connectors. Each connector implements:
 - `TestConnection()` — validates connectivity with given config
 - `ResolveCredentials()` — resolves stored credentials into a runtime `CloudCredentials` bundle
 
-**File:** `application/cloud/cloudConnector.h`
+**File:** `code/backend/application/cloud/cloudConnector.h`
 
 ### CloudConnectorRegistry
 
 Registry for connector plugins. Connectors register themselves at startup; task executors and the REST API look them up by type name.
 
-**Files:** `application/cloud/cloudConnectorRegistry.h/cpp`
+**Files:** `code/backend/application/cloud/cloudConnectorRegistry.h/cpp`
 
 ### CloudConnection
 
@@ -57,7 +57,7 @@ Configuration for a named cloud connection, persisted in `connections.json`:
 
 In-memory CRUD store for `CloudConnection` configs, with JSON serialization for persistence. Thread-safe with `shared_mutex` (same pattern as `KeyManager`). Loaded from `connections.json` on startup.
 
-**Files:** `application/cloud/cloudConnectionManager.h/cpp`
+**Files:** `code/backend/application/cloud/cloudConnectionManager.h/cpp`
 
 ### CloudCredentials
 
@@ -74,7 +74,7 @@ Base class for task executors that operate on cloud connections. The `Execute()`
 
 Includes a `TaskCancellationToken` for cooperative cancellation (no-op in Phase 0; Phase 9 wires it into the run cancel mechanism).
 
-**Files:** `application/cloud/cloudTaskExecutor.h/cpp`, `application/cloud/taskCancellationToken.h`
+**Files:** `code/backend/application/cloud/cloudTaskExecutor.h/cpp`, `code/backend/application/cloud/taskCancellationToken.h`
 
 ---
 
@@ -94,7 +94,7 @@ Abstract base for all credential types stored in `KeyManager`. Type-safe polymor
 
 Common metadata fields on `ICredential` base: `m_Name`, `m_DisplayName`, `m_Endpoint`, `m_DefaultModel`, `m_ApiType`, `m_Params` (string map for non-secret per-provider extras like Azure resource/deployment).  `m_Params` is intentionally public for extensibility; secrets must NOT be stored there — use the typed `SecureString` fields on the concrete subclass.
 
-**File:** `engine/keys/credential.{h,cpp}`
+**File:** `code/backend/engine/keys/credential.{h,cpp}`
 
 ### KeyManager API
 
@@ -108,7 +108,7 @@ Manages OAuth 2.0 token lifecycle: stores access/refresh tokens, tracks expiry, 
 
 On successful consent in the OAuth callback, `webServer.cpp` stores the tokens in `OAuthTokenManager` **and** calls `KeyManager::UpsertCredential(connection.m_KeyName, builder)`, where the builder receives the existing credential (or `nullptr` if new) and produces an `OAuthCredential` (preserving common metadata from any existing entry of any subtype, then writing `refresh_token` + `expires_at` + `scopes` + `token_endpoint` + `client_id` + `client_secret` into the typed fields).  `UpsertCredential` performs the add-or-update atomically under one `unique_lock`, eliminating any race window between the read and the write.  The callback then calls `KeyManager::Save()` to encrypt the updated registry into `keys.json.enc`. The master password is held in mlock-protected memory by `KeyManager` after a successful `Load` / `Unlock` / `Save` so the callback can re-encrypt without re-prompting. If the admin hasn't unlocked the key store yet this session, the OAuth tokens are held in memory only and the callback logs a warning — persistence resumes on the next `POST /api/settings/keys/unlock`.
 
-**Files:** `engine/keys/oauthTokenManager.h/cpp`, `engine/keys/keyManager.h/cpp`
+**Files:** `code/backend/engine/keys/oauthTokenManager.h/cpp`, `code/backend/engine/keys/keyManager.h/cpp`
 
 ### JwtGenerator
 
@@ -122,7 +122,7 @@ RSA RS256 JWT creation via OpenSSL `EVP_DigestSign`. Features:
 
 See `doc/cyber security.md` "JwtGenerator Security" for the alg-confusion threat model and design rationale.
 
-**Files:** `engine/keys/jwtGenerator.h/cpp`
+**Files:** `code/backend/engine/keys/jwtGenerator.h/cpp`
 
 ---
 
@@ -136,13 +136,13 @@ Centralized retry with exponential backoff + jitter. All cloud connectors and ta
 - Respects `Retry-After` headers (clamped to max backoff)
 - Retryable HTTP codes: 429, 500, 502, 503, 504 (configurable per connector)
 
-**Files:** `application/cloud/cloudRetryPolicy.h/cpp`
+**Files:** `code/backend/application/cloud/cloudRetryPolicy.h/cpp`
 
 ### SecretRedactor
 
 Thread-safe singleton that scrubs registered secret values from log output before any spdlog sink writes them.  Wired in via a `RedactingFormatter` wrapping each sink's `pattern_formatter` — `log/log.txt`, the rotating `log/security.txt`, and the ncurses TUI all receive redacted text.  Cloud integration registers secrets at acquisition: `KeyManager` (per-credential-subtype virtual `RegisterSecrets()` invoked on every load / add / update), `OAuthTokenManager` (refresh / access / client secret tokens with the wiring-sandwich pattern on rotation), and `JwtGenerator` (signed JWTs).  See `doc/cyber security.md` "SecretRedactor" for the full coverage table and design boundaries.
 
-**Files:** `engine/log/secretRedactor.h/cpp`
+**Files:** `code/backend/engine/log/secretRedactor.h/cpp`
 
 ---
 
@@ -226,8 +226,8 @@ New "Connections" nav button between "Keys" and "Assistant" in the workflow edit
 - Dirty state indicator (`*`) in the nav button
 
 **Files:**
-- `shared-ui/views/ConnectionsView.tsx`
-- `shared-ui/api/connections.ts`
+- `code/frontend/shared-ui/views/ConnectionsView.tsx`
+- `code/frontend/shared-ui/api/connections.ts`
 
 ---
 
@@ -549,7 +549,7 @@ The ConnectionsView shows dedicated fields for PostgreSQL connections: Database 
 
 Implements `ICloudConnector` for Microsoft OneDrive via the Microsoft Graph API.
 
-**Files:** `application/cloud/oneDriveConnector.h/cpp`
+**Files:** `code/backend/application/cloud/oneDriveConnector.h/cpp`
 
 **Connection params:**
 
@@ -603,7 +603,7 @@ Google Sheets additionally sets `access_type=offline&prompt=consent&include_gran
 
 **Token refresh:** `OAuthTokenManager` runs a background thread that checks every 30 seconds and refreshes tokens 5 minutes before expiry. `GetAccessToken` also performs synchronous on-demand refresh when the in-memory entry is empty or expired — this covers hydrated-from-disk entries on the first call after startup.
 
-**Files:** `engine/keys/oauthTokenManager.h/cpp`, `engine/keys/keyManager.h/cpp`, `application/web/webServer.cpp`, `application/cloud/cloudConnector.h` (`OAuth2ProviderInfo`), `application/cloud/oneDriveConnector.h/cpp`, `application/cloud/googleSheetsConnector.h/cpp`
+**Files:** `code/backend/engine/keys/oauthTokenManager.h/cpp`, `code/backend/engine/keys/keyManager.h/cpp`, `code/backend/application/web/webServer.cpp`, `code/backend/application/cloud/cloudConnector.h` (`OAuth2ProviderInfo`), `code/backend/application/cloud/oneDriveConnector.h/cpp`, `code/backend/application/cloud/googleSheetsConnector.h/cpp`
 
 ### OneDrive Task Types
 
@@ -619,7 +619,7 @@ JCWF task types `"onedrive_upload"` and `"onedrive_download"` perform file opera
 - **Upload**: `PUT /me/drive/root:/{remote_path}:/content` with file body
 - **Download**: `GET /me/drive/root:/{remote_path}:/content` to local file
 
-**Files:** `application/cloud/oneDriveCloudTaskExecutor.h/cpp`
+**Files:** `code/backend/application/cloud/oneDriveCloudTaskExecutor.h/cpp`
 
 ### onedrive_watch Trigger
 
@@ -655,7 +655,7 @@ The workflow editor shows a OneDrive task inspector panel (blue accent) for `one
 
 Implements `ICloudConnector` for Snowflake via the Snowflake SQL REST API with RSA JWT authentication.
 
-**Files:** `application/cloud/snowflakeConnector.h/cpp`
+**Files:** `code/backend/application/cloud/snowflakeConnector.h/cpp`
 
 **Connection params:**
 
@@ -708,7 +708,7 @@ JCWF task type `"snowflake_query"` executes SQL queries via the Snowflake SQL RE
 
 Supports cooperative cancellation: if the workflow run is cancelled, the executor sends `POST /api/v2/statements/{handle}/cancel` to Snowflake.
 
-**Files:** `application/cloud/snowflakeCloudTaskExecutor.h/cpp`
+**Files:** `code/backend/application/cloud/snowflakeCloudTaskExecutor.h/cpp`
 
 ### Connections UI
 
@@ -732,7 +732,7 @@ The workflow editor shows a Snowflake Query inspector panel (light blue accent) 
 
 Implements `ICloudConnector` for the Slack Web API with Bearer token authentication.
 
-**Files:** `application/cloud/slackConnector.h/cpp`
+**Files:** `code/backend/application/cloud/slackConnector.h/cpp`
 
 - **Endpoint**: Slack API base URL (default: `https://slack.com/api`)
 - **Auth type**: BearerToken (Bot token `xoxb-...` from KeyManager)
@@ -776,13 +776,13 @@ Outputs written to the task working directory:
 
 See `example/workflows/slackQAndABot.md` for a full read → AI → threaded reply round-trip walkthrough.
 
-**Files:** `application/cloud/slackCloudTaskExecutor.h/cpp`
+**Files:** `code/backend/application/cloud/slackCloudTaskExecutor.h/cpp`
 
 ### EmailConnector
 
 Implements `ICloudConnector` for SMTP send and IMAP read via libcurl.
 
-**Files:** `application/cloud/emailConnector.h/cpp`
+**Files:** `code/backend/application/cloud/emailConnector.h/cpp`
 
 **Connection params:**
 
@@ -816,7 +816,7 @@ JCWF task type `"email_send"` sends emails via SMTP with optional attachments.
 
 Builds RFC 2822 messages with MIME multipart for attachments. Base64-encodes attachment content. Uses libcurl SMTP with `CURLOPT_MAIL_FROM` and `CURLOPT_MAIL_RCPT`.
 
-**Files:** `application/cloud/emailCloudTaskExecutor.h/cpp`
+**Files:** `code/backend/application/cloud/emailCloudTaskExecutor.h/cpp`
 
 ### email_read Task Type
 
@@ -836,7 +836,7 @@ JCWF task type `"email_read"` fetches emails from an IMAP mailbox via libcurl.
 
 Uses libcurl IMAP with `SEARCH ALL` to find messages, then `FETCH` by UID. Parses RFC 2822 headers (From, To, Subject, Date) and extracts the plain text body. Respects `use_ssl` connection param (`imap://` vs `imaps://`).
 
-**Files:** `application/cloud/emailCloudTaskExecutor.h/cpp`
+**Files:** `code/backend/application/cloud/emailCloudTaskExecutor.h/cpp`
 
 ### email_watch Trigger
 
@@ -890,7 +890,7 @@ Polls an IMAP folder on a configurable interval.
 
 Implements `ICloudConnector` for GitHub (and GitLab/GitHub Enterprise) via REST API with Bearer token (PAT).
 
-**Files:** `application/cloud/gitHubConnector.h/cpp`
+**Files:** `code/backend/application/cloud/gitHubConnector.h/cpp`
 
 | Key | Description |
 |-----|-------------|
@@ -911,13 +911,13 @@ Implements `ICloudConnector` for GitHub (and GitLab/GitHub Enterprise) via REST 
 | `get_file` | Get file content from repo (base64-decoded to disk) |
 | `list_issues` | List open issues to JSON |
 
-**Files:** `application/cloud/gitHubCloudTaskExecutor.h/cpp`
+**Files:** `code/backend/application/cloud/gitHubCloudTaskExecutor.h/cpp`
 
 ### JiraConnector
 
 Implements `ICloudConnector` for Jira REST API v3. Supports BasicAuth (Jira Cloud: email + API token) and BearerToken (Jira Data Center: PAT).
 
-**Files:** `application/cloud/jiraConnector.h/cpp`
+**Files:** `code/backend/application/cloud/jiraConnector.h/cpp`
 
 | Key | Description |
 |-----|-------------|
@@ -951,13 +951,13 @@ Implements `ICloudConnector` for Jira REST API v3. Supports BasicAuth (Jira Clou
 
 All operations write the Jira API response to `response.json` in the task working directory (per-item children use `response_<N>.json`). The response is captured as stdout and parsed for JSON-path template resolution — downstream tasks can reference `{{create_issue.json.key}}` to chain issue operations.
 
-**Files:** `application/cloud/jiraCloudTaskExecutor.h/cpp`
+**Files:** `code/backend/application/cloud/jiraCloudTaskExecutor.h/cpp`
 
 ### GoogleSheetsConnector
 
 Implements `ICloudConnector` for Google Sheets API v4. Supports API key auth (read-only public sheets) or OAuth2 (read/write private sheets).
 
-**Files:** `application/cloud/googleSheetsConnector.h/cpp`
+**Files:** `code/backend/application/cloud/googleSheetsConnector.h/cpp`
 
 | Key | Description |
 |-----|-------------|
@@ -970,7 +970,7 @@ Implements `ICloudConnector` for Google Sheets API v4. Supports API key auth (re
 - **sheets_read**: `GET /{spreadsheetId}/values/{range}` — parses values array, writes CSV or JSON
 - **sheets_write**: `PUT /{spreadsheetId}/values/{range}` — reads local CSV, uploads as JSON values array
 
-**Files:** `application/cloud/googleSheetsCloudTaskExecutor.h/cpp`
+**Files:** `code/backend/application/cloud/googleSheetsCloudTaskExecutor.h/cpp`
 
 ### Connections UI
 
@@ -1088,7 +1088,7 @@ The signing format differs from AWS SigV4:
 - Canonicalized headers include all `x-ms-*` headers
 - Canonicalized resource includes query parameters sorted by name
 
-**Files:** `application/cloud/azureSharedKeySigner.h/cpp`
+**Files:** `code/backend/application/cloud/azureSharedKeySigner.h/cpp`
 
 ### AzureBlobConnector
 
@@ -1107,7 +1107,7 @@ CloudConnection params:
 - **Endpoint**: `https://{account_name}.blob.core.windows.net` (default) or custom URL (e.g., `http://127.0.0.1:10000/devstoreaccount1` for Azurite)
 - **TestConnection()**: `GET /{container}?restype=container` — checks container exists and credentials work
 
-**Files:** `application/cloud/azureBlobConnector.h/cpp`
+**Files:** `code/backend/application/cloud/azureBlobConnector.h/cpp`
 
 ### Azure Blob Task Types
 
@@ -1124,7 +1124,7 @@ JCWF task types `"azure_blob_upload"` and `"azure_blob_download"` perform blob o
 - **Upload**: `PUT /{container}/{blob_name}` with `x-ms-blob-type: BlockBlob` header
 - **Download**: `GET /{container}/{blob_name}` to local file
 
-**Files:** `application/cloud/azureBlobCloudTaskExecutor.h/cpp`
+**Files:** `code/backend/application/cloud/azureBlobCloudTaskExecutor.h/cpp`
 
 ### azure_blob_watch Trigger
 
@@ -1156,7 +1156,7 @@ CloudConnection params:
 - **Auth type**: JwtRsa
 - **TestConnection()**: `GET /storage/v1/b/{bucket}` — checks bucket exists and credentials work
 
-**Files:** `application/cloud/gcsConnector.h/cpp`
+**Files:** `code/backend/application/cloud/gcsConnector.h/cpp`
 
 ### GCS Task Types
 
@@ -1175,7 +1175,7 @@ JCWF task types `"gcs_upload"` and `"gcs_download"` perform object operations vi
 
 Object names with special characters are URL-encoded.
 
-**Files:** `application/cloud/gcsCloudTaskExecutor.h/cpp`
+**Files:** `code/backend/application/cloud/gcsCloudTaskExecutor.h/cpp`
 
 ### gcs_watch Trigger
 
@@ -1215,7 +1215,7 @@ Redmine is a self-hosted open-source project management tool with a well-documen
 
 ### RedmineConnector
 
-**Files:** `application/cloud/redmineConnector.h/cpp`
+**Files:** `code/backend/application/cloud/redmineConnector.h/cpp`
 
 - **Endpoint**: Redmine instance URL (e.g. `http://localhost:3000`)
 - **Auth**: API key stored in KeyManager; the connector unconditionally builds an `X-Redmine-API-Key` header from the credential token (the `auth_type` field on the connection is set to `bearer` purely because the existing `CloudAuthType` enum has no dedicated ApiKey value).
@@ -1259,7 +1259,7 @@ Writes the raw response body to `response.json` in the working directory. The `c
 
 Redmine returns 204 No Content on success; the executor synthesizes `{"ok":true,"operation":"update_issue","issue_id":N}` so downstream tasks see something useful.
 
-**Files:** `application/cloud/redmineCloudTaskExecutor.h/cpp`
+**Files:** `code/backend/application/cloud/redmineCloudTaskExecutor.h/cpp`
 
 ### Local Test Infrastructure
 

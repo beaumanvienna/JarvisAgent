@@ -125,13 +125,13 @@ project "jarvisAgent"
 
     files
     {
-        "application/**.h",
-        "application/**.cpp",
-        "engine/**.h",
-        "engine/**.cpp",
-        "vendor/simdjson/simdjson.cpp",
-        "vendor/simdjson/simdjson.h",
-        "vendor/date/src/tz.cpp",
+        "code/backend/application/**.h",
+        "code/backend/application/**.cpp",
+        "code/backend/engine/**.h",
+        "code/backend/engine/**.cpp",
+        "code/vendor/simdjson/simdjson.cpp",
+        "code/vendor/simdjson/simdjson.h",
+        "code/vendor/date/src/tz.cpp",
     }
 
     -- Heap-scan audit (Sitting 8c).  Only pulled in when --heapscan is set; the
@@ -152,10 +152,10 @@ project "jarvisAgent"
     -- the engine binary (cybersecurity gap).
     if _OPTIONS["engine"] then
         removefiles {
-            "application/assistant/**",
-            "application/web/aiJcwfService.h",
-            "application/web/aiJcwfService.cpp",
-            "application/web/webServer_studio.cpp",
+            "code/backend/application/assistant/**",
+            "code/backend/application/web/aiJcwfService.h",
+            "code/backend/application/web/aiJcwfService.cpp",
+            "code/backend/application/web/webServer_studio.cpp",
         }
     else
         -- Studio edition: drop the Engine-only stubs.  Same security argument as
@@ -163,7 +163,7 @@ project "jarvisAgent"
         -- InitEditionSpecific / HandleAssistantWebSocketMessage would link into
         -- Studio and the no-op Engine version could shadow the real one.
         removefiles {
-            "application/web/webServer_engine.cpp",
+            "code/backend/application/web/webServer_engine.cpp",
         }
     end
 
@@ -247,28 +247,28 @@ project "jarvisAgent"
         outputFile:close()
         print(">>> Embedded: " .. sourceRelativePath .. " -> " .. outputRelativePath)
     end
-    embedAsHeader("doc/jcwf.schema.json", "application/json/jcwfSchema.generated.h",
+    embedAsHeader("doc/jcwf.schema.json", "code/backend/application/json/jcwfSchema.generated.h",
                    "kJcwfSchemaJson")
-    embedAsHeader("doc/jcwf_generation_guide.md", "application/json/jcwfGenerationGuide.generated.h",
+    embedAsHeader("doc/jcwf_generation_guide.md", "code/backend/application/json/jcwfGenerationGuide.generated.h",
                    "kJcwfGenerationGuide")
 
     includedirs
     {
-        "engine/",
-        "application/",
+        "code/backend/engine/",
+        "code/backend/application/",
         "test/",
-        "vendor/",
-        "vendor/spdlog/include",
-        "vendor/curl/include",
-        "vendor/nghttp2/lib/includes",
-        "vendor/thread-pool/include",
-        "vendor/tracy/include",
-        "vendor/openssl/include",
-        "vendor/crow/include/crow",
-        "vendor/asio/asio/include",
-        "vendor/pdcursesmod",
-        "vendor/date/include",
-        "vendor/miniz"
+        "code/vendor/",
+        "code/vendor/spdlog/include",
+        "code/vendor/curl/include",
+        "code/vendor/nghttp2/lib/includes",
+        "code/vendor/thread-pool/include",
+        "code/vendor/tracy/include",
+        "code/vendor/openssl/include",
+        "code/vendor/crow/include/crow",
+        "code/vendor/asio/asio/include",
+        "code/vendor/pdcursesmod",
+        "code/vendor/date/include",
+        "code/vendor/miniz"
     }
 
     defines { "NGHTTP2_STATICLIB" }
@@ -526,10 +526,10 @@ print(sysconfig.get_config_var('PYTHONFRAMEWORKPREFIX') or '')"]])
         -- Tell libcurl headers that we're linking against the static library.
         defines { "CURL_STATICLIB", "NOMINMAX" }
 
-    -- MSVC natively supports C++20 chrono timezone — exclude vendor/date/tz.cpp.
+    -- MSVC natively supports C++20 chrono timezone — exclude code/vendor/date/tz.cpp.
     -- MinGW/Clang-on-Windows compile tz.cpp like Linux/macOS.
     filter { "system:windows", "action:vs*" }
-        removefiles { "vendor/date/src/tz.cpp" }
+        removefiles { "code/vendor/date/src/tz.cpp" }
 
     -- Non-MSVC Windows builds (MinGW, etc.) need the date library's tz.cpp.
     filter { "system:windows", "action:gmake*" }
@@ -630,64 +630,64 @@ print(sysconfig.get_config_var('PYTHONFRAMEWORKPREFIX') or '')"]])
         os.remove("*.make")
         os.remove("**/*.make")
         os.remove("Makefile")
-        os.remove("vendor/Makefile")
+        os.remove("code/vendor/Makefile")
 
         ----------------------------------------------------
         -- Curl build folders
         ----------------------------------------------------
-        os.rmdir("vendor/curl/bin")
-        os.rmdir("vendor/curl/bin-int")
+        os.rmdir("code/vendor/curl/bin")
+        os.rmdir("code/vendor/curl/bin-int")
         ----------------------------------------------------
         -- Remove generated curl config
         ----------------------------------------------------
-        os.remove("vendor/curl/lib/curl_config.h")
+        os.remove("code/vendor/curl/lib/curl_config.h")
 
         ----------------------------------------------------
         -- nghttp2 build folders
         ----------------------------------------------------
-        os.rmdir("vendor/nghttp2/bin")
-        os.rmdir("vendor/nghttp2/bin-int")
+        os.rmdir("code/vendor/nghttp2/bin")
+        os.rmdir("code/vendor/nghttp2/bin-int")
 
 
         ----------------------------------------------------
         -- OpenSSL build folders
         ----------------------------------------------------
-        os.rmdir("vendor/openssl/bin")
-        os.rmdir("vendor/openssl/bin-int")
+        os.rmdir("code/vendor/openssl/bin")
+        os.rmdir("code/vendor/openssl/bin-int")
 
         ----------------------------------------------------
         -- PDCursesMod build folders
         ----------------------------------------------------
-        os.rmdir("vendor/pdcursesmod/bin")
-        os.rmdir("vendor/pdcursesmod/bin-int")
-        os.remove("vendor/pdcursesmod/Makefile")
+        os.rmdir("code/vendor/pdcursesmod/bin")
+        os.rmdir("code/vendor/pdcursesmod/bin-int")
+        os.remove("code/vendor/pdcursesmod/Makefile")
 
         ----------------------------------------------------
         -- miniz build folders
         ----------------------------------------------------
-        os.rmdir("vendor/miniz/bin")
-        os.rmdir("vendor/miniz/bin-int")
+        os.rmdir("code/vendor/miniz/bin")
+        os.rmdir("code/vendor/miniz/bin-int")
 
         ----------------------------------------------------
-        -- React apps (Dashboard + Workflow Editor)
+        -- React apps + MCP sidecar: wipe the built dist/ only.
+        -- node_modules/ is deliberately NOT removed: premake's os.rmdir can't
+        -- delete a tree containing symlinks (npm's .bin/* are symlinks), so it
+        -- bails partway and leaves a half-deleted, broken node_modules that
+        -- fails the next `npm run build`.  The dep cache is also expensive to
+        -- reinstall and gitignored — keep it so a post-clean `npm run build`
+        -- (no reinstall) regenerates dist/.  Nuke node_modules by hand only if
+        -- it's actually corrupt.
         ----------------------------------------------------
-        os.rmdir("dashboard/ui/dist")
-        os.rmdir("dashboard/ui/node_modules")
-        os.rmdir("workflow-editor/ui/dist")
-        os.rmdir("workflow-editor/ui/node_modules")
-
-        ----------------------------------------------------
-        -- MCP sidecar (TypeScript → dist/, npm → node_modules/)
-        ----------------------------------------------------
-        os.rmdir("mcp/dist")
-        os.rmdir("mcp/node_modules")
+        os.rmdir("code/frontend/dashboard/ui/dist")
+        os.rmdir("code/frontend/workflow-editor/ui/dist")
+        os.rmdir("code/mcp/dist")
 
         print("done.")
     end
 
-    include "vendor/curl.lua"
-    include "vendor/nghttp2.lua"
-    include "vendor/openssl/crypto.lua"
-    include "vendor/openssl/ssl.lua"
-    include "vendor/pdcursesmod/pdcursesmod.lua"
-    include "vendor/miniz/miniz.lua"
+    include "code/vendor/curl.lua"
+    include "code/vendor/nghttp2.lua"
+    include "code/vendor/openssl/crypto.lua"
+    include "code/vendor/openssl/ssl.lua"
+    include "code/vendor/pdcursesmod/pdcursesmod.lua"
+    include "code/vendor/miniz/miniz.lua"

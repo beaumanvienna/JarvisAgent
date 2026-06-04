@@ -42,12 +42,12 @@ echo "==> Building source package: ${PKG_NAME} ${PKG_VERSION}"
 
 # ---- Build React UIs (Launchpad has no npm) ----
 echo "==> Building React dashboard ..."
-cd "$REPO_ROOT/dashboard/ui"
+cd "$REPO_ROOT/code/frontend/dashboard/ui"
 npm install
 npm run build
 
 echo "==> Building React workflow editor ..."
-cd "$REPO_ROOT/workflow-editor/ui"
+cd "$REPO_ROOT/code/frontend/workflow-editor/ui"
 npm install
 npm run build
 
@@ -74,12 +74,12 @@ tar cf - \
     . | tar xf - -C "$SOURCE_DIR"
 
 # Ensure pre-built React UIs are in the source tree
-if [[ ! -d "$SOURCE_DIR/dashboard/ui/dist" ]]; then
-    echo "ERROR: dashboard/ui/dist not found after copy"
+if [[ ! -d "$SOURCE_DIR/code/frontend/dashboard/ui/dist" ]]; then
+    echo "ERROR: code/frontend/dashboard/ui/dist not found after copy"
     exit 1
 fi
-if [[ ! -d "$SOURCE_DIR/workflow-editor/ui/dist" ]]; then
-    echo "ERROR: workflow-editor/ui/dist not found after copy"
+if [[ ! -d "$SOURCE_DIR/code/frontend/workflow-editor/ui/dist" ]]; then
+    echo "ERROR: code/frontend/workflow-editor/ui/dist not found after copy"
     exit 1
 fi
 

@@ -4,7 +4,7 @@ Per-fixture fault test for API6 (Azure OpenAI) through MockTransport.
 
 Azure OpenAI's response envelope is byte-identical to OpenAI Chat (API1) —
 configParser routes API6 to `ReplyParserAPI1` directly (per
-`application/json/replyParser.cpp:88`).  This driver validates that routing
+`code/backend/application/json/replyParser.cpp:88`).  This driver validates that routing
 is intact: the same battery as api1, dispatched through `api_type: "API6"`,
 must produce identical end-to-end behaviour.  Parity-validation step, not
 new-parser-coverage.

@@ -38,7 +38,7 @@ Packaging Targets
 - **premake5:** Assumed already installed (like make, g++, or the package manager itself). Listed as `makedepends` but not bundled.
 - **Python venv:** Created per-user by the launcher on first run (in `~/JarvisAgent/.venv`).
 - **Install location:** `/opt/jarvisagent/` (read-only system assets). Launcher script in `/usr/bin/jarvisagent`.
-- **Runtime model:** The launcher creates a per-user working directory (`~/JarvisAgent` by default) with symlinks to read-only assets in `/opt/jarvisagent/` and writable directories for user data. JarvisAgent resolves `config.json`, `dashboard/ui/dist/`, `workflow-editor/ui/dist/`, `scripts/`, `queue/`, `workflows/` relative to CWD.
+- **Runtime model:** The launcher creates a per-user working directory (`~/JarvisAgent` by default) with symlinks to read-only assets in `/opt/jarvisagent/` and writable directories for user data. JarvisAgent resolves `config.json`, `code/frontend/dashboard/ui/dist/`, `code/frontend/workflow-editor/ui/dist/`, `scripts/`, `queue/`, `workflows/` relative to CWD.
 - **Shared launcher:** `packaging/Linux/jarvisagent-launcher.sh` is shared across DEB, RPM, and Arch packages. Supports `--home DIR` (custom working directory), `--no-browser` (skip browser launch), and `JARVISAGENT_HOME` env var.
 
 ---
@@ -653,7 +653,7 @@ mcp:
 
 Note: `http://jarvisagent:8080` is the default. Check `config.json` for the actual port (`"port"` field) and whether TLS is enabled (`TlsCert`/`TlsKey`) — if TLS is configured, use `https://` and the corresponding port (default 8443).
 
-See `mcp/README.md` for full details.
+See `code/mcp/README.md` for full details.
 
 **Data directory:** `~/JarvisAgent` (mounted at `/app` inside the container)
 

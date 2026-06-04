@@ -41,7 +41,7 @@ namespace AIAssistant
 #else // J9T_HEAPSCAN_BUILD
 
 // After the cloud/sigV4Signer consolidation, there is only one
-// AIAssistant::SigV4Signer (engine/curlWrapper/awsSigV4.{h,cpp}) — the S3
+// AIAssistant::SigV4Signer (code/backend/engine/curlWrapper/awsSigV4.{h,cpp}) — the S3
 // connector path goes through the same Sign() now, with the per-S3 features
 // (caller-supplied payload hash, signed extra headers) modeled as fields on
 // Inputs.  The cloud-shape SigV4 scenario below exercises the S3 dispatch

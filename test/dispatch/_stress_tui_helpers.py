@@ -97,8 +97,8 @@ def load_jarvisCpp_workflow(workflow_name: str, *,
                 p = Path(entry)
                 src = p if p.is_absolute() else (orig_task_wd / entry).resolve()
                 # `path` is a repo-relative identifier so two cntx entries
-                # with the same basename (e.g. application/log/log.h vs
-                # engine/log/log.h) don't collide in the queue folder.  Falls
+                # with the same basename (e.g. code/backend/application/log/log.h vs
+                # code/backend/engine/log/log.h) don't collide in the queue folder.  Falls
                 # back to basename if the source lives outside REPO_ROOT.
                 try:
                     rel_id = str(src.relative_to(REPO_ROOT))

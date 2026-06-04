@@ -37,9 +37,12 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TABLE_FILE = REPO_ROOT / "doc" / "misc" / "jarvisCppDoc.md"
 
-# Path under workflows/<id>/ — engine + application source roots are three
-# directory hops above (../../../).
-SOURCE_PREFIX = "../../../"
+# Path from the per-task queue folder (queue/<id>/<NN_task>/) up to the source
+# roots.  ../../../ reaches the repo root; engine/ + application/ both live under
+# code/backend/ since the 2026-06-03 reorg, so the prefix carries that segment.
+# The table rows stay module-relative (application/... , engine/...), so the task
+# ids (doc_application_...) and combined-doc headers are unchanged.
+SOURCE_PREFIX = "../../../code/backend/"
 
 
 # ---------------------------------------------------------------------------
@@ -211,7 +214,7 @@ MODES: dict[str, dict] = {
         "workflow_label": "JarvisAgent C++ Docu Generator",
         "workflow_doc": (
             "Generates Markdown documentation for each C++ header (and matching .cpp when "
-            "present) in application/ and engine/. Each task is an ai_call and writes its "
+            "present) in code/backend/application/ and code/backend/engine/. Each task is an ai_call and writes its "
             "artifacts into a per-task folder under ../queue/<workflowId>/."
         ),
         "label_prefix": "Doc:",
@@ -225,8 +228,8 @@ MODES: dict[str, dict] = {
         "workflow_id": "jarvisCppCyberSecAudit",
         "workflow_label": "JarvisAgent C++ Cyber-Security Audit",
         "workflow_doc": (
-            "Reviews each C++ header (and matching .cpp when present) in application/ and "
-            "engine/ for cyber-security gaps. Each task is an ai_call producing severity-graded "
+            "Reviews each C++ header (and matching .cpp when present) in code/backend/application/ and "
+            "code/backend/engine/ for cyber-security gaps. Each task is an ai_call producing severity-graded "
             "findings under ../queue/<workflowId>/."
         ),
         "label_prefix": "Sec:",
@@ -240,8 +243,8 @@ MODES: dict[str, dict] = {
         "workflow_id": "jarvisCppSafetyAudit",
         "workflow_label": "JarvisAgent C++ Safety Audit",
         "workflow_doc": (
-            "Reviews each C++ header (and matching .cpp when present) in application/ and "
-            "engine/ for non-security safety properties: concurrency, memory, lifetime, "
+            "Reviews each C++ header (and matching .cpp when present) in code/backend/application/ and "
+            "code/backend/engine/ for non-security safety properties: concurrency, memory, lifetime, "
             "exception safety, resource cleanup, move semantics, fail-path logging, log severity, "
             "switch discipline, const-correctness, C++20 idiom uplift, TOCTOU, style, and "
             "Rust-by-default-equivalents."

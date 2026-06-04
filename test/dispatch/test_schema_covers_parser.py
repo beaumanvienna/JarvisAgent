@@ -6,7 +6,7 @@ The schema is the source of truth for what JCWF authors (and the generator AI)
 see; if the parser reads a field that's not in the schema, authors have no way
 to know it's valid, and the validator will reject otherwise-legitimate JCWFs.
 
-This test greps `application/workflow/workflowJsonParser.cpp` and
+This test greps `code/backend/application/workflow/workflowJsonParser.cpp` and
 `workflowJsonParserDetails.cpp` for every `key == "..."` comparison, then walks
 `doc/jcwf.schema.json` to confirm each name appears somewhere — either as a
 property name, an enum value, or a $defs target.
@@ -22,8 +22,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCHEMA_PATH = REPO_ROOT / "doc" / "jcwf.schema.json"
 PARSER_PATHS = [
-    REPO_ROOT / "application" / "workflow" / "workflowJsonParser.cpp",
-    REPO_ROOT / "application" / "workflow" / "workflowJsonParserDetails.cpp",
+    REPO_ROOT / "code" / "backend" / "application" / "workflow" / "workflowJsonParser.cpp",
+    REPO_ROOT / "code" / "backend" / "application" / "workflow" / "workflowJsonParserDetails.cpp",
 ]
 
 # Fields read via `key == "..."` that aren't user-facing JCWF names.  These

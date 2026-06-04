@@ -16,7 +16,7 @@ AES-256-GCM `keys.json.enc`, decrypted at runtime via POST /api/settings/keys/un
       "provider count exceeds kMaxProviders=1024"; j9t must not crash.
 
 T2 crafts a real `keys.json.enc` in Python, reproducing the on-disk format
-(`engine/keys/keyEncryption.h`): a 33-byte header `MAGIC "JKEY" | version 0x02 |
+(`code/backend/engine/keys/keyEncryption.h`): a 33-byte header `MAGIC "JKEY" | version 0x02 |
 16-byte salt | 12-byte IV`, then AES-256-GCM(key, iv, plaintext, aad=header) whose
 output is ciphertext||tag — appended after the header.  The key is
 PBKDF2-HMAC-SHA256(password, salt, 600000, 32).  NOTE: this couples the test to
@@ -73,7 +73,7 @@ def warn(msg):   print(f"  {C.YELLOW}⚠{C.RESET} {msg}")
 def header(msg): print(f"\n{C.BOLD}{C.CYAN}{'─'*70}\n  {msg}\n{'─'*70}{C.RESET}")
 
 
-# ── keys.json.enc fixture builder (mirrors engine/keys/keyEncryption.cpp) ──
+# ── keys.json.enc fixture builder (mirrors code/backend/engine/keys/keyEncryption.cpp) ──
 
 KEY_MAGIC = b"JKEY"
 KEY_VERSION_V2 = 0x02

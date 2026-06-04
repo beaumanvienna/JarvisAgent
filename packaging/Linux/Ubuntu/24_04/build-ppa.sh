@@ -12,7 +12,7 @@
 # Prerequisites:
 #   sudo apt install devscripts debhelper dput gpg
 #   - GPG key registered on https://launchpad.net/~beauman
-#   - React UIs already built (dashboard/ui/dist + workflow-editor/ui/dist)
+#   - React UIs already built (code/frontend/dashboard/ui/dist + code/frontend/workflow-editor/ui/dist)
 #   - ~/.dput.cf configured (or uses default ppa: target)
 
 set -euo pipefail
@@ -51,19 +51,19 @@ mkdir -p "$WORK_DIR"
 
 # ---- Step 1: Download premake5 source (bundled in tarball; no network on Launchpad) ----
 PREMAKE_DIR="$WORK_DIR/premake-core"
-if [[ -d "$REPO_ROOT/vendor/premake-core/.git" ]]; then
-    echo "==> Using existing vendor/premake-core"
+if [[ -d "$REPO_ROOT/code/vendor/premake-core/.git" ]]; then
+    echo "==> Using existing code/vendor/premake-core"
 else
     echo "==> Downloading premake5 source ..."
     git clone --depth 1 https://github.com/premake/premake-core "$PREMAKE_DIR"
 fi
 
 # ---- Step 2: Verify pre-built React UIs exist ----
-for ui in dashboard/ui/dist workflow-editor/ui/dist; do
+for ui in code/frontend/dashboard/ui/dist code/frontend/workflow-editor/ui/dist; do
     if [[ ! -d "$REPO_ROOT/$ui" ]]; then
         echo "ERROR: $ui not found. Build React UIs first:"
-        echo "  cd $REPO_ROOT/dashboard/ui && npm install && npm run build"
-        echo "  cd $REPO_ROOT/workflow-editor/ui && npx vite build"
+        echo "  cd $REPO_ROOT/code/frontend/dashboard/ui && npm install && npm run build"
+        echo "  cd $REPO_ROOT/code/frontend/workflow-editor/ui && npx vite build"
         exit 1
     fi
 done
@@ -82,12 +82,12 @@ rsync -a --delete \
     --exclude='node_modules/' \
     --exclude='bin/' \
     --exclude='bin-int/' \
-    --exclude='vendor/curl/bin/' \
-    --exclude='vendor/curl/bin-int/' \
-    --exclude='vendor/openssl/bin/' \
-    --exclude='vendor/openssl/bin-int/' \
-    --exclude='vendor/pdcursesmod/bin/' \
-    --exclude='vendor/pdcursesmod/bin-int/' \
+    --exclude='code/vendor/curl/bin/' \
+    --exclude='code/vendor/curl/bin-int/' \
+    --exclude='code/vendor/openssl/bin/' \
+    --exclude='code/vendor/openssl/bin-int/' \
+    --exclude='code/vendor/pdcursesmod/bin/' \
+    --exclude='code/vendor/pdcursesmod/bin-int/' \
     --exclude='.flatpak-builder/' \
     --exclude='build/' \
     --exclude='/queue/*' \
@@ -106,26 +106,26 @@ rsync -a --delete \
     --exclude='*.vcxproj' \
     --exclude='*.vcxproj.*' \
     --exclude='.DS_Store' \
-    --exclude='vendor/premake-core/' \
+    --exclude='code/vendor/premake-core/' \
     "$REPO_ROOT/" "$SRC_DIR/"
 
 # ---- Step 4: Bundle premake5 source into source tree ----
 echo "==> Bundling premake5 source ..."
 PREMAKE_SRC="$PREMAKE_DIR"
-if [[ -d "$REPO_ROOT/vendor/premake-core/.git" ]]; then
-    PREMAKE_SRC="$REPO_ROOT/vendor/premake-core"
+if [[ -d "$REPO_ROOT/code/vendor/premake-core/.git" ]]; then
+    PREMAKE_SRC="$REPO_ROOT/code/vendor/premake-core"
 fi
 rsync -a --delete \
     --exclude='.git/' \
     --exclude='build/' \
     --exclude='bin/' \
     --exclude='obj/' \
-    "$PREMAKE_SRC/" "$SRC_DIR/vendor/premake-core/"
+    "$PREMAKE_SRC/" "$SRC_DIR/code/vendor/premake-core/"
 
 # ---- Step 5: Inject pre-built React UIs (gitignored, not in rsync) ----
 echo "==> Injecting pre-built React UIs ..."
-cp -r "$REPO_ROOT/dashboard/ui/dist"        "$SRC_DIR/dashboard/ui/dist"
-cp -r "$REPO_ROOT/workflow-editor/ui/dist"  "$SRC_DIR/workflow-editor/ui/dist"
+cp -r "$REPO_ROOT/code/frontend/dashboard/ui/dist"        "$SRC_DIR/code/frontend/dashboard/ui/dist"
+cp -r "$REPO_ROOT/code/frontend/workflow-editor/ui/dist"  "$SRC_DIR/code/frontend/workflow-editor/ui/dist"
 
 # ---- Step 6: Copy debian/ directory to source root ----
 echo "==> Copying debian/ directory ..."

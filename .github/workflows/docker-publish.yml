@@ -64,6 +64,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
+          file: ./packaging/Docker/Dockerfile
           platforms: ${{ matrix.platform }}
           # Per-arch GHA cache scope so the two matrix jobs don't clobber each other.
           cache-from: type=gha,scope=${{ matrix.arch }}

@@ -60,10 +60,10 @@ modules:
       - sh -c 'export CPLUS_INCLUDE_PATH="/app/include:$(python3 -c "import sysconfig; print(sysconfig.get_path(\"include\"))")"; export LIBRARY_PATH="/app/lib"; make -j${FLATPAK_BUILDER_N_JOBS} config=release'
 
       # Build React dashboard
-      - cd dashboard/ui && npm install && npm run build
+      - cd code/frontend/dashboard/ui && npm install && npm run build
 
       # Build React workflow editor
-      - cd workflow-editor/ui && npm install && npm run build
+      - cd code/frontend/workflow-editor/ui && npm install && npm run build
 
       # ---- Install ----
       # Binaries (Studio + Engine)
@@ -72,9 +72,9 @@ modules:
 
       # React UIs
       - mkdir -p /app/share/jarvisagent/dashboard/ui
-      - cp -r dashboard/ui/dist /app/share/jarvisagent/dashboard/ui/dist
+      - cp -r code/frontend/dashboard/ui/dist /app/share/jarvisagent/dashboard/ui/dist
       - mkdir -p /app/share/jarvisagent/workflow-editor/ui
-      - cp -r workflow-editor/ui/dist /app/share/jarvisagent/workflow-editor/ui/dist
+      - cp -r code/frontend/workflow-editor/ui/dist /app/share/jarvisagent/workflow-editor/ui/dist
 
       # Scripts (excluding __pycache__)
       - cp -r scripts /app/share/jarvisagent/scripts

@@ -10,14 +10,14 @@ INSTDIR  = $(DESTDIR)/opt/jarvisagent
 
 override_dh_auto_configure:
 	# Build premake5 from bundled source (no network on Launchpad)
-	cd vendor/premake-core && ./Bootstrap.sh
+	cd code/vendor/premake-core && ./Bootstrap.sh
 
 override_dh_auto_build:
 	# Build Engine edition
-	vendor/premake-core/bin/release/premake5 gmake --engine
+	code/vendor/premake-core/bin/release/premake5 gmake --engine
 	$(MAKE) -j$$(nproc) config=release
 	# Build Studio edition (default)
-	vendor/premake-core/bin/release/premake5 gmake
+	code/vendor/premake-core/bin/release/premake5 gmake
 	$(MAKE) -j$$(nproc) config=release
 
 override_dh_auto_install:
@@ -28,9 +28,9 @@ override_dh_auto_install:
 
 	# Pre-built React UIs (included in source tarball — no npm on Launchpad)
 	install -dm755 $(INSTDIR)/dashboard/ui
-	cp -r dashboard/ui/dist $(INSTDIR)/dashboard/ui/dist
+	cp -r code/frontend/dashboard/ui/dist $(INSTDIR)/dashboard/ui/dist
 	install -dm755 $(INSTDIR)/workflow-editor/ui
-	cp -r workflow-editor/ui/dist $(INSTDIR)/workflow-editor/ui/dist
+	cp -r code/frontend/workflow-editor/ui/dist $(INSTDIR)/workflow-editor/ui/dist
 
 	# Scripts
 	cp -r scripts $(INSTDIR)/scripts
