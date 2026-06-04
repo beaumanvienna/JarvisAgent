@@ -21,13 +21,13 @@ class Jarvisagent < Formula
     system "make", "config=release"
 
     # Build React dashboard
-    cd "dashboard/ui" do
+    cd "code/frontend/dashboard/ui" do
       system "npm", "install"
       system "npm", "run", "build"
     end
 
     # Build React workflow editor
-    cd "workflow-editor/ui" do
+    cd "code/frontend/workflow-editor/ui" do
       system "npm", "install"
       system "npm", "run", "build"
     end
@@ -36,8 +36,8 @@ class Jarvisagent < Formula
     prefix.install "bin/Release/jarvisAgent" => "bin/jarvisAgent"
 
     # React UIs
-    (prefix/"dashboard/ui").install "dashboard/ui/dist"
-    (prefix/"workflow-editor/ui").install "workflow-editor/ui/dist"
+    (prefix/"dashboard/ui").install "code/frontend/dashboard/ui/dist"
+    (prefix/"workflow-editor/ui").install "code/frontend/workflow-editor/ui/dist"
 
     # Scripts (excluding __pycache__)
     prefix.install "scripts"

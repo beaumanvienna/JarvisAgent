@@ -36,15 +36,15 @@ make -j%{?_smp_mflags} config=release
 premake5 gmake
 make -j%{?_smp_mflags} config=release
 
-cd dashboard/ui
+cd code/frontend/dashboard/ui
 npm install
 npm run build
-cd ../..
+cd ../../../..
 
-cd workflow-editor/ui
+cd code/frontend/workflow-editor/ui
 npm install
 npm run build
-cd ../..
+cd ../../../..
 fi
 
 %install
@@ -58,10 +58,10 @@ install -Dm755 bin/Release/jarvisAgent-engine %{_instdir}/bin/jarvisAgent-engine
 
 # React UIs
 install -dm755 %{_instdir}/dashboard/ui
-cp -r dashboard/ui/dist %{_instdir}/dashboard/ui/dist
+cp -r code/frontend/dashboard/ui/dist %{_instdir}/dashboard/ui/dist
 
 install -dm755 %{_instdir}/workflow-editor/ui
-cp -r workflow-editor/ui/dist %{_instdir}/workflow-editor/ui/dist
+cp -r code/frontend/workflow-editor/ui/dist %{_instdir}/workflow-editor/ui/dist
 
 # Scripts (excluding __pycache__)
 cp -r scripts %{_instdir}/scripts

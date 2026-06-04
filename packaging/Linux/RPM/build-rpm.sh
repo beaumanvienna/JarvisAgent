@@ -150,12 +150,12 @@ if command -v rpmbuild &>/dev/null; then
 
     # React UIs
     if [[ -d "$REPO_ROOT/code/frontend/dashboard/ui/dist" ]]; then
-        mkdir -p "$SRCDIR/dashboard/ui"
-        cp -r "$REPO_ROOT/code/frontend/dashboard/ui/dist" "$SRCDIR/dashboard/ui/dist"
+        mkdir -p "$SRCDIR/code/frontend/dashboard/ui"
+        cp -r "$REPO_ROOT/code/frontend/dashboard/ui/dist" "$SRCDIR/code/frontend/dashboard/ui/dist"
     fi
     if [[ -d "$REPO_ROOT/code/frontend/workflow-editor/ui/dist" ]]; then
-        mkdir -p "$SRCDIR/workflow-editor/ui"
-        cp -r "$REPO_ROOT/code/frontend/workflow-editor/ui/dist" "$SRCDIR/workflow-editor/ui/dist"
+        mkdir -p "$SRCDIR/code/frontend/workflow-editor/ui"
+        cp -r "$REPO_ROOT/code/frontend/workflow-editor/ui/dist" "$SRCDIR/code/frontend/workflow-editor/ui/dist"
     fi
 
     # Scripts

@@ -3,7 +3,7 @@
 Last updated: 2026-04-10
 
 JarvisAgent is a cross-platform C++ application with React frontends. All central
-C++ libraries are vendored under `vendor/` so that every platform builds against the
+C++ libraries are vendored under `code/vendor/` so that every platform builds against the
 exact same revision — no system-package roulette. Minor platform-specific exceptions
 apply (e.g. Schannel instead of OpenSSL on Windows). The build system is
 **premake5** (not CMake); on Windows we generate Visual Studio 2022 solutions, on
@@ -56,7 +56,7 @@ All platforms share the same core build pipeline:
 
 asio, crow, curl, openssl, date, pdcursesmod, python, simdjson, spdlog, thread-pool, tracy
 
-All vendored in `vendor/`. OpenSSL and libcurl are intentionally vendored to avoid version conflicts across distros.
+All vendored in `code/vendor/`. OpenSSL and libcurl are intentionally vendored to avoid version conflicts across distros.
 
 **Platform-specific TLS backends:**
 - **Linux / macOS** — libcurl uses vendored OpenSSL (`ssl` + `crypto`) for HTTPS.
@@ -635,7 +635,7 @@ docker run -it --rm \
 
 **MCP sidecar (optional):**
 
-The `mcp/` directory contains a standalone MCP server that exposes j9t workflows to Claude Desktop and Claude Code. It can run as a Docker sidecar:
+The `code/mcp/` directory contains a standalone MCP server that exposes j9t workflows to Claude Desktop and Claude Code. It can run as a Docker sidecar:
 
 ```yaml
 # In docker-compose.example.yml
