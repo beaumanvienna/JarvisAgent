@@ -55,13 +55,13 @@ if (-not $DryRun) {
     Pop-Location
 
     Write-Host "==> Building React dashboard ..."
-    Push-Location "$RepoRoot\dashboard\ui"
+    Push-Location "$RepoRoot\code\frontend\dashboard\ui"
     npm install
     npm run build
     Pop-Location
 
     Write-Host "==> Building React workflow editor ..."
-    Push-Location "$RepoRoot\workflow-editor\ui"
+    Push-Location "$RepoRoot\code\frontend\workflow-editor\ui"
     npm install
     npm run build
     Pop-Location
@@ -81,17 +81,17 @@ foreach ($bin in @("jarvisAgent-studio.exe", "jarvisAgent-engine.exe")) {
     }
 }
 
-# React UIs
-if (Test-Path "$RepoRoot\dashboard\ui\dist") {
+# React UIs (built from code\frontend\...; staged at dashboard\ui\dist for the runtime serving layout)
+if (Test-Path "$RepoRoot\code\frontend\dashboard\ui\dist") {
     New-Item -ItemType Directory -Force -Path "$StageDir\dashboard\ui" | Out-Null
-    Copy-Item -Recurse "$RepoRoot\dashboard\ui\dist" "$StageDir\dashboard\ui\dist"
+    Copy-Item -Recurse "$RepoRoot\code\frontend\dashboard\ui\dist" "$StageDir\dashboard\ui\dist"
 } else {
     Write-Host "WARNING: dashboard\ui\dist not found (expected in dry-run)"
 }
 
-if (Test-Path "$RepoRoot\workflow-editor\ui\dist") {
+if (Test-Path "$RepoRoot\code\frontend\workflow-editor\ui\dist") {
     New-Item -ItemType Directory -Force -Path "$StageDir\workflow-editor\ui" | Out-Null
-    Copy-Item -Recurse "$RepoRoot\workflow-editor\ui\dist" "$StageDir\workflow-editor\ui\dist"
+    Copy-Item -Recurse "$RepoRoot\code\frontend\workflow-editor\ui\dist" "$StageDir\workflow-editor\ui\dist"
 } else {
     Write-Host "WARNING: workflow-editor\ui\dist not found (expected in dry-run)"
 }
