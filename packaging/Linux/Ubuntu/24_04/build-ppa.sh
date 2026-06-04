@@ -69,45 +69,16 @@ for ui in code/frontend/dashboard/ui/dist code/frontend/workflow-editor/ui/dist;
 done
 echo "==> React UIs found OK"
 
-# ---- Step 3: Export source tree (excluding build artifacts, .git, etc.) ----
-echo "==> Exporting source tree to $SRC_DIR ..."
-rsync -a --delete \
-    --exclude='.git/' \
-    --exclude='.github/' \
-    --exclude='.vscode/' \
-    --exclude='.windsurf/' \
-    --exclude='.cache/' \
-    --exclude='.venv/' \
-    --exclude='.vs/' \
-    --exclude='node_modules/' \
-    --exclude='bin/' \
-    --exclude='bin-int/' \
-    --exclude='code/vendor/curl/bin/' \
-    --exclude='code/vendor/curl/bin-int/' \
-    --exclude='code/vendor/openssl/bin/' \
-    --exclude='code/vendor/openssl/bin-int/' \
-    --exclude='code/vendor/pdcursesmod/bin/' \
-    --exclude='code/vendor/pdcursesmod/bin-int/' \
-    --exclude='.flatpak-builder/' \
-    --exclude='build/' \
-    --exclude='/queue/*' \
-    --exclude='/log/*' \
-    --exclude='*.o' \
-    --exclude='*.a' \
-    --exclude='*.d' \
-    --exclude='*.pyc' \
-    --exclude='__pycache__/' \
-    --exclude='*.tsbuildinfo' \
-    --exclude='compile_commands.json' \
-    --exclude='config.json' \
-    --exclude='keys.json' \
-    --exclude='keys.json.enc' \
-    --exclude='*.sln' \
-    --exclude='*.vcxproj' \
-    --exclude='*.vcxproj.*' \
-    --exclude='.DS_Store' \
-    --exclude='code/vendor/premake-core/' \
-    "$REPO_ROOT/" "$SRC_DIR/"
+# ---- Step 3: Export source tree (allowlist: tracked files only) ----
+# `git archive` ships ONLY version-controlled files, so secrets (certs/*.pem
+# private keys, .mcp_admin_token, mcp_keys.json.enc, connections.json) and
+# runtime data (queue/, workflows/, log/, .venv/) can NEVER reach the public PPA.
+# The previous rsync --exclude blocklist failed open — it missed the private keys,
+# the admin token, the MCP keystore, and connections.json.  git archive fails
+# closed.  premake-core (Step 4) + dist (Step 5) are re-injected explicitly below.
+echo "==> Exporting source tree to $SRC_DIR (git archive — tracked files only) ..."
+rm -rf "$SRC_DIR"; mkdir -p "$SRC_DIR"
+git -C "$REPO_ROOT" archive --format=tar HEAD | tar -xf - -C "$SRC_DIR"
 
 # ---- Step 4: Bundle premake5 source into source tree ----
 echo "==> Bundling premake5 source ..."

@@ -1,3 +1,15 @@
+jarvisagent (0.8.6) noble; urgency=medium
+
+  * Repository layout reorganised: all source now lives under code/
+    (backend, frontend, mcp, vendor); the project root is minimal.
+  * Source packages are assembled with `git archive` (version-controlled
+    files only) so local secrets and runtime data are never included.
+  * queue/ and workflows/ folders are created automatically on first start.
+  * AI-interface connectivity probe timeout raised to 90s so local LLM
+    endpoints (Ollama / vLLM) cold-loading large models register as online.
+
+ -- JC <beaumanvienna@gmail.com>  Thu, 04 Jun 2026 04:50:55 +0000
+
 jarvisagent (0.8.5) noble; urgency=medium
 
   * Dual-edition build: --engine flag produces jarvisAgent-engine,

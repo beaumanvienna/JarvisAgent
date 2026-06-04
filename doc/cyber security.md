@@ -96,6 +96,8 @@ Studio is designed for **single-developer or small-team use on workstations**. A
 - Activating the first-run MCP admin enrollment token j9t prints to stderr on initial startup — required before any browser session or MCP client can connect.
 - Configuring TLS (`TlsCert` + `TlsKey`) when the port is reachable beyond localhost.
 
+Source-package builders that ship to public registries (`packaging/Linux/Ubuntu/24_04/build-{launchpad,ppa}.sh`) assemble the tarball with `git archive HEAD` — an **allowlist of version-controlled files only**. Gitignored dev-machine secrets (`certs/*.pem` private keys, `.mcp_admin_token`, `keys.json.enc`, `mcp_keys.json.enc`, `connections.json`) and runtime data (`queue/`, `workflows/`, `log/`) are absent by construction, so they cannot leak into a published source package. The pre-built React `dist/` and the `premake-core` source are the only untracked inputs, re-injected explicitly.
+
 ---
 
 ## j9t Engine — Production Server

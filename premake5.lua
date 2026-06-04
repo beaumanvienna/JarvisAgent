@@ -89,7 +89,7 @@ project "jarvisAgent"
 
     defines
     {
-        "JARVIS_AGENT_VERSION=\"0.8.5\"",
+        "JARVIS_AGENT_VERSION=\"0.8.6\"",
         "CROW_ENFORCE_WS_SPEC",
         "CROW_ENABLE_SSL",
         "CROW_USE_LOCALTIMEZONE",

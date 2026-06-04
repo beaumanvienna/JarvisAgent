@@ -23,6 +23,8 @@
 #include "json/configChecker.h"
 #include "auxiliary/file.h"
 
+#include <filesystem>
+
 namespace AIAssistant
 {
     bool ConfigChecker::Check(ConfigParser::EngineConfig& engineConfig)
@@ -34,16 +36,19 @@ namespace AIAssistant
         // demand here — the earliest validation point, before any subsystem scans
         // or loads them — and only treat a genuine failure (a non-directory file
         // sitting at the path, or a permissions error) as a fatal config error.
-        // create_directories is recursive and a no-op when the directory already
-        // exists; we re-check IsDirectory afterwards because its bool return is
-        // false for an already-present directory on non-MSVC platforms.
+        // Use std::filesystem::create_directories directly, NOT EngineCore::CreateDirectory:
+        // on Windows <windows.h> macro-expands the token `CreateDirectory` to `CreateDirectoryW`,
+        // which would rewrite even the qualified call here and fail to link (`create_directories`
+        // is not a Win32 macro).  It is recursive and a no-op when the dir already exists; we
+        // re-check IsDirectory afterwards since the ec-overload returns void.
         auto ensureRuntimeDir = [](std::string const& dirPath) -> bool
         {
             if (EngineCore::IsDirectory(dirPath))
             {
                 return true;
             }
-            EngineCore::CreateDirectory(dirPath);
+            std::error_code directoryCreateError;
+            std::filesystem::create_directories(dirPath, directoryCreateError);
             return EngineCore::IsDirectory(dirPath);
         };
 

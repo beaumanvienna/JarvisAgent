@@ -59,19 +59,28 @@ mkdir -p "$SOURCE_DIR"
 
 echo "==> Copying source tree ..."
 
-# Copy source files needed for the C++ build (vendor/ includes submodules)
-# Use tar to respect .gitignore-like exclusions
-cd "$REPO_ROOT"
-tar cf - \
-    --exclude='.git' \
-    --exclude='node_modules' \
-    --exclude='bin' \
-    --exclude='bin-int' \
-    --exclude='build' \
-    --exclude='packaging/*/build' \
-    --exclude='*.o' \
-    --exclude='*.d' \
-    . | tar xf - -C "$SOURCE_DIR"
+# Allowlist source assembly: `git archive` ships ONLY tracked files, so secrets
+# (certs/*.pem private keys, .mcp_admin_token, *_keys.json.enc, connections.json)
+# and runtime data (queue/, workflows/, log/, .venv/) can NEVER reach the public
+# source package.  A tar/rsync + --exclude blocklist fails open — any unlisted
+# secret leaks, and the previous list missed the private keys; git archive fails
+# closed (gitignored == absent by construction).
+git -C "$REPO_ROOT" archive --format=tar HEAD | tar -xf - -C "$SOURCE_DIR"
+
+# git archive omits two gitignored/untracked inputs the Launchpad build needs —
+# re-add them explicitly (the only things not under version control):
+#   - pre-built React dist/ (gitignored; Launchpad has no reliable npm)
+#   - premake-core source (untracked; Launchpad has no network to clone it)
+cp -r "$REPO_ROOT/code/frontend/dashboard/ui/dist"       "$SOURCE_DIR/code/frontend/dashboard/ui/dist"
+cp -r "$REPO_ROOT/code/frontend/workflow-editor/ui/dist" "$SOURCE_DIR/code/frontend/workflow-editor/ui/dist"
+
+if [[ ! -d "$REPO_ROOT/code/vendor/premake-core" ]]; then
+    echo "ERROR: code/vendor/premake-core not found (Launchpad has no network — bundle it first):"
+    echo "  git clone --branch v5.0.0-beta8 https://github.com/premake/premake-core code/vendor/premake-core"
+    exit 1
+fi
+rsync -a --exclude='.git/' --exclude='build/' --exclude='bin/' --exclude='obj/' \
+    "$REPO_ROOT/code/vendor/premake-core/" "$SOURCE_DIR/code/vendor/premake-core/"
 
 # Ensure pre-built React UIs are in the source tree
 if [[ ! -d "$SOURCE_DIR/code/frontend/dashboard/ui/dist" ]]; then
