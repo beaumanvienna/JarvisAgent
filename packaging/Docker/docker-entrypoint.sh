@@ -50,8 +50,10 @@ if [ "$NEED_SEED" = true ]; then
     fi
 fi
 
-# Copy example config on first run. When J9T_TLS=1 we inject the TLS fields
-# into the seeded config so port/cert paths are coherent from the start.
+# Copy example config on first run. The shared config.json.example ships with
+# TLS enabled (native installs serve HTTPS on 8443 and the server mints its own
+# self-signed cert on first start). Docker defaults to plain HTTP on 8080, so we
+# STRIP the TLS fields unless the container was started with --tls (J9T_TLS=1).
 if [ ! -f /app/config.json ] && [ -f "$IMAGE_DIR/.image-defaults/config.json" ]; then
     cp "$IMAGE_DIR/.image-defaults/config.json" /app/config.json
     if [ "${J9T_TLS:-0}" = "1" ]; then
@@ -68,7 +70,17 @@ with open(path, "w") as f:
 PY
         echo "==> Seeded /app/config.json with TLS defaults (port 8443)"
     else
-        echo "==> Created /app/config.json from defaults"
+        python3 - <<'PY'
+import json
+path = "/app/config.json"
+with open(path) as f:
+    cfg = json.load(f)
+for k in ("port", "TlsCert", "TlsKey"):
+    cfg.pop(k, None)
+with open(path, "w") as f:
+    json.dump(cfg, f, indent=4)
+PY
+        echo "==> Created /app/config.json from defaults (HTTP mode — TLS fields removed)"
     fi
 fi
 

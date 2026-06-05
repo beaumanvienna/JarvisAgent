@@ -26,6 +26,12 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 DEBIAN_DIR="$SCRIPT_DIR/debian"
 
+# Sign with this key explicitly. debuild otherwise derives the signing identity
+# from the changelog maintainer trailer (-- JC <beaumanvienna@gmail.com>) and
+# fails with "No secret key" because the registered key's UID is a different
+# email. Same key build-ppa.sh uses.
+GPG_KEY_ID="9A427F3969A3439AA6E836475C742F9C0115D544"
+
 SIGN=true
 if [[ "${1:-}" == "--no-sign" ]]; then
     SIGN=false
@@ -100,8 +106,11 @@ chmod +x "$SOURCE_DIR/debian/postinst"
 chmod +x "$SOURCE_DIR/debian/postrm"
 chmod +x "$SOURCE_DIR/debian/jarvisagent.wrapper"
 
-# Update changelog version if it doesn't match premake5.lua
-sed -i "s/^jarvisagent (.*)/jarvisagent (${PKG_VERSION})/" \
+# Update the TOP changelog stanza's version to match premake5.lua.
+# Anchored to line 1 — an unanchored substitution rewrites EVERY historical
+# stanza header to the current version, collapsing the version history into N
+# identical entries (lintian: latest-debian-changelog-entry-reuses-existing-version).
+sed -i "1s/^jarvisagent (.*)/jarvisagent (${PKG_VERSION})/" \
     "$SOURCE_DIR/debian/changelog"
 
 # ---- Build source package ----
@@ -109,7 +118,7 @@ echo "==> Running debuild -S ..."
 cd "$SOURCE_DIR"
 
 if [[ "$SIGN" == true ]]; then
-    debuild -S -sa
+    debuild -S -sa -k"$GPG_KEY_ID"
 else
     debuild -S -sa -us -uc
 fi

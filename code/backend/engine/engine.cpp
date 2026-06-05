@@ -69,22 +69,24 @@ static void PrintHelp()
               << "\n"
               << "At runtime:\n"
               << "  - Terminal UI: press 'q' or Ctrl-C to quit\n"
-              << "  - Dashboard:   http://localhost:8080\n"
-              << "  - Workflow Editor: http://localhost:8080/editor\n"
+              << "  - Dashboard:   https://localhost:8443\n"
+              << "  - Workflow Editor: https://localhost:8443/editor\n"
               << "  - REST API:    see doc/api-endpoints.md\n"
               << "\n"
               << "Example:\n"
-              << "  curl -s http://localhost:8080/api/status | python -m json.tool\n"
+              << "  curl -sk https://localhost:8443/api/status | python -m json.tool\n"
               << std::endl;
 }
 
 int engine(int argc, char* argv[])
 {
-    // Process CLI flags before anything else (clang-style: --help/--version
-    // take priority and cause immediate exit, unknown options are rejected).
+    // Process CLI flags before anything else. --help/--version take priority and
+    // exit immediately. Any other argument is ignored rather than rejected: the
+    // per-platform launchers (AppRun, jarvisagent-launcher.sh, the Windows .bat,
+    // …) may forward launcher-only flags such as --no-browser or --home, and an
+    // unrecognised argument must never prevent the server from starting.
     bool wantsHelp = false;
     bool wantsVersion = false;
-    std::string unknownOption;
 
     for (int i = 1; i < argc; ++i)
     {
@@ -96,10 +98,7 @@ int engine(int argc, char* argv[])
         {
             wantsVersion = true;
         }
-        else if (argv[i][0] == '-' && unknownOption.empty())
-        {
-            unknownOption = argv[i];
-        }
+        // All other arguments are intentionally ignored (see comment above).
     }
 
     if (wantsHelp)
@@ -111,12 +110,6 @@ int engine(int argc, char* argv[])
     {
         PrintVersion();
         return EXIT_SUCCESS;
-    }
-    if (!unknownOption.empty())
-    {
-        std::cerr << "jarvisAgent: unknown option '" << unknownOption << "'\n"
-                  << "Try 'jarvisAgent --help' for more information." << std::endl;
-        return EXIT_FAILURE;
     }
 
     // Check for config.json before initializing the engine

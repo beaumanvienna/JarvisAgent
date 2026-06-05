@@ -431,22 +431,25 @@ logs, keys, and <code>config.json</code> persist in
 directory.</p>
 <p>On Windows, use <code>scripts\run-docker.ps1</code> with the same
 semantics.</p>
-<p><strong>TLS mode: HTTPS on port 8443.</strong> For HTTPS, generate a
-certificate (or supply one from your PKI) and place the files under
-<code>&lt;data_dir&gt;/certs/</code>:</p>
+<p><strong>TLS mode: HTTPS on port 8443.</strong> Launch the container
+in TLS mode:</p>
 <div class="sourceCode" id="cb4"><pre
-class="sourceCode bash"><code class="sourceCode bash"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="fu">mkdir</span> <span class="at">-p</span> ~/JarvisAgent/certs</span>
-<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a><span class="ex">openssl</span> req <span class="at">-x509</span> <span class="at">-newkey</span> rsa:2048 <span class="at">-nodes</span> <span class="dt">\</span></span>
-<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a>  <span class="at">-keyout</span> ~/JarvisAgent/certs/j9t-key.pem <span class="dt">\</span></span>
-<span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a>  <span class="at">-out</span>    ~/JarvisAgent/certs/j9t-cert.pem <span class="dt">\</span></span>
-<span id="cb4-5"><a href="#cb4-5" aria-hidden="true" tabindex="-1"></a>  <span class="at">-days</span> 365 <span class="dt">\</span></span>
-<span id="cb4-6"><a href="#cb4-6" aria-hidden="true" tabindex="-1"></a>  <span class="at">-subj</span> <span class="st">&quot;/CN=localhost&quot;</span> <span class="dt">\</span></span>
-<span id="cb4-7"><a href="#cb4-7" aria-hidden="true" tabindex="-1"></a>  <span class="at">-addext</span> <span class="st">&quot;subjectAltName=DNS:localhost,IP:127.0.0.1&quot;</span></span>
-<span id="cb4-8"><a href="#cb4-8" aria-hidden="true" tabindex="-1"></a><span class="fu">chmod</span> 600 ~/JarvisAgent/certs/j9t-key.pem</span></code></pre></div>
-<p>Then launch the container in TLS mode:</p>
+class="sourceCode bash"><code class="sourceCode bash"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="ex">./scripts/run-docker.sh</span> <span class="at">--tls</span>              <span class="co"># interactive + TUI, HTTPS on 8443</span></span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a><span class="ex">./scripts/run-docker.sh</span> <span class="at">--tls</span> <span class="at">--headless</span>   <span class="co"># headless, HTTPS on 8443</span></span></code></pre></div>
+<p>On first start the server generates a self-signed
+<code>localhost</code> certificate under
+<code>&lt;data_dir&gt;/certs/</code> if none is present, so no manual
+setup is required. To use your own certificate (e.g. from your PKI),
+drop the PEM files in place beforehand:</p>
 <div class="sourceCode" id="cb5"><pre
-class="sourceCode bash"><code class="sourceCode bash"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="ex">./scripts/run-docker.sh</span> <span class="at">--tls</span>              <span class="co"># interactive + TUI, HTTPS on 8443</span></span>
-<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a><span class="ex">./scripts/run-docker.sh</span> <span class="at">--tls</span> <span class="at">--headless</span>   <span class="co"># headless, HTTPS on 8443</span></span></code></pre></div>
+class="sourceCode bash"><code class="sourceCode bash"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="fu">mkdir</span> <span class="at">-p</span> ~/JarvisAgent/certs</span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a><span class="ex">openssl</span> req <span class="at">-x509</span> <span class="at">-newkey</span> rsa:2048 <span class="at">-nodes</span> <span class="dt">\</span></span>
+<span id="cb5-3"><a href="#cb5-3" aria-hidden="true" tabindex="-1"></a>  <span class="at">-keyout</span> ~/JarvisAgent/certs/j9t-key.pem <span class="dt">\</span></span>
+<span id="cb5-4"><a href="#cb5-4" aria-hidden="true" tabindex="-1"></a>  <span class="at">-out</span>    ~/JarvisAgent/certs/j9t-cert.pem <span class="dt">\</span></span>
+<span id="cb5-5"><a href="#cb5-5" aria-hidden="true" tabindex="-1"></a>  <span class="at">-days</span> 365 <span class="dt">\</span></span>
+<span id="cb5-6"><a href="#cb5-6" aria-hidden="true" tabindex="-1"></a>  <span class="at">-subj</span> <span class="st">&quot;/CN=localhost&quot;</span> <span class="dt">\</span></span>
+<span id="cb5-7"><a href="#cb5-7" aria-hidden="true" tabindex="-1"></a>  <span class="at">-addext</span> <span class="st">&quot;subjectAltName=DNS:localhost,IP:127.0.0.1&quot;</span></span>
+<span id="cb5-8"><a href="#cb5-8" aria-hidden="true" tabindex="-1"></a><span class="fu">chmod</span> 600 ~/JarvisAgent/certs/j9t-key.pem</span></code></pre></div>
 <p>Open <code>https://localhost:8443</code>. Self-signed certificates
 produce a browser warning — accept it to proceed. On Windows, use
 <code>scripts\run-docker.ps1 -Tls</code>.</p>
@@ -932,8 +935,8 @@ for a fresh enrollment token. Don’t share your key; treat it like a
 password.</p>
 <h3 id="im-a-user-how-do-i-use-my-key-with-claude-code">I’m a user — how
 do I use my key with Claude Code?</h3>
-<p>The MCP sidecar (<code>code/mcp/dist/index.js</code>) reads the key from
-two sources, in order:</p>
+<p>The MCP sidecar (<code>code/mcp/dist/index.js</code>) reads the key
+from two sources, in order:</p>
 <ul>
 <li><code>J9T_TOKEN</code> environment variable, <em>or</em></li>
 <li><code>J9T_TOKEN_FILE</code> environment variable pointing to a file
@@ -1324,8 +1327,10 @@ validated at the handshake via the session cookie
 (<code>.onaccept</code> hook); no in-band auth message is used.</li>
 <li><strong>Built-in TLS (HTTPS).</strong> Set <code>"TlsCert"</code>
 and <code>"TlsKey"</code> in <code>config.json</code> to serve HTTPS
-(default port 8443). If only one field is set or the files don’t exist,
-j9t refuses to start. When TLS is enabled, HSTS headers are added.</li>
+(default port 8443). If both are set but the files don’t exist, j9t
+generates a self-signed <code>localhost</code> certificate at those
+paths on startup; if only one field is set, it refuses to start. When
+TLS is enabled, HSTS headers are added.</li>
 <li><strong>Gateway-trusted identity headers.</strong> When deployed
 behind an API gateway (Kong, AWS API Gateway, Traefik, nginx), configure
 <code>"TrustedProxyHeader"</code> and <code>"TrustedRoleHeader"</code>

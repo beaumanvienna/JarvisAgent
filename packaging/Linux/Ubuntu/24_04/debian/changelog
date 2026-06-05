@@ -1,3 +1,14 @@
+jarvisagent (0.8.7) noble; urgency=medium
+
+  * The server now generates a self-signed TLS certificate on first start when
+    none is present, so native installs serve HTTPS on 8443 out of the box.
+  * Build: discover the PostgreSQL client headers via pg_config when pkg-config
+    is unavailable (fixes the source build in minimal chroots such as the PPA
+    builder); pkg-config added to Build-Depends.
+  * Unrecognised command-line arguments are ignored instead of aborting startup.
+
+ -- JC <beaumanvienna@gmail.com>  Thu, 04 Jun 2026 19:38:02 -0700
+
 jarvisagent (0.8.6) noble; urgency=medium
 
   * Repository layout reorganised: all source now lives under code/

@@ -142,6 +142,10 @@ if [[ ! -f "$USER_HOME/config.json" ]]; then
     fi
 fi
 
+# Note: the server mints its own self-signed TLS cert on first start when
+# certs/j9t-{cert,key}.pem are absent (see WebServer::Start) — no launcher-side
+# openssl provisioning is needed.
+
 # ---- Python venv (first-run) ----
 if [[ ! -d "$USER_HOME/.venv" ]]; then
     echo "==> Creating Python virtual environment at $USER_HOME/.venv ..."
@@ -189,14 +193,14 @@ fi
 # ---- Open dashboard in default browser ----
 if [[ "$OPEN_BROWSER" == true ]]; then
     # Delay slightly so the server has time to start
-    (sleep 2 && xdg-open "http://localhost:8080" 2>/dev/null) &
+    (sleep 2 && xdg-open "https://localhost:8443" 2>/dev/null) &
 fi
 
 # ---- Launch ----
 echo "==> Starting JarvisAgent ($EDITION_LABEL edition) in $USER_HOME"
-echo "    Dashboard: http://localhost:8080"
+echo "    Dashboard: https://localhost:8443"
 if [[ "$EDITION_LABEL" == "Studio" ]]; then
-    echo "    Editor:    http://localhost:8080/editor"
+    echo "    Editor:    https://localhost:8443/editor"
 fi
 echo ""
 cd "$USER_HOME"

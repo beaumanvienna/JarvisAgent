@@ -10,6 +10,31 @@ set -euo pipefail
 APPDIR="$(dirname "$(readlink -f "$0")")"
 DATA_DIR="${JARVISAGENT_DATA:-$HOME/JarvisAgent}"
 
+# ---- Parse launcher-specific arguments ----
+# Consume launcher-only flags here so they never reach the binary (which rejects
+# unknown options and exits). --no-browser is accepted for parity with the
+# system launcher; the AppImage opens no browser itself, so it is a no-op.
+PASSTHROUGH_ARGS=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --home)
+            if [[ -z "${2:-}" ]]; then
+                echo "Error: --home requires a directory argument"
+                exit 1
+            fi
+            DATA_DIR="$2"
+            shift 2
+            ;;
+        --no-browser)
+            shift
+            ;;
+        *)
+            PASSTHROUGH_ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+
 # ---- First-run setup ----
 if [[ ! -d "$DATA_DIR" ]]; then
     echo "==> First run: creating working directory at $DATA_DIR"
@@ -43,6 +68,10 @@ if [[ ! -f "$DATA_DIR/config.json" ]]; then
     echo "    (set API keys, adjust queue/workflow paths if needed)"
 fi
 
+# Note: the server mints its own self-signed TLS cert on first start when
+# certs/j9t-{cert,key}.pem are absent (see WebServer::Start) — no launcher-side
+# openssl provisioning is needed.
+
 # ---- Python venv (first-run) ----
 if [[ ! -d "$DATA_DIR/.venv" ]]; then
     echo "==> Creating Python virtual environment at $DATA_DIR/.venv ..."
@@ -66,4 +95,4 @@ fi
 
 # ---- Launch ----
 cd "$DATA_DIR"
-exec "$DATA_DIR/bin/jarvisAgent-studio" "$@"
+exec "$DATA_DIR/bin/jarvisAgent-studio" "${PASSTHROUGH_ARGS[@]}"

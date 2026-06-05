@@ -259,13 +259,13 @@ if exist "!USER_HOME!\.venv\Scripts\activate.bat" (
 
 REM ---- Open dashboard in default browser ----
 if "!OPEN_BROWSER!"=="1" (
-    start "" "http://localhost:8080" 2>nul
+    start "" "https://localhost:8443" 2>nul
 )
 
 REM ---- Launch ----
 echo ==^> Starting JarvisAgent (!EDITION_LABEL! edition) in !USER_HOME!
-echo     Dashboard: http://localhost:8080
-if /i "!EDITION_LABEL!"=="Studio" echo     Editor:    http://localhost:8080/editor
+echo     Dashboard: https://localhost:8443
+if /i "!EDITION_LABEL!"=="Studio" echo     Editor:    https://localhost:8443/editor
 echo.
 cd /d "!USER_HOME!"
 "!INSTALL_DIR!\bin\!BINARY_NAME!"

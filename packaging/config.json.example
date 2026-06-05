@@ -8,6 +8,7 @@
     "max threads": 20,
     "engine sleep time in run loop in ms": 16,
     "verbose": false,
+    "port": 8443,
 
     "API interfaces": [
         {
@@ -72,5 +73,8 @@
     "max file size in kB": 24,
     "jcwf batch size": 1,
     "jcwf AI interface": -1,
-    "use_bash": false
+    "use_bash": false,
+
+    "TlsCert": "certs/j9t-cert.pem",
+    "TlsKey": "certs/j9t-key.pem"
 }

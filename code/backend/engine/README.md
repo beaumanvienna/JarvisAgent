@@ -110,7 +110,7 @@ dispatcher.Dispatch<AppErrorEvent>([](AppErrorEvent& e) {
 All logs (engine, application, Python) flow through:
 1. `std::cout` → `TerminalLogStreamBuf`
 2. Curses terminal window
-3. `/tmp/log.txt`
+3. `log/log.txt`
 
 ### Logger access
 ```

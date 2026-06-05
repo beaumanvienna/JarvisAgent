@@ -138,8 +138,16 @@ Open `http://localhost:8080` (dashboard) and `http://localhost:8080/editor`
 
 On Windows, use `scripts\run-docker.ps1` with the same semantics.
 
-**TLS mode: HTTPS on port 8443.** For HTTPS, generate a certificate (or supply one
-from your PKI) and place the files under `<data_dir>/certs/`:
+**TLS mode: HTTPS on port 8443.** Launch the container in TLS mode:
+
+```bash
+./scripts/run-docker.sh --tls              # interactive + TUI, HTTPS on 8443
+./scripts/run-docker.sh --tls --headless   # headless, HTTPS on 8443
+```
+
+On first start the server generates a self-signed `localhost` certificate under
+`<data_dir>/certs/` if none is present, so no manual setup is required. To use
+your own certificate (e.g. from your PKI), drop the PEM files in place beforehand:
 
 ```bash
 mkdir -p ~/JarvisAgent/certs
@@ -150,13 +158,6 @@ openssl req -x509 -newkey rsa:2048 -nodes \
   -subj "/CN=localhost" \
   -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
 chmod 600 ~/JarvisAgent/certs/j9t-key.pem
-```
-
-Then launch the container in TLS mode:
-
-```bash
-./scripts/run-docker.sh --tls              # interactive + TUI, HTTPS on 8443
-./scripts/run-docker.sh --tls --headless   # headless, HTTPS on 8443
 ```
 
 Open `https://localhost:8443`. Self-signed certificates produce a browser warning —
@@ -599,7 +600,7 @@ Engine is designed for production deployments and includes comprehensive securit
 - **Two-tier rate limiting.** Token-bucket policy split by authentication state. Pre-auth (per-IP) is tight — 100 req/min, burst 20 — and applies to unauthenticated or credential-rejected traffic. Authenticated (per-user) is generous — 1200 req/min, burst 200 — and applies once an MCP key or session validates. Both tiers return HTTP 429 with `Retry-After`; the security log distinguishes them via `rate_limited_preauth` vs `rate_limited_authenticated`.
 - **HMAC-SHA256 webhook authentication.** Webhook triggers require a per-workflow secret. Callers must include `X-Webhook-Signature: sha256=<hex>` computed over the raw request body. In Engine mode, webhooks without a configured secret are rejected.
 - **WebSocket authentication.** Browser upgrades are validated at the handshake via the session cookie (`.onaccept` hook); no in-band auth message is used.
-- **Built-in TLS (HTTPS).** Set `"TlsCert"` and `"TlsKey"` in `config.json` to serve HTTPS (default port 8443). If only one field is set or the files don't exist, j9t refuses to start. When TLS is enabled, HSTS headers are added.
+- **Built-in TLS (HTTPS).** Set `"TlsCert"` and `"TlsKey"` in `config.json` to serve HTTPS (default port 8443). If both are set but the files don't exist, j9t generates a self-signed `localhost` certificate at those paths on startup; if only one field is set, it refuses to start. When TLS is enabled, HSTS headers are added.
 - **Gateway-trusted identity headers.** When deployed behind an API gateway (Kong, AWS API Gateway, Traefik, nginx), configure `"TrustedProxyHeader"` and `"TrustedRoleHeader"` in `config.json`. The gateway handles authentication (OIDC, MFA, SSO) and j9t reads the authenticated user and role from the injected headers.
 - **Security audit logging.** All auth events are logged to `log/security.txt` (rotating, 10 MB x 5 files). Logged events: auth success/failure, rate limit triggers, lockout triggers, webhook accept/reject, shutdown requests, and run control actions — all with IP, user identity, and timestamps. Accessible via `GET /api/log/security` (admin role required) and the dashboard's Security tab.
 - **Security response headers.** All responses include `Content-Security-Policy`, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy`, and `Permissions-Policy`.

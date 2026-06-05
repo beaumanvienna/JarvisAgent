@@ -15,6 +15,41 @@ Keep entries self-contained — a fresh-context Claude should be able to read ju
 
 ---
 
+## 2026-06-04 (packaging runtime verification — HTTPS out-of-the-box via binary self-signed cert; Launchpad libpq fix; 0.8.7 bump) → next session
+
+Started the pre-1.0 packaging RUNTIME tests (the "CI builds but nothing installed+run yet" item).  Surfaced that **no native package starts out of the box** — then fixed it at the binary level rather than per-launcher.  **Working tree, JC commits.**  Suggested 1-liner: `packaging: serve HTTPS out-of-the-box via binary-generated self-signed cert, fix Launchpad libpq build (pg_config fallback), tolerate unknown CLI args; bump 0.8.7`.
+
+### What landed (15 files, working tree)
+- **Binary mints its own TLS cert** (`webServer.cpp` `WebServer::Start`): when TLS is configured (`TlsCert`+`TlsKey` set) but the files are absent, it generates a self-signed `localhost` cert in place via vendored OpenSSL (`EVP_RSA_gen` + X509, `AtomicWriteFile`, key `chmod 600`) instead of `LOG_APP_CRITICAL`+fail.  **This is the keystone** — it works on every platform incl. the Flatpak sandbox and Windows (no `openssl` CLI needed), so NO launcher needs cert provisioning.
+- **Binary tolerates unknown CLI args** (`engine.cpp`): removed the `unknown option → EXIT_FAILURE` arm (kept `--help`/`--version`).  Launchers forward launcher-only flags (`--no-browser`/`--home`) and an unrecognised arg must never block startup.  Help URLs → `https://localhost:8443`.
+- **`config.json.example` ships TLS** (`port 8443` + `TlsCert`/`TlsKey`) so native installs serve HTTPS by default → binary auto-gens the cert.  **Docker** keeps HTTP-on-8080 default: `docker-entrypoint.sh` now STRIPS the TLS fields unless `J9T_TLS=1` (was: error out).
+- **Launcher cleanup**: removed the (briefly-added) openssl cert-gen blocks from `AppRun` / `jarvisagent-launcher.sh` / Flatpak `jarvisagent-wrapper.sh` / macOS `build-dmg.sh` + `jarvisagent.rb` — superseded by the binary.  Fixed `8080`/`http` → `8443`/`https` URLs across all launchers incl. Windows `build-zip.ps1`.  `AppRun` gained arg parsing (consumes `--no-browser`/`--home`; was `exec … "$@"` → crashed on `--no-browser`).
+- **Launchpad libpq build fix** (`premake5.lua` + `debian/control`): the PPA build failed `libpq-fe.h: No such file` because premake discovers libpq via `pkg-config`, which Launchpad's minimal sbuild chroot doesn't install.  premake now falls back to `pg_config --includedir` (ships WITH `libpq-dev`, already a Build-Dep); also added `pkg-config` to Build-Depends.  Fallback validated by shadowing `pkg-config`.
+- **0.8.7 bump** (premake5.lua, README, Dockerfile `.image-version`, both `SettingsModal.tsx`, new `debian/changelog` 0.8.7 entry) — 0.8.6 was uploaded to Launchpad but its build FAILED (libpq), so a fresh version is needed.
+- **Doc sweep**: `jarvisagent.md` (Docker-TLS section reframed: auto-gen default, BYO-cert optional; Security bullet), `jarvisagent.1` (man page), regenerated `jarvisagent.html` (pandoc 3.1.3, `-V pagetitle=jarvisagent`), `cyber security.md` (×2: the "refuses to start if files absent" claim → auto-gen; "certs must be manually configured" → auto-gen self-signed, no ACME).  The two README path-fixes (engine `/tmp/log.txt`→`log/log.txt`, packaging docker-compose snippet) ride along.
+
+### What's verified
+- **Studio Release builds clean** (engine.cpp + webServer.cpp, no warnings on changed files).
+- **Binary** (direct): random args tolerated, cert auto-gen → HTTPS 8443 serves + stays up, self-signed `CN=localhost`; HTTP mode (no TLS keys) serves without cert-gen.
+- **Docker** (real working-tree `docker build`): default → entrypoint strips TLS → HTTP 8080 `ok=True`; `--tls` → binary auto-gens cert → HTTPS 8443.  Both 18 workflows.
+- **Deb** (built locally from working tree via `git stash create` tree, both editions): `sudo dpkg -P jarvisagent && sudo dpkg -i` (0.8.5→0.8.6) → `jarvisagent` first launch → scaffold `~/JarvisAgent` → **binary auto-gens cert** (log proves it) → HTTPS 8443, dashboard+editor HTTP 200, `ok=True` 6 workflows.  **Full fresh-install path works OOTB.**  (Deb instance left running on 8443 at wrap.)
+- **AppImage**: validated earlier via extract+patch (the binary fix supersedes; full package retest is CI's job — no local `appimagetool`).
+- **libpq pg_config fallback** confirmed (shadowed `pkg-config` → premake still finds `-I/usr/include/postgresql`).
+
+### Next session / open items
+- **Commit + push, THEN re-trigger Launchpad.** `build-launchpad.sh` archives `git archive HEAD` (committed), so the 0.8.7 fixes MUST be committed first or it'd package 0.8.7-labelled-but-0.8.6-source.  After commit: `./build-launchpad.sh` (signed, rebuilds React to 0.8.7) → `dput ppa:beauman/marley …`.
+- **CI re-test**: push triggers CI → rebuilds Flatpak/AppImage/RPM/Arch/Deb/DMG at 0.8.7 → re-download + runtime-test those (the "all GitHub packages pass" gate).  Pending machines per `reference_packaging_test_matrix`: miniMac (DMG), Rocky-USB (RPM), Manjaro-USB (Arch), Windows 11.
+- **Flatpak can't be tested with uncommitted changes** — its manifest builds `type: git` from `github.com/beaumanvienna/JarvisAgent.git` (clones GitHub), and compiles postgres+premake+app from source.  Test it via CI after push.  The sandbox-openssl concern is moot (binary links vendored OpenSSL).
+
+### Gotchas
+- **`build-launchpad.sh` = `git archive HEAD`** (committed only).  Commit before building the PPA source package.  (Two of its bugs were also fixed this run: an unanchored changelog `sed` that collapsed all version stanzas to one, and a missing `-k<keyid>` so signing failed because the changelog maintainer email ≠ the GPG key UID.)
+- **The original "native FATAL" was partly a red herring**: with the stock (TLS-less) example, the binary defaults to **HTTP on 8080**, and 8080 is occupied on this dev box → "port in use" FATAL.  The real goal (native = HTTPS 8443) still holds; the cert work is correct.  `m_TlsEnabled = hasCert && hasKey` (`webServer.cpp:3893`); empty `TlsCert`/`TlsKey` → HTTP, default port `m_TlsEnabled ? 8443 : 8080`.
+- **Local deb build mtimes** are normalized to the changelog date (SOURCE_DATE_EPOCH, reproducible build) — a freshly-built binary can show a past mtime; not staleness.  Verify binary contents with `strings -a … | grep 'Generated self-signed TLS certificate'` (plain `grep -c` on a binary returns 0 — needs `-a`).
+- **`code/vendor/premake-core`** is now gitignored (cloned on demand as a Launchpad build input: `git clone --depth 1 --branch v5.0.0-beta8 …`).  The classifier blocks Claude from cloning it; JC runs the clone.
+- **Deb launcher does NOT install Playwright** (only `markitdown[all]`), so its first-run is fast; the AppImage launcher DOES (≈300 MB Chrome+headless-shell+ffmpeg) — slow first start.
+
+---
+
 ## 2026-06-03 → 06-04 (repo-layout hygiene — `code/` subtree reorg + CI/packaging follow-ups + 0.8.6 bump) → next session
 
 Executed the full root-folder-cleanup refactor planned in `doc/misc/repo-layout refactor.md`, then chased the CI/packaging fallout platform-by-platform.  4292 files changed in the move, 4235 git-rename-detected.  **Landed as:** `e026520` (reorg) + `6e5ba57` (lockfile + macOS/RPM CI fixes) pushed; a **third batch staged** at wrap (Windows link fix + 0.8.6 bump + Launchpad git-archive security) — JC commits.  **Git state at wrap:** pushed HEAD = `6e5ba57`; staged-for-next-push = `configChecker.cpp`, `premake5.lua`, `Dockerfile`, 2× `SettingsModal.tsx`, `README.md`, `debian/changelog`, `build-launchpad.sh`, `build-ppa.sh`, `doc/cyber security.md`, this file.

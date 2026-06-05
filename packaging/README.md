@@ -638,20 +638,20 @@ docker run -it --rm \
 The `code/mcp/` directory contains a standalone MCP server that exposes j9t workflows to Claude Desktop and Claude Code. It can run as a Docker sidecar:
 
 ```yaml
-# In docker-compose.example.yml
-mcp:
-  build: ./mcp
-  depends_on: [jarvisagent]
+# In packaging/Docker/docker-compose.example.yml
+j9t_mcp:
+  build: ./code/mcp
+  depends_on: [jarvis_agent]
   environment:
-    J9T_URL: http://jarvisagent:8080
+    J9T_URL: http://jarvis_agent:8080
     # Provide the MCP API key via a mounted secret file, or inline as J9T_TOKEN=mcp_...
     J9T_TOKEN_FILE: /secrets/mcp_key
   volumes:
-    - ./data:/app:ro
+    - jarvis-queue:/app:ro
     - ./secrets:/secrets:ro
 ```
 
-Note: `http://jarvisagent:8080` is the default. Check `config.json` for the actual port (`"port"` field) and whether TLS is enabled (`TlsCert`/`TlsKey`) — if TLS is configured, use `https://` and the corresponding port (default 8443).
+Note: `http://jarvis_agent:8080` is the default. Check `config.json` for the actual port (`"port"` field) and whether TLS is enabled (`TlsCert`/`TlsKey`) — if TLS is configured, use `https://` and the corresponding port (default 8443).
 
 See `code/mcp/README.md` for full details.
 

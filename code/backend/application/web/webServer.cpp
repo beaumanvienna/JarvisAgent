@@ -93,6 +93,8 @@
 #include <openssl/hmac.h>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
+#include <openssl/x509.h>
+#include <openssl/pem.h>
 
 namespace fs = std::filesystem;
 namespace AIAssistant
@@ -3871,6 +3873,104 @@ namespace AIAssistant
     }
 
 
+    namespace
+    {
+        // Mint a self-signed localhost certificate + private key at the given paths.
+        // Invoked when TLS is configured but the cert/key files don't yet exist
+        // (e.g. a fresh package install): each install generates its own cert at
+        // runtime rather than shipping a private key inside the package, and no
+        // per-platform launcher needs an `openssl` CLI to provision it. Returns
+        // false + errorMessage on any OpenSSL/IO failure; the caller logs at ERROR.
+        bool GenerateSelfSignedCert(std::string const& certPath, std::string const& keyPath, std::string& errorMessage)
+        {
+            struct EvpPkeyDeleter
+            {
+                void operator()(EVP_PKEY* p) const noexcept { if (p) EVP_PKEY_free(p); }
+            };
+            struct X509Deleter
+            {
+                void operator()(X509* x) const noexcept { if (x) X509_free(x); }
+            };
+            struct BioDeleter
+            {
+                void operator()(BIO* b) const noexcept { if (b) BIO_free(b); }
+            };
+
+            std::unique_ptr<EVP_PKEY, EvpPkeyDeleter> pkey(EVP_RSA_gen(2048));
+            if (!pkey)
+            {
+                errorMessage = "EVP_RSA_gen(2048) failed";
+                return false;
+            }
+
+            std::unique_ptr<X509, X509Deleter> x509(X509_new());
+            if (!x509)
+            {
+                errorMessage = "X509_new failed";
+                return false;
+            }
+
+            X509_set_version(x509.get(), 2); // v3
+            ASN1_INTEGER_set(X509_get_serialNumber(x509.get()), 1);
+            X509_gmtime_adj(X509_getm_notBefore(x509.get()), 0);
+            X509_gmtime_adj(X509_getm_notAfter(x509.get()), 60L * 60L * 24L * 3650L); // ~10 years
+            X509_set_pubkey(x509.get(), pkey.get());
+
+            X509_NAME* name = X509_get_subject_name(x509.get());
+            X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
+                                       reinterpret_cast<unsigned char const*>("localhost"), -1, -1, 0);
+            X509_set_issuer_name(x509.get(), name); // self-signed: issuer == subject
+
+            if (X509_sign(x509.get(), pkey.get(), EVP_sha256()) == 0)
+            {
+                errorMessage = "X509_sign failed";
+                return false;
+            }
+
+            auto bioToString = [](BIO* bio)
+            {
+                char* data = nullptr;
+                long const len = BIO_get_mem_data(bio, &data);
+                return std::string(data, (len > 0) ? static_cast<size_t>(len) : 0u);
+            };
+
+            std::unique_ptr<BIO, BioDeleter> certBio(BIO_new(BIO_s_mem()));
+            std::unique_ptr<BIO, BioDeleter> keyBio(BIO_new(BIO_s_mem()));
+            if (!certBio || !keyBio)
+            {
+                errorMessage = "BIO_new failed";
+                return false;
+            }
+            if (PEM_write_bio_X509(certBio.get(), x509.get()) == 0)
+            {
+                errorMessage = "PEM_write_bio_X509 failed";
+                return false;
+            }
+            if (PEM_write_bio_PrivateKey(keyBio.get(), pkey.get(), nullptr, nullptr, 0, nullptr, nullptr) == 0)
+            {
+                errorMessage = "PEM_write_bio_PrivateKey failed";
+                return false;
+            }
+
+            std::string writeErr;
+            if (!EngineCore::AtomicWriteFile(certPath, bioToString(certBio.get()), writeErr))
+            {
+                errorMessage = "writing certificate '" + certPath + "': " + writeErr;
+                return false;
+            }
+            if (!EngineCore::AtomicWriteFile(keyPath, bioToString(keyBio.get()), writeErr))
+            {
+                errorMessage = "writing key '" + keyPath + "': " + writeErr;
+                return false;
+            }
+
+            // Restrict the private key to owner-only (best-effort; no-op semantics on Windows).
+            std::error_code ec;
+            fs::permissions(keyPath, fs::perms::owner_read | fs::perms::owner_write, fs::perm_options::replace, ec);
+            return true;
+        }
+    } // namespace
+
     bool WebServer::Start()
     {
         if (m_Running)
@@ -3896,15 +3996,26 @@ namespace AIAssistant
 
         if (m_TlsEnabled)
         {
-            if (!std::filesystem::exists(config.m_TlsCert))
+            bool const certExists = std::filesystem::exists(config.m_TlsCert);
+            bool const keyExists = std::filesystem::exists(config.m_TlsKey);
+            if (!certExists || !keyExists)
             {
-                LOG_APP_CRITICAL("[web] TLS certificate file not found: {}", config.m_TlsCert);
-                return false;
-            }
-            if (!std::filesystem::exists(config.m_TlsKey))
-            {
-                LOG_APP_CRITICAL("[web] TLS key file not found: {}", config.m_TlsKey);
-                return false;
+                // Fresh install: mint a self-signed localhost certificate in place
+                // rather than aborting. Generate the pair together — a half-present
+                // pair is unusable. This is why no per-platform launcher needs an
+                // `openssl` CLI to provision certs (works in the Flatpak sandbox and
+                // on Windows, which have no openssl binary).
+                LOG_APP_INFO("[web] TLS cert/key missing (cert={}, key={}) — generating a self-signed certificate",
+                             certExists ? "present" : "absent", keyExists ? "present" : "absent");
+                std::string genErr;
+                if (!GenerateSelfSignedCert(config.m_TlsCert, config.m_TlsKey, genErr))
+                {
+                    LOG_APP_CRITICAL("[web] Failed to generate self-signed TLS certificate (cert='{}', key='{}'): {}",
+                                     config.m_TlsCert, config.m_TlsKey, genErr);
+                    return false;
+                }
+                LOG_APP_INFO("[web] Generated self-signed TLS certificate: {} (key: {})", config.m_TlsCert,
+                             config.m_TlsKey);
             }
         }
 

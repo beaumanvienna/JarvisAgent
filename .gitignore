@@ -58,6 +58,10 @@ code/vendor/openssl/bin
 code/vendor/openssl/bin-int
 code/vendor/pdcursesmod/bin
 code/vendor/pdcursesmod/bin-int
+# premake-core source — cloned on demand only as a Launchpad/PPA build input
+# (Launchpad has no network to fetch it); re-injected into the source tarball by
+# the packaging scripts. Not a tracked vendor lib.
+code/vendor/premake-core/
 .venv
 .claude/
 connections.json

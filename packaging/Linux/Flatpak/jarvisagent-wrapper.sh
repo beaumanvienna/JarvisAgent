@@ -43,6 +43,10 @@ if [[ ! -f "$DATA_DIR/config.json" ]]; then
     echo "    (set API keys, adjust queue/workflow paths if needed)"
 fi
 
+# Note: the server mints its own self-signed TLS cert on first start when
+# certs/j9t-{cert,key}.pem are absent (see WebServer::Start). This is why no
+# openssl CLI is needed inside the Flatpak sandbox.
+
 # ---- Python venv (first-run) ----
 if [[ ! -d "$DATA_DIR/.venv" ]]; then
     echo "==> Creating Python virtual environment at $DATA_DIR/.venv ..."

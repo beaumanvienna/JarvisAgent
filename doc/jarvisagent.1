@@ -972,7 +972,9 @@ Browser upgrades are validated at the handshake via the session cookie
 \fBBuilt\-in TLS (HTTPS).\fR
 Set \fBTlsCert\fR and \fBTlsKey\fR in config.json to serve HTTPS (default
 port 8443).
-If only one field is set or the files don\(aqt exist, j9t refuses to start.
+If both are set but the files don\(aqt exist, j9t generates a self\-signed
+localhost certificate at those paths on startup; if only one field is set, it
+refuses to start.
 When TLS is enabled, HSTS headers are added.
 .IP \(bu
 \fBGateway\-trusted identity headers.\fR

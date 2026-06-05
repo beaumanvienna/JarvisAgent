@@ -114,6 +114,10 @@ class Jarvisagent < Formula
           echo "    Please edit it to set your API keys."
       fi
 
+      # Note: the server mints its own self-signed TLS cert on first start when
+      # certs/j9t-{cert,key}.pem are absent (see WebServer::Start) — no
+      # launcher-side openssl provisioning is needed.
+
       if [[ ! -d "$USER_HOME/.venv" ]]; then
           echo "==> Creating Python virtual environment at $USER_HOME/.venv ..."
           python3 -m venv "$USER_HOME/.venv" 2>/dev/null || true
@@ -127,12 +131,12 @@ class Jarvisagent < Formula
       [[ -f "$USER_HOME/.venv/bin/activate" ]] && source "$USER_HOME/.venv/bin/activate"
 
       if [[ "$OPEN_BROWSER" == true ]]; then
-          (sleep 2 && open "http://localhost:8080" 2>/dev/null) &
+          (sleep 2 && open "https://localhost:8443" 2>/dev/null) &
       fi
 
       echo "==> Starting JarvisAgent in $USER_HOME"
-      echo "    Dashboard: http://localhost:8080"
-      echo "    Editor:    http://localhost:8080/editor"
+      echo "    Dashboard: https://localhost:8443"
+      echo "    Editor:    https://localhost:8443/editor"
       echo ""
       cd "$USER_HOME"
       exec "$USER_HOME/bin/jarvisAgent" "${PASSTHROUGH_ARGS[@]}"

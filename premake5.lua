@@ -89,7 +89,7 @@ project "jarvisAgent"
 
     defines
     {
-        "JARVIS_AGENT_VERSION=\"0.8.6\"",
+        "JARVIS_AGENT_VERSION=\"0.8.7\"",
         "CROW_ENFORCE_WS_SPEC",
         "CROW_ENABLE_SSL",
         "CROW_USE_LOCALTIMEZONE",
@@ -318,17 +318,30 @@ project "jarvisAgent"
             }
 
             --
-            -- Use pkg-config to discover libpq (PostgreSQL client library).
+            -- Discover the libpq (PostgreSQL client) include path. Try pkg-config
+            -- first, then fall back to pg_config. pg_config ships WITH libpq-dev,
+            -- so it is present whenever the headers are — unlike pkg-config, which
+            -- a minimal build chroot (e.g. Launchpad's sbuild) does not install,
+            -- which previously failed the build with "libpq-fe.h: No such file".
+            -- On noble libpq-fe.h lives under /usr/include/postgresql, not the
+            -- default include path, so the -I is required.
             --
+            local pq_incdir = nil
             local pq_cflags = os.outputof("pkg-config --cflags libpq 2>/dev/null")
             if pq_cflags and pq_cflags ~= "" then
-                local pq_incdir = pq_cflags:match("-I([^%s]+)")
-                if pq_incdir then
-                    includedirs { pq_incdir }
+                pq_incdir = pq_cflags:match("-I([^%s]+)")
+            end
+            if not pq_incdir then
+                local pg_incdir = os.outputof("pg_config --includedir 2>/dev/null")
+                if pg_incdir and pg_incdir ~= "" then
+                    pq_incdir = pg_incdir:gsub("%s+$", "")
                 end
-                print(">>> libpq (Linux): " .. pq_cflags:gsub("%s+$", ""))
+            end
+            if pq_incdir then
+                includedirs { pq_incdir }
+                print(">>> libpq (Linux): -I" .. pq_incdir)
             else
-                print(">>> libpq: not found via pkg-config — PostgreSQL connector will not be available")
+                print(">>> libpq: not found via pkg-config or pg_config — PostgreSQL connector will not be available")
             end
 
             links {
