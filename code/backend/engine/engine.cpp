@@ -82,8 +82,10 @@ int engine(int argc, char* argv[])
 {
     // Process CLI flags before anything else (clang-style): --help/--version take
     // priority and exit immediately; any unknown option is rejected — Unix style.
-    // j9t does not invent launcher flags: each per-platform wrapper forwards args
-    // to the binary verbatim, so anything passed to j9t must be a valid j9t option.
+    // The binary itself accepts only --help/--version; it owns no launcher flags.
+    // The per-platform wrappers own arg policy (they consume their own --home /
+    // --no-browser and exec the binary with only an info flag or nothing), so by the
+    // time a flag reaches j9t it must be a valid j9t option or it is rejected here.
     // (This runs before the TUI/logging come up, so stderr reaches the terminal
     // and the process exits cleanly before ncurses takes over.)
     bool wantsHelp = false;

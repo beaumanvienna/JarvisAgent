@@ -1,3 +1,19 @@
+jarvisagent (0.8.8) noble; urgency=medium
+
+  * Packaged installs now copy the bundled scripts/ directory instead of
+    symlinking it, so workflow shell and Python script tasks pass the path
+    confinement check — a symlink resolved outside the working directory and
+    every script task was being rejected.
+  * Unrecognised command-line arguments are rejected again (Unix-style) instead
+    of ignored; only valid j9t options are accepted.
+  * All platform launchers now handle arguments consistently: --help/--version
+    print and exit without running the first-run setup (working directory, Python
+    venv); --home DIR and --no-browser are recognised; any other option is
+    rejected with exit 1. The AppImage and Flatpak launchers gain --home (the
+    Flatpak path must be under $HOME).
+
+ -- JC <beaumanvienna@gmail.com>  Thu, 04 Jun 2026 21:55:05 -0700
+
 jarvisagent (0.8.7) noble; urgency=medium
 
   * The server now generates a self-signed TLS certificate on first start when

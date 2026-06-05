@@ -180,7 +180,7 @@ COPY example/workflows/aiCarMaintenancePipeline.jcwf \
 COPY packaging/config.json.example /opt/jarvisagent/.image-defaults/config.json
 
 # Image version marker for upgrade detection (entrypoint re-seeds workflows on version change)
-RUN echo "0.8.7" > /opt/jarvisagent/.image-defaults/.image-version
+RUN echo "0.8.8" > /opt/jarvisagent/.image-defaults/.image-version
 
 # Entrypoint script
 COPY packaging/Docker/docker-entrypoint.sh /opt/jarvisagent/docker-entrypoint.sh

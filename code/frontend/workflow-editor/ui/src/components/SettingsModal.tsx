@@ -145,7 +145,7 @@ function AboutTab(): JSX.Element
     <div style={{ display: "flex", alignItems: "center", gap: 16, padding: "24px 8px" }}>
       <img src={logoUrl} alt="JarvisAgent" style={{ width: 96, height: 96, borderRadius: "50%" }} />
       <div>
-        <div style={{ fontSize: 18, fontWeight: 600 }}>JarvisAgent v0.8.7</div>
+        <div style={{ fontSize: 18, fontWeight: 600 }}>JarvisAgent v0.8.8</div>
         <div style={{ fontSize: 12, opacity: 0.7, marginTop: 6, lineHeight: 1.6 }}>
           MIT License &middot; &copy; 2026 JC Technolabs<br />
           <a

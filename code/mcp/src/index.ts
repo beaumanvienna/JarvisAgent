@@ -7,11 +7,13 @@
 // Auth: Bearer token passthrough to j9t REST API.
 //
 // Environment variables:
-//   J9T_URL          — j9t base URL (default: http://localhost:8080)
+//   J9T_URL          — j9t base URL (default: https://localhost:8443)
 //   J9T_TOKEN        — Bearer token for j9t Engine auth
 //   J9T_TOKEN_FILE   — Path to file containing the Bearer token
 //   J9T_MCP_TRANSPORT — "stdio" (default) or "sse"
 //   J9T_MCP_PORT     — SSE port (default: 3100)
+//   NODE_EXTRA_CA_CERTS — (Node built-in) path to j9t's self-signed cert
+//                         (certs/j9t-cert.pem) so fetch trusts the default HTTPS.
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";

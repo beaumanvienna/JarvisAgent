@@ -161,9 +161,21 @@ if not errorlevel 1 (
 )
 
 REM ---- Parse arguments ----
+REM The wrapper owns arg policy: info flags pass through to the binary (which prints
+REM and exits before the config check, so the first-run setup below is skipped);
+REM --home/--no-browser are consumed; anything else is a strict exit 1 (mirrors j9t).
+REM j9t takes no positional arguments, so a non-flag argument is rejected too.
 :parse
 if "%~1"=="" goto :main
+if /i "%~1"=="--help" goto :passthrough
+if /i "%~1"=="-h" goto :passthrough
+if /i "%~1"=="--version" goto :passthrough
+if /i "%~1"=="-v" goto :passthrough
 if /i "%~1"=="--home" (
+    if "%~2"=="" (
+        echo jarvisagent: --home requires a directory argument 1>&2
+        exit /b 1
+    )
     set "USER_HOME=%~2"
     shift
     shift
@@ -174,12 +186,9 @@ if /i "%~1"=="--no-browser" (
     shift
     goto :parse
 )
-if /i "%~1"=="--help" goto :passthrough
-if /i "%~1"=="-h" goto :passthrough
-if /i "%~1"=="--version" goto :passthrough
-if /i "%~1"=="-v" goto :passthrough
-shift
-goto :parse
+echo jarvisagent: unknown option '%~1' 1>&2
+echo Try 'jarvisagent --help' for more information. 1>&2
+exit /b 1
 
 :passthrough
 "!INSTALL_DIR!\bin\!BINARY_NAME!" %*

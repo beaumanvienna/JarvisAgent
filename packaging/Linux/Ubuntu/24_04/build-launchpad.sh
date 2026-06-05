@@ -104,7 +104,6 @@ cp -r "$DEBIAN_DIR" "$SOURCE_DIR/debian"
 chmod +x "$SOURCE_DIR/debian/rules"
 chmod +x "$SOURCE_DIR/debian/postinst"
 chmod +x "$SOURCE_DIR/debian/postrm"
-chmod +x "$SOURCE_DIR/debian/jarvisagent.wrapper"
 
 # Update the TOP changelog stanza's version to match premake5.lua.
 # Anchored to line 1 — an unanchored substitution rewrites EVERY historical

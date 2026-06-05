@@ -15,6 +15,44 @@ Keep entries self-contained — a fresh-context Claude should be able to read ju
 
 ---
 
+## 2026-06-04 → 06-05 (launcher arg-handling parity across all platform wrappers + doc sweep; 0.8.8 bump) → next session
+
+**Status: all uncommitted in the working tree — JC commits.**  This batch = the **0.8.8 version bump** + a CLI-argument-handling rework across every platform launcher + the doc sweep that follows from it.  Suggested commit one-liner:
+
+> `packaging: unify CLI arg handling across all platform launchers — info flags (--help/--version) skip first-run setup, --home/--no-browser consumed by the wrapper, unknown options strict-refuse (exit 1); AppImage+Flatpak gain --home; flip MCP sidecar default URL to https://localhost:8443; drop legacy debian/jarvisagent.wrapper; man/manual/html doc sweep; bump 0.8.8`
+
+Reworked CLI-argument handling so **every** platform wrapper owns its arg policy identically, instead of three different behaviours (full launchers passed unknown args through to the binary *after* running setup; AppImage/Flatpak forwarded verbatim; Windows silently ignored unknowns).
+
+### The model (all six user-facing wrappers)
+1. `--help`/`-h`/`--version`/`-v` → exec the **real** binary with just that flag, *before* any first-run setup.  These return before j9t's `config.json` check (`engine.cpp:109-118`), so no working dir / venv is needed — printing `--version` on a fresh install no longer scaffolds `~/JarvisAgent` + builds a venv + pip-installs markitdown.
+2. `--home DIR` → working directory to install into.  `--no-browser` → skip the browser (no-op on AppImage/Flatpak, which open none — accepted for invocation parity).
+3. Anything else (unknown flag **or** a positional — j9t takes none) → strict `exit 1` from the wrapper, before setup, mirroring j9t's own Unix-style rejection.
+4. The final launch passes the binary **no** args (all consumed/handled above) — fixes a latent `set -u` empty-array error on macOS bash 3.2 (`"${PASSTHROUGH_ARGS[@]}"`).
+
+### Files changed (working tree)
+- `packaging/Linux/jarvisagent-launcher.sh` (deb/rpm/arch shared), `packaging/Linux/AppImage/AppRun`, `packaging/Linux/Flatpak/jarvisagent-wrapper.sh`, `packaging/macOS/Tahoe/build-dmg.sh` (.app launcher heredoc), `packaging/macOS/Tahoe/jarvisagent.rb` (Homebrew launcher heredoc), `packaging/Windows/11/build-zip.ps1` (jarvisagent.bat) — all to the model above.  **AppImage + Flatpak gained `--home`** (previously env-only via `JARVISAGENT_DATA`; Flatpak's must be under `$HOME` — sandbox grants `--filesystem=home`).
+- `code/backend/engine/engine.cpp` — corrected the arg-parse comment (it claimed wrappers "forward args verbatim", which was already false for the full launchers and is now false for all).
+- `jarvisagent.rb` Homebrew `test do` — `--help` expects exit **0** now (was asserting exit 1; j9t's `--help` is `EXIT_SUCCESS`).
+- **Deleted legacy `packaging/Linux/Ubuntu/24_04/debian/jarvisagent.wrapper`** + its stray `chmod +x` in `build-launchpad.sh` (changelog line 48 already noted it was superseded by the shared `jarvisagent-launcher.sh`; deb installs the shared one via `debian/rules`).
+- **0.8.8 version bump** (was already partly staged at session start): `premake5.lua`, `README.md`, both `SettingsModal.tsx` about-boxes, `Dockerfile` `.image-version`, and the new `debian/changelog` 0.8.8 stanza (its first two bullets — scripts-copy + strict-refuse — document changes already shipped in committed `00b819e`/`b81501b`; the third bullet is this session's launcher-parity work).
+- **MCP sidecar default URL flipped** (closes 0.8.8 item #3): `code/mcp/src/config.ts` now defaults `J9T_URL` to `https://localhost:8443` (was `http://localhost:8080`) — a default j9t serves HTTPS now.  Node's `fetch` (undici) rejects the self-signed cert unless `NODE_EXTRA_CA_CERTS` points at `certs/j9t-cert.pem`, documented in `index.ts`'s header + `code/mcp/README.md` (config table + run/curl examples; plain-HTTP Docker case → set `J9T_URL` explicitly).  **No insecure-TLS default** — secure-by-default via the CA env var.  `dist/` rebuilt locally (`npm run build`, gitignored — rebuilt at packaging time; committed change is `src/` + README only).
+- **Doc sweep** (the launcher-flag docs were stale/incomplete): `doc/jarvisagent.md` + `doc/jarvisagent.1` OPTIONS sections rewritten into three accurate groups — **Installed launcher** (`jarvisagent` + AppImage/Flatpak/.app/.bat: `--home DIR`, `--no-browser`, info-flags skip setup), **Source-tree launcher** (`jarvisagent.sh`: `--studio`/`--engine`/`--debug`/`--release`), **Binary flags**; unknown→non-zero exit noted for both.  `doc/jarvisagent.html` regenerated from the `.md` (`pandoc 3.1.3 -s -V pagetitle=jarvisagent`; verified byte-identical to a fresh regen — in sync).  `packaging/README.md` AppImage+Flatpak sections note `--home`/`--no-browser`/strict-refuse.  `doc/INSTALL.md` already accurate (Linux `/opt` packages), left as-is.
+
+### Verified
+- `bash -n` clean on all five standalone shell launchers **and** the extracted macOS `.app` + Homebrew launcher heredoc bodies.  Behavioural trace of the canonical while-loop model: info flags exec early (exit 0); no-args/`--no-browser` reach setup; `--home DIR` overrides the data dir in any position and combines with `--no-browser`; `--home` with no arg → exit 1; unknown flag / positional → exit 1.  Windows `.bat` validated by inspection (cmd.exe not runnable here).
+- **Not run:** no package was rebuilt/installed (pure launcher-script edits); a real fresh-install smoke of `--help`/`--home`/`--bogus` per platform is the natural pre-upload check.
+
+### Open / deliberately out of scope
+- **0.8.8 is now fully landed** — all three working-tree items done (scripts-copy via committed `00b819e`, strict-refuse args, MCP default URL flip).  `todo.md`'s "0.8.8" item can be struck through.  Pre-upload smoke still wanted: a real fresh-install `--help`/`--home`/`--bogus` per platform, and one MCP sidecar connect against a default HTTPS j9t with `NODE_EXTRA_CA_CERTS` set.
+- **`doc/jarvisagent.html` is kept** (JC's call) — a tracked, manually-`pandoc`-regenerated mirror of `jarvisagent.md` for Windows/online viewing; nothing ships or consumes it, so it's drift-prone.  Re-run `pandoc 3.1.3 -s -V pagetitle=jarvisagent doc/jarvisagent.md -o doc/jarvisagent.html` whenever the `.md` changes.
+- `jarvisagent.sh` (repo-root **dev** launcher) and `packaging/Docker/docker-entrypoint.sh` left as-is: the dev launcher has its own build/edition selectors (`--engine`/`--studio`/`--debug`/`--release`) and a different contract; Docker is env-driven (`J9T_TLS`, volume mounts), opens no browser, and forwards `"$@"` to the binary which already strict-refuses (its setup is light — deps pre-baked).  Flag if you want these brought in too.
+- `doc/misc/JarvisAgent TODO List.md:67` wrongly lists `jarvisagent-launcher.sh` as the shared launcher for "RPM, DEB, Arch, AppImage, Flatpak" — AppImage uses `AppRun`, Flatpak uses `jarvisagent-wrapper.sh`.  Stale archive line; left untouched.
+
+### Supersedes
+- **The 2026-06-04 gotcha "Arg handling is strict-refuse BY DESIGN" (below) is now partly obsolete**: its claim that "the AppImage `AppRun` and Flatpak wrapper open no browser, so they forward args verbatim and the binary correctly rejects a stray `--no-browser`" no longer holds — those two now consume `--no-browser` (no-op) and `--home`, and reject unknowns themselves.  The *binary's* strict-refuse posture and the "TUI app → stderr-before-ncurses, exit 1 not a crash" rationale still stand.  Don't "fix" the wrappers back to verbatim forwarding.
+
+---
+
 ## 2026-06-04 (packaging runtime verification — HTTPS out-of-the-box via binary self-signed cert; Launchpad libpq fix; 0.8.7 bump) → next session
 
 Started the pre-1.0 packaging RUNTIME tests (the "CI builds but nothing installed+run yet" item).  Surfaced that **no native package starts out of the box** — then fixed it at the binary level rather than per-launcher.  **Committed + pushed as `b81501b`** (`packaging: serve HTTPS out-of-the-box via binary-generated self-signed cert, fix Launchpad libpq build (pg_config fallback), tolerate unknown CLI args; bump 0.8.7`).  A small follow-up (`pkgconf`) is staged in the working tree — see open items.

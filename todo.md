@@ -24,10 +24,11 @@ Write a few non-trivial JCWFs **directly in the editor** rather than as raw JSON
 ### Dogfood the AI assistant (JC)
 Drive a real conversation through the assistant chat surface: multi-turn tool-use loop, approval flow for mutating tools, the eight `jcwf_*` tools (read / explain / validate / read_plan / write_plan / generate / fix_task / write_script), runtime-control tools (`workflow_pause/resume/stop`, `get_dashboard_status`), slash commands, ghost-text auto-completion, history search, persistent session save/load.  Cross-references §18 D2 hardening triage: the assistant is exactly where the cyber-sec audit found its densest CRITICAL cluster (`assistantTools.h` has five shell-injection findings in a single file + the tool-approval bypass in `assistantController.h`).  Findings reachable in real use should jump the §18 D2 queue; findings unreachable in any plausible workflow get a "skip with reason" entry.  Two-for-one: dogfood validation **and** sharper hardening triage.
 
-### 0.8.8 — queued follow-ups (staged in working tree; needs commit + version bump)
-- **Strict-refuse args** — `engine.cpp` + `AppRun` reverted; changelog note reverses the 0.8.7 "args ignored" bullet.
-- **Scripts copied, not symlinked** — all six launchers fixed (real `scripts/` so workflow script tasks pass path-confinement).
-- **MCP default URL** — flip `code/mcp/src/config.ts` `J9T_URL` to `https://localhost:8443`, document `NODE_EXTRA_CA_CERTS`, rebuild `code/mcp/dist`.
+### 0.8.8 — queued follow-ups (staged in working tree; needs commit)
+- ~~**Strict-refuse args** — `engine.cpp` + `AppRun` reverted; changelog note reverses the 0.8.7 "args ignored" bullet.~~
+- ~~**Scripts copied, not symlinked** — all six launchers fixed (real `scripts/` so workflow script tasks pass path-confinement).~~
+- ~~**MCP default URL** — flipped `code/mcp/src/config.ts` to `https://localhost:8443`; `NODE_EXTRA_CA_CERTS` documented; `dist` rebuilt.~~
+- ~~**Launcher arg-handling parity** — all six wrappers own arg policy identically (info-flags skip setup, `--home`/`--no-browser`, strict-refuse unknown); version bumped 0.8.8.~~
 
 ### Packaging — final pre-beta retest (all targets)
 One full install→serve pass of every package on a clean checkout shortly before the beta announce (not per-change); confirm the served UIs load in each.  Linux dev-box targets (AppImage / Deb / Flatpak / Docker amd64) already pass; still to run on their own hardware: macOS DMG + arm64 Docker (miniMac), RPM (Rocky), Arch (Manjaro), Windows, and `apt install` from the PPA.

@@ -388,7 +388,7 @@ rm -rf ~/JarvisAgent/   # remove user data
 - Use `linuxdeploy` (preferred, bundles shared libs) or `appimagetool` to generate the AppImage.
 - On first launch, `AppRun` creates `~/JarvisAgent` with symlinks to read-only assets and real directories for writable data (`queue/`, `log/`, `workflows/`).
 - Python venv is created on first run in the user's data directory.
-- Override data dir with `JARVISAGENT_DATA=/path/to/dir`.
+- Override data dir with `--home DIR` or `JARVISAGENT_DATA=/path/to/dir`. `--no-browser` is accepted (no-op — the AppImage opens no browser); `--help`/`--version` short-circuit to the binary before any setup; unknown options are rejected (exit 1).
 
 **Files:**
 - `AppRun` — entry point script (symlinks assets, creates venv on first run)
@@ -426,6 +426,7 @@ rm -rf ~/JarvisAgent   # remove data directory
 - Builds premake5 from source inside the Flatpak build, then builds JarvisAgent C++ + React UIs.
 - Wrapper script creates `~/JarvisAgent` with symlinks to read-only assets and writable dirs.
 - Python venv created on first run in user data directory.
+- Override data dir with `--home DIR` (must be under `$HOME` — the sandbox grants `--filesystem=home`) or `JARVISAGENT_DATA=/path/to/dir`. `--no-browser` is accepted (no-op); `--help`/`--version` short-circuit to the binary before any setup; unknown options are rejected (exit 1).
 - `--share=network` for AI API calls, `--filesystem=home` for queue/workflows/log.
 
 **Files:**

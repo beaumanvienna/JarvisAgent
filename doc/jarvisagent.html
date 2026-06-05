@@ -344,16 +344,31 @@ auth/RBAC/audit machinery is the same — Engine just drops the editing
 surface so the attack surface is smaller. See <a
 href="#security">Security</a> for details.</p>
 <h2 id="options">OPTIONS</h2>
-<p><strong>Launcher flags</strong> (for
-<code>jarvisagent.sh</code>):</p>
+<p><strong>Installed launcher</strong> (the <code>jarvisagent</code>
+command, and the AppImage / Flatpak / macOS <code>.app</code> / Windows
+<code>jarvisagent.bat</code> equivalents):</p>
 <ul>
-<li><strong><code>--studio</code></strong> — Launch the Studio edition
-(default).</li>
-<li><strong><code>--engine</code></strong> — Launch the Engine
-edition.</li>
-<li><strong><code>--help</code></strong> — Show usage information.</li>
+<li><strong><code>--home DIR</code></strong> — Working directory to
+create and run in (default <code>~/JarvisAgent</code>).</li>
+<li><strong><code>--no-browser</code></strong> — Don’t open the
+dashboard in a browser (a no-op where the launcher opens none,
+e.g. AppImage/Flatpak).</li>
+<li><strong><code>--help</code></strong> /
+<strong><code>--version</code></strong> — Forwarded to the binary, which
+prints and exits before any first-run setup (no working directory or
+Python venv is created).</li>
 </ul>
-<p><strong>Binary flags</strong> (for <code>jarvisAgent-studio</code> /
+<p><strong>Source-tree launcher</strong> (<code>jarvisagent.sh</code>,
+for running from a build tree):</p>
+<ul>
+<li><strong><code>--studio</code></strong> /
+<strong><code>--engine</code></strong> — Select the edition (default
+Studio).</li>
+<li><strong><code>--debug</code></strong> /
+<strong><code>--release</code></strong> — Select the build configuration
+(default Release).</li>
+</ul>
+<p><strong>Binary flags</strong> (<code>jarvisAgent-studio</code> /
 <code>jarvisAgent-engine</code>):</p>
 <ul>
 <li><strong><code>--help</code></strong>,
@@ -362,7 +377,8 @@ edition.</li>
 <strong><code>-v</code></strong> — Print the version number and
 exit.</li>
 </ul>
-<p>Unknown options cause an error message and a non-zero exit code.</p>
+<p>Unknown options cause an error message and a non-zero exit code, in
+both the launchers and the binary.</p>
 <h2 id="installation">INSTALLATION</h2>
 <p>JarvisAgent is available as pre-built packages for all major
 platforms:</p>

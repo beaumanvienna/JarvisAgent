@@ -10,6 +10,44 @@ set -euo pipefail
 SHARE="/app/share/jarvisagent"
 DATA_DIR="${JARVISAGENT_DATA:-$HOME/JarvisAgent}"
 
+# ---- Argument handling (before any first-run setup) ----
+# The wrapper owns arg policy so the slow first-run scaffold (data dir + symlinks +
+# Python venv) never runs just to print --help/--version or to reject a typo:
+#   --help/-h, --version/-v  j9t info flags. exec the real binary straight away —
+#                            these return before j9t's config.json check, so no
+#                            working directory or venv is needed.
+#   --home <dir>             wrapper flag: working directory to install JarvisAgent
+#                            into (must be under $HOME — the sandbox grants
+#                            --filesystem=home). Overrides the JARVISAGENT_DATA env.
+#   --no-browser             wrapper flag, accepted as a no-op (this launcher opens
+#                            no browser); kept for invocation parity with the other
+#                            launchers.
+#   anything else            unknown: strict exit 1 (Unix-style, mirrors j9t itself).
+# j9t takes no positional arguments, so a non-flag argument is rejected too.
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --help|-h|--version|-v)
+            exec "$SHARE/bin/jarvisAgent-studio" "$1"
+            ;;
+        --home)
+            if [[ -z "${2:-}" ]]; then
+                echo "jarvisagent: --home requires a directory argument" >&2
+                exit 1
+            fi
+            DATA_DIR="$2"
+            shift 2
+            ;;
+        --no-browser)
+            shift  # no-op: the Flatpak never opens a browser
+            ;;
+        *)
+            echo "jarvisagent: unknown option '$1'" >&2
+            echo "Try 'flatpak run com.jctechnolabs.JarvisAgent --help' for more information." >&2
+            exit 1
+            ;;
+    esac
+done
+
 # ---- First-run setup ----
 if [[ ! -d "$DATA_DIR" ]]; then
     echo "==> First run: creating working directory at $DATA_DIR"
@@ -79,5 +117,7 @@ if [[ -f "$DATA_DIR/.venv/bin/activate" ]]; then
 fi
 
 # ---- Launch ----
+# All arguments were handled above (info flags exec'd early, wrapper flags consumed,
+# unknown args rejected), so j9t starts with no arguments of its own.
 cd "$DATA_DIR"
-exec "$DATA_DIR/bin/jarvisAgent-studio" "$@"
+exec "$DATA_DIR/bin/jarvisAgent-studio"

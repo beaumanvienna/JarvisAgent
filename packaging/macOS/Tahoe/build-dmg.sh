@@ -126,12 +126,22 @@ OPEN_BROWSER=true
 USER_HOME=""
 
 # ---- Parse launcher-specific arguments ----
-PASSTHROUGH_ARGS=()
+# The wrapper owns arg policy:
+#   --help/-h, --version/-v  j9t info flags. exec the binary straight away —
+#                            they return before the config.json check, so the
+#                            (slow) first-run setup below is skipped entirely.
+#   --home <dir>             working directory to install JarvisAgent into.
+#   --no-browser             skip opening the dashboard in a browser.
+#   anything else            unknown: strict exit 1 (Unix-style, mirrors j9t).
+# j9t takes no positional arguments, so a non-flag argument is rejected too.
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --help|-h|--version|-v)
+            exec "$SHARE/jarvisAgent-studio" "$1"
+            ;;
         --home)
             if [[ -z "${2:-}" ]]; then
-                echo "Error: --home requires a directory argument"
+                echo "jarvisagent: --home requires a directory argument" >&2
                 exit 1
             fi
             USER_HOME="$2"
@@ -141,12 +151,10 @@ while [[ $# -gt 0 ]]; do
             OPEN_BROWSER=false
             shift
             ;;
-        --help|-h|--version|-v)
-            exec "$SHARE/jarvisAgent-studio" "$1"
-            ;;
         *)
-            PASSTHROUGH_ARGS+=("$1")
-            shift
+            echo "jarvisagent: unknown option '$1'" >&2
+            echo "Try 'jarvisagent --help' for more information." >&2
+            exit 1
             ;;
     esac
 done
@@ -243,7 +251,9 @@ echo "    Dashboard: https://localhost:8443"
 echo "    Editor:    https://localhost:8443/editor"
 echo ""
 cd "$USER_HOME"
-exec "$USER_HOME/bin/jarvisAgent-studio" "${PASSTHROUGH_ARGS[@]}"
+# All arguments were handled above (info flags exec'd early, wrapper flags consumed,
+# unknown args rejected), so j9t starts with no arguments of its own.
+exec "$USER_HOME/bin/jarvisAgent-studio"
 LAUNCHER
 chmod 755 "$APP_BUNDLE/Contents/MacOS/JarvisAgent"
 

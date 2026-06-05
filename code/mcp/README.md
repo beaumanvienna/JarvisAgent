@@ -72,8 +72,9 @@ npm install
 # Build
 npm run build
 
-# Run (connects to j9t on localhost:8080 by default)
-J9T_TOKEN=mcp_... npm start
+# Run (connects to https://localhost:8443 by default; point NODE_EXTRA_CA_CERTS
+# at j9t's self-signed cert so Node trusts it)
+NODE_EXTRA_CA_CERTS=~/JarvisAgent/certs/j9t-cert.pem J9T_TOKEN=mcp_... npm start
 
 # Or run in dev mode (auto-recompile)
 J9T_TOKEN=mcp_... npm run dev
@@ -88,8 +89,8 @@ j9t accepts only MCP API keys (`mcp_` + 64 hex chars) as the bearer credential f
 On j9t's first run with an empty key store, it prints a bootstrap enrollment token to stderr. Activate it to receive your MCP admin key:
 
 ```bash
-# Copy the enroll_... token from j9t's stderr output, then:
-curl -sS -X POST http://localhost:8080/api/auth/mcp-keys/activate \
+# Copy the enroll_... token from j9t's stderr output, then (-k: self-signed cert):
+curl -sSk -X POST https://localhost:8443/api/auth/mcp-keys/activate \
      -H 'Content-Type: application/json' \
      -d '{"enrollment_token":"enroll_..."}'
 
@@ -107,11 +108,12 @@ Configuration is via environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `J9T_URL` | `http://localhost:8080` | j9t REST API base URL |
+| `J9T_URL` | `https://localhost:8443` | j9t REST API base URL |
 | `J9T_TOKEN` | *(empty)* | MCP API key (must start with `mcp_`) |
 | `J9T_TOKEN_FILE` | *(none)* | Path to a file containing the MCP API key |
+| `NODE_EXTRA_CA_CERTS` | *(none)* | Path to j9t's self-signed cert (`certs/j9t-cert.pem`) so Node's `fetch` trusts the default HTTPS endpoint |
 
-For TLS-enabled j9t instances, use `https://localhost:8443` as `J9T_URL`.
+A default j9t serves HTTPS on 8443 and mints its own self-signed `localhost` cert on first start. Point `NODE_EXTRA_CA_CERTS` at `certs/j9t-cert.pem` in the j9t working directory (e.g. `~/JarvisAgent/certs/j9t-cert.pem`) so the sidecar's TLS verification passes. For a plain-HTTP j9t (e.g. Docker's default on port 8080), set `J9T_URL=http://localhost:8080` explicitly.
 
 If neither `J9T_TOKEN` nor `J9T_TOKEN_FILE` is set, the sidecar connects without auth. j9t **rejects** all authenticated endpoints in that case — the sidecar will only succeed on the public health check. Set a real MCP key for any real work.
 

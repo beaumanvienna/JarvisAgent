@@ -77,18 +77,23 @@ production deployments behind an API gateway. The auth/RBAC/audit machinery is t
 
 ## OPTIONS
 
-**Launcher flags** (for `jarvisagent.sh`):
+**Installed launcher** (the `jarvisagent` command, and the AppImage / Flatpak / macOS `.app` / Windows `jarvisagent.bat` equivalents):
 
-- **`--studio`** — Launch the Studio edition (default).
-- **`--engine`** — Launch the Engine edition.
-- **`--help`** — Show usage information.
+- **`--home DIR`** — Working directory to create and run in (default `~/JarvisAgent`).
+- **`--no-browser`** — Don't open the dashboard in a browser (a no-op where the launcher opens none, e.g. AppImage/Flatpak).
+- **`--help`** / **`--version`** — Forwarded to the binary, which prints and exits before any first-run setup (no working directory or Python venv is created).
 
-**Binary flags** (for `jarvisAgent-studio` / `jarvisAgent-engine`):
+**Source-tree launcher** (`jarvisagent.sh`, for running from a build tree):
+
+- **`--studio`** / **`--engine`** — Select the edition (default Studio).
+- **`--debug`** / **`--release`** — Select the build configuration (default Release).
+
+**Binary flags** (`jarvisAgent-studio` / `jarvisAgent-engine`):
 
 - **`--help`**, **`-h`** — Show a help message and exit.
 - **`--version`**, **`-v`** — Print the version number and exit.
 
-Unknown options cause an error message and a non-zero exit code.
+Unknown options cause an error message and a non-zero exit code, in both the launchers and the binary.
 
 ## INSTALLATION
 

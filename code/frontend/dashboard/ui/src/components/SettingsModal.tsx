@@ -383,7 +383,7 @@ function AboutTab() {
     <div style={{ display: "flex", alignItems: "center", gap: 16, padding: "24px 8px" }}>
       <img src={logoUrl} alt="JarvisAgent" style={{ width: 96, height: 96, borderRadius: "50%" }} />
       <div>
-        <div style={{ fontSize: 18, fontWeight: 600, color: "#e8eef5" }}>JarvisAgent v0.8.7</div>
+        <div style={{ fontSize: 18, fontWeight: 600, color: "#e8eef5" }}>JarvisAgent v0.8.8</div>
         <div style={{ fontSize: 12, color: "rgba(255,255,255,0.6)", marginTop: 6, lineHeight: 1.6 }}>
           MIT License &middot; © 2026 JC Technolabs
           <br />

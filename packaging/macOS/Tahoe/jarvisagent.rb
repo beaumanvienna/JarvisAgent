@@ -74,15 +74,20 @@ class Jarvisagent < Formula
       OPEN_BROWSER=true
       USER_HOME=""
 
-      PASSTHROUGH_ARGS=()
+      # The wrapper owns arg policy: info flags exec the binary early (skipping the
+      # slow first-run setup); --home/--no-browser are consumed; anything else is a
+      # strict exit 1 (Unix-style). j9t takes no positional arguments.
       while [[ $# -gt 0 ]]; do
           case "$1" in
+              --help|-h|--version|-v) exec "$INSTALL_DIR/bin/jarvisAgent" "$1" ;;
               --home)
-                  [[ -z "${2:-}" ]] && echo "Error: --home requires a directory argument" && exit 1
+                  [[ -z "${2:-}" ]] && echo "jarvisagent: --home requires a directory argument" >&2 && exit 1
                   USER_HOME="$2"; shift 2 ;;
               --no-browser) OPEN_BROWSER=false; shift ;;
-              --help|-h|--version|-v) exec "$INSTALL_DIR/bin/jarvisAgent" "$1" ;;
-              *) PASSTHROUGH_ARGS+=("$1"); shift ;;
+              *)
+                  echo "jarvisagent: unknown option '$1'" >&2
+                  echo "Try 'jarvisagent --help' for more information." >&2
+                  exit 1 ;;
           esac
       done
 
@@ -150,7 +155,8 @@ class Jarvisagent < Formula
       echo "    Editor:    https://localhost:8443/editor"
       echo ""
       cd "$USER_HOME"
-      exec "$USER_HOME/bin/jarvisAgent" "${PASSTHROUGH_ARGS[@]}"
+      # All arguments were handled above, so j9t starts with no arguments of its own.
+      exec "$USER_HOME/bin/jarvisAgent"
     EOS
   end
 
@@ -173,6 +179,7 @@ class Jarvisagent < Formula
   end
 
   test do
-    assert_match "jarvisAgent", shell_output("#{bin}/jarvisagent --help 2>&1", 1)
+    # --help execs the binary, which prints help and exits 0 (EXIT_SUCCESS).
+    assert_match "jarvisAgent", shell_output("#{bin}/jarvisagent --help 2>&1")
   end
 end

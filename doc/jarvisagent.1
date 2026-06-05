@@ -78,17 +78,24 @@ See
 for details.
 .
 .SH OPTIONS
-.SS Launcher flags (for jarvisagent.sh)
+.SS Installed launcher (the jarvisagent command, and the AppImage / Flatpak / macOS .app / Windows jarvisagent.bat equivalents)
 .TP
-.B \-\-studio
-Launch the Studio edition (default).
+.BI \-\-home " DIR"
+Working directory to create and run in (default ~/JarvisAgent).
 .TP
-.B \-\-engine
-Launch the Engine edition.
+.B \-\-no\-browser
+Do not open the dashboard in a browser (a no-op where the launcher opens none, e.g. AppImage/Flatpak).
 .TP
-.B \-\-help
-Show usage information.
-.SS Binary flags (for jarvisAgent\-studio / jarvisAgent\-engine)
+.BR \-\-help ", " \-\-version
+Forwarded to the binary, which prints and exits before any first-run setup (no working directory or Python venv is created).
+.SS Source-tree launcher (jarvisagent.sh, for running from a build tree)
+.TP
+.BR \-\-studio ", " \-\-engine
+Select the edition (default Studio).
+.TP
+.BR \-\-debug ", " \-\-release
+Select the build configuration (default Release).
+.SS Binary flags (jarvisAgent\-studio / jarvisAgent\-engine)
 .TP
 .BR \-\-help ", " \-h
 Show a help message and exit.
@@ -96,7 +103,7 @@ Show a help message and exit.
 .BR \-\-version ", " \-v
 Print the version number and exit.
 .PP
-Unknown options cause an error message and a non\-zero exit code.
+Unknown options cause an error message and a non\-zero exit code, in both the launchers and the binary.
 .
 .SH INSTALLATION
 JarvisAgent is available as pre\-built packages for all major platforms:

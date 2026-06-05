@@ -37,7 +37,7 @@ A dual-edition architecture lets organizations move from prototyping to secure, 
 - **j9t Studio** — visual workflow editor with AI generation, explain, and auto-fix; AI assistant with 31 tools; workflow versioning and live debugging. Same auth posture as Engine: every browser session and MCP client requires an MCP API key.
 - **j9t Engine** — lean production runtime. Workflow CRUD / AI assistant / AI JCWF generation are removed at compile time; everything else (run control, settings admin, log analysis, monitoring) is reachable via MCP key and role-gated (admin/operator/viewer). TLS, HMAC webhooks, rate limiting, audit log, optional gateway-header cross-check. Ready for private cloud or behind an API gateway.
 
-**Current version: 0.8.7** — working towards **beta 0.95**, the first major baseline subject to regression testing across all packaging targets.
+**Current version: 0.8.8** — working towards **beta 0.95**, the first major baseline subject to regression testing across all packaging targets.
 
 ---
 
