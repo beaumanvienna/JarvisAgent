@@ -8,32 +8,9 @@
 set -euo pipefail
 
 APPDIR="$(dirname "$(readlink -f "$0")")"
+# Working directory is set via the JARVISAGENT_DATA env var (not a launcher flag).
+# Any CLI args are forwarded verbatim to the binary, which validates them itself.
 DATA_DIR="${JARVISAGENT_DATA:-$HOME/JarvisAgent}"
-
-# ---- Parse launcher-specific arguments ----
-# Consume launcher-only flags here so they never reach the binary (which rejects
-# unknown options and exits). --no-browser is accepted for parity with the
-# system launcher; the AppImage opens no browser itself, so it is a no-op.
-PASSTHROUGH_ARGS=()
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --home)
-            if [[ -z "${2:-}" ]]; then
-                echo "Error: --home requires a directory argument"
-                exit 1
-            fi
-            DATA_DIR="$2"
-            shift 2
-            ;;
-        --no-browser)
-            shift
-            ;;
-        *)
-            PASSTHROUGH_ARGS+=("$1")
-            shift
-            ;;
-    esac
-done
 
 # ---- First-run setup ----
 if [[ ! -d "$DATA_DIR" ]]; then
@@ -44,7 +21,8 @@ fi
 # Symlink read-only assets from AppImage into the working directory.
 # Uses ln -sfn to atomically replace existing symlinks without rm.
 # If a real directory already exists, skip it — content is there.
-for asset in bin dashboard workflow-editor scripts doc; do
+# NOTE: scripts/ is deliberately NOT symlinked — see the copy step below.
+for asset in bin dashboard workflow-editor doc; do
     if [[ -L "$DATA_DIR/$asset" ]] || [[ ! -e "$DATA_DIR/$asset" ]]; then
         ln -sfn "$APPDIR/usr/share/jarvisagent/$asset" "$DATA_DIR/$asset"
     fi
@@ -59,6 +37,16 @@ mkdir -p "$DATA_DIR/workflows"
 if [[ -d "$APPDIR/usr/share/jarvisagent/example-workflows" ]] && [[ -z "$(ls -A "$DATA_DIR/workflows" 2>/dev/null)" ]]; then
     cp -a "$APPDIR/usr/share/jarvisagent/example-workflows/"* "$DATA_DIR/workflows/" 2>/dev/null || true
     echo "==> Copied example workflows to $DATA_DIR/workflows/"
+fi
+
+# Copy bundled scripts as REAL files (not a symlink). Workflow shell/python tasks
+# reference scripts/ via path-confined relative paths; confinement follows a
+# symlink out of the working dir and rejects it, breaking every script task.
+if [[ -L "$DATA_DIR/scripts" ]]; then rm -f "$DATA_DIR/scripts"; fi  # drop a stale symlink from an older install
+if [[ -d "$APPDIR/usr/share/jarvisagent/scripts" ]] && [[ ! -d "$DATA_DIR/scripts" ]]; then
+    mkdir -p "$DATA_DIR/scripts"
+    cp -a "$APPDIR/usr/share/jarvisagent/scripts/." "$DATA_DIR/scripts/" 2>/dev/null || true
+    echo "==> Copied bundled scripts to $DATA_DIR/scripts/"
 fi
 
 # Copy example config on first run
@@ -95,4 +83,4 @@ fi
 
 # ---- Launch ----
 cd "$DATA_DIR"
-exec "$DATA_DIR/bin/jarvisAgent-studio" "${PASSTHROUGH_ARGS[@]}"
+exec "$DATA_DIR/bin/jarvisAgent-studio" "$@"

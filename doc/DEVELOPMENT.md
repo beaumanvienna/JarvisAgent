@@ -215,7 +215,7 @@ npm install
 npm run build
 ```
 
-The build output lands in `code/frontend/dashboard/ui/dist/` and `code/frontend/workflow-editor/ui/dist/` respectively. JarvisAgent serves these automatically at `http://localhost:8080` (dashboard) and `http://localhost:8080/editor`. With TLS enabled (`"TlsCert"` and `"TlsKey"` in `config.json`), the default port changes to `8443` — configurable via `"port"`.
+The build output lands in `code/frontend/dashboard/ui/dist/` and `code/frontend/workflow-editor/ui/dist/` respectively. With TLS configured (`"TlsCert"`/`"TlsKey"` in `config.json` — the default in the repo config), JarvisAgent serves these at `https://localhost:8443` (dashboard) and `https://localhost:8443/editor`; without TLS it serves `http://localhost:8080`. Port configurable via `"port"`.
 
 ---
 
@@ -287,9 +287,9 @@ export MAKEFLAGS=-j$(sysctl -n hw.ncpu) # macOS
 ./bin/Release/jarvisAgent-engine    # Engine
 ```
 
-- Dashboard: `http://localhost:8080` (or `https://localhost:8443` with TLS)
-- Workflow Editor: `http://localhost:8080/editor` (Studio only; `https://localhost:8443/editor` with TLS)
-- Listen port configurable via `"port"` in `config.json` (default: 8080 HTTP, 8443 HTTPS)
+- Dashboard: `https://localhost:8443` (the repo config ships TLS; `http://localhost:8080` without TLS)
+- Workflow Editor: `https://localhost:8443/editor` (Studio only; `http://localhost:8080/editor` without TLS)
+- Listen port configurable via `"port"` in `config.json` (default: 8443 HTTPS, or 8080 when TLS is off)
 
 ---
 

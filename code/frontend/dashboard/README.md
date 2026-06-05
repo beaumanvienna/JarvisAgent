@@ -10,7 +10,7 @@ npm run build    # production build -> dist/
 npm run dev      # development server with HMR
 ```
 
-The built `dist/` folder is served by j9t at `http://localhost:8080/`.
+The built `dist/` folder is served by j9t at `https://localhost:8443/` (the default TLS config; `http://localhost:8080/` without TLS).
 
 ## Features
 

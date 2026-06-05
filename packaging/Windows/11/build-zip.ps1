@@ -207,7 +207,8 @@ if not exist "!USER_HOME!" (
 )
 
 REM Junction read-only assets (skip if already exists)
-for %%A in (dashboard workflow-editor scripts doc) do (
+REM NOTE: scripts is deliberately NOT junctioned — see the copy step below.
+for %%A in (dashboard workflow-editor doc) do (
     if not exist "!USER_HOME!\%%A" (
         if exist "!INSTALL_DIR!\%%A" (
             mklink /J "!USER_HOME!\%%A" "!INSTALL_DIR!\%%A" >nul 2>&1
@@ -226,6 +227,18 @@ if exist "!INSTALL_DIR!\workflows" (
     if errorlevel 1 (
         xcopy /s /q /y "!INSTALL_DIR!\workflows\*" "!USER_HOME!\workflows\" >nul 2>&1
         echo ==^> Copied example workflows to !USER_HOME!\workflows\
+    )
+)
+
+REM Copy bundled scripts as REAL files (not a junction). Workflow tasks reference
+REM scripts\ via path-confined relative paths; confinement rejects a junction that
+REM resolves outside the working dir. rmdir removes a stale junction (or an empty
+REM dir) but leaves a populated real scripts dir intact.
+rmdir "!USER_HOME!\scripts" >nul 2>&1
+if not exist "!USER_HOME!\scripts\" (
+    if exist "!INSTALL_DIR!\scripts" (
+        xcopy /s /q /y /i "!INSTALL_DIR!\scripts\*" "!USER_HOME!\scripts\" >nul 2>&1
+        echo ==^> Copied bundled scripts to !USER_HOME!\scripts\
     )
 )
 

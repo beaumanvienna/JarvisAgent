@@ -80,13 +80,15 @@ static void PrintHelp()
 
 int engine(int argc, char* argv[])
 {
-    // Process CLI flags before anything else. --help/--version take priority and
-    // exit immediately. Any other argument is ignored rather than rejected: the
-    // per-platform launchers (AppRun, jarvisagent-launcher.sh, the Windows .bat,
-    // …) may forward launcher-only flags such as --no-browser or --home, and an
-    // unrecognised argument must never prevent the server from starting.
+    // Process CLI flags before anything else (clang-style): --help/--version take
+    // priority and exit immediately; any unknown option is rejected — Unix style.
+    // j9t does not invent launcher flags: each per-platform wrapper forwards args
+    // to the binary verbatim, so anything passed to j9t must be a valid j9t option.
+    // (This runs before the TUI/logging come up, so stderr reaches the terminal
+    // and the process exits cleanly before ncurses takes over.)
     bool wantsHelp = false;
     bool wantsVersion = false;
+    std::string unknownOption;
 
     for (int i = 1; i < argc; ++i)
     {
@@ -98,7 +100,10 @@ int engine(int argc, char* argv[])
         {
             wantsVersion = true;
         }
-        // All other arguments are intentionally ignored (see comment above).
+        else if (argv[i][0] == '-' && unknownOption.empty())
+        {
+            unknownOption = argv[i];
+        }
     }
 
     if (wantsHelp)
@@ -110,6 +115,12 @@ int engine(int argc, char* argv[])
     {
         PrintVersion();
         return EXIT_SUCCESS;
+    }
+    if (!unknownOption.empty())
+    {
+        std::cerr << "jarvisAgent: unknown option '" << unknownOption << "'\n"
+                  << "Try 'jarvisAgent --help' for more information." << std::endl;
+        return EXIT_FAILURE;
     }
 
     // Check for config.json before initializing the engine

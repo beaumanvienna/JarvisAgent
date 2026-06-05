@@ -19,7 +19,8 @@ fi
 # Symlink read-only assets from Flatpak into the working directory.
 # Uses ln -sfn to atomically replace existing symlinks without rm.
 # If a real directory already exists, skip it — content is there.
-for asset in bin dashboard workflow-editor scripts doc; do
+# NOTE: scripts/ is deliberately NOT symlinked — see the copy step below.
+for asset in bin dashboard workflow-editor doc; do
     if [[ -L "$DATA_DIR/$asset" ]] || [[ ! -e "$DATA_DIR/$asset" ]]; then
         ln -sfn "$SHARE/$asset" "$DATA_DIR/$asset"
     fi
@@ -34,6 +35,16 @@ mkdir -p "$DATA_DIR/workflows"
 if [[ -d "$SHARE/example-workflows" ]] && [[ -z "$(ls -A "$DATA_DIR/workflows" 2>/dev/null)" ]]; then
     cp -a "$SHARE/example-workflows/"* "$DATA_DIR/workflows/" 2>/dev/null || true
     echo "==> Copied example workflows to $DATA_DIR/workflows/"
+fi
+
+# Copy bundled scripts as REAL files (not a symlink). Workflow shell/python tasks
+# reference scripts/ via path-confined relative paths; confinement follows a
+# symlink out of the working dir and rejects it, breaking every script task.
+if [[ -L "$DATA_DIR/scripts" ]]; then rm -f "$DATA_DIR/scripts"; fi  # drop a stale symlink from an older install
+if [[ -d "$SHARE/scripts" ]] && [[ ! -d "$DATA_DIR/scripts" ]]; then
+    mkdir -p "$DATA_DIR/scripts"
+    cp -a "$SHARE/scripts/." "$DATA_DIR/scripts/" 2>/dev/null || true
+    echo "==> Copied bundled scripts to $DATA_DIR/scripts/"
 fi
 
 # Copy example config on first run

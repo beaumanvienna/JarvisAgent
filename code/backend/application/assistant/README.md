@@ -503,7 +503,7 @@ is configured. A tooltip explains: "No AI provider configured. Add one in AI Man
 
 ## WebSocket protocol
 
-**Endpoint:** `ws://localhost:8080/ws/assistant`
+**Endpoint:** `wss://localhost:8443/ws/assistant` (the default TLS config; `ws://localhost:8080/ws/assistant` without TLS)
 
 ### Client → Server
 

@@ -1,6 +1,6 @@
 # Workflow Editor
 
-Visual workflow editor for j9t — a React + TypeScript single-page app served by the C++ backend at `http://localhost:8080/editor`.
+Visual workflow editor for j9t — a React + TypeScript single-page app served by the C++ backend at `https://localhost:8443/editor` (the default TLS config; `http://localhost:8080/editor` without TLS).
 
 ## Tech Stack
 
@@ -21,7 +21,7 @@ npm run build      # production build (output served by the C++ binary)
 npm run dev         # Vite dev server on localhost:5173 (hot reload)
 ```
 
-Then start the backend with `./jarvisagent.sh` and open `http://localhost:8080/editor`.
+Then start the backend with `./jarvisagent.sh` and open `https://localhost:8443/editor` (accept the self-signed-cert warning; `http://localhost:8080/editor` if TLS is disabled).
 
 ## Directory Layout
 

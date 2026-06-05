@@ -163,7 +163,8 @@ if [[ ! -d "$USER_HOME" ]]; then
 fi
 
 # Symlink read-only assets (ln -sfn: atomic, no rm needed)
-for asset in dashboard workflow-editor scripts doc; do
+# NOTE: scripts/ is deliberately NOT symlinked — see the copy step below.
+for asset in dashboard workflow-editor doc; do
     if [[ -L "$USER_HOME/$asset" ]] || [[ ! -e "$USER_HOME/$asset" ]]; then
         ln -sfn "$SHARE/$asset" "$USER_HOME/$asset"
     fi
@@ -186,6 +187,16 @@ mkdir -p "$USER_HOME/workflows"
 if [[ -d "$SHARE/example-workflows" ]] && [[ -z "$(ls -A "$USER_HOME/workflows" 2>/dev/null)" ]]; then
     cp -a "$SHARE/example-workflows/"* "$USER_HOME/workflows/" 2>/dev/null || true
     echo "==> Copied example workflows to $USER_HOME/workflows/"
+fi
+
+# Copy bundled scripts as REAL files (not a symlink). Workflow shell/python tasks
+# reference scripts/ via path-confined relative paths; confinement follows a
+# symlink out of the working dir and rejects it, breaking every script task.
+if [[ -L "$USER_HOME/scripts" ]]; then rm -f "$USER_HOME/scripts"; fi  # drop a stale symlink from an older install
+if [[ -d "$SHARE/scripts" ]] && [[ ! -d "$USER_HOME/scripts" ]]; then
+    mkdir -p "$USER_HOME/scripts"
+    cp -a "$SHARE/scripts/." "$USER_HOME/scripts/" 2>/dev/null || true
+    echo "==> Copied bundled scripts to $USER_HOME/scripts/"
 fi
 
 # Copy example config on first run

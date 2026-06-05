@@ -1,6 +1,6 @@
 # JarvisAgent API Endpoints
 
-Base URL: `http://localhost:8080`
+Base URL: `https://localhost:8443` (the default — the server ships with TLS and mints a self-signed cert on first start; for a non-TLS instance use `http://localhost:8080`). The examples below use `http://localhost:8080` for brevity; against a TLS instance substitute `https://localhost:8443` and add `curl -k` (or trust the self-signed cert).
 
 All JSON endpoints return `application/json`. Errors follow the shape:
 ```json

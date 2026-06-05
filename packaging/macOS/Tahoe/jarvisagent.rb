@@ -90,7 +90,8 @@ class Jarvisagent < Formula
 
       [[ ! -d "$USER_HOME" ]] && echo "==> First run: creating working directory at $USER_HOME" && mkdir -p "$USER_HOME"
 
-      for asset in dashboard workflow-editor scripts doc; do
+      # NOTE: scripts/ is deliberately NOT symlinked — see the copy step below.
+      for asset in dashboard workflow-editor doc; do
           if [[ -L "$USER_HOME/$asset" ]] || [[ ! -e "$USER_HOME/$asset" ]]; then
               ln -sfn "$INSTALL_DIR/$asset" "$USER_HOME/$asset"
           fi
@@ -106,6 +107,16 @@ class Jarvisagent < Formula
       if [[ -d "$INSTALL_DIR/workflows" ]] && [[ -z "$(ls -A "$USER_HOME/workflows" 2>/dev/null)" ]]; then
           cp -a "$INSTALL_DIR/workflows/"* "$USER_HOME/workflows/" 2>/dev/null || true
           echo "==> Copied example workflows to $USER_HOME/workflows/"
+      fi
+
+      # Copy bundled scripts as REAL files (not a symlink). Workflow tasks reference
+      # scripts/ via path-confined relative paths; confinement follows a symlink out
+      # of the working dir and rejects it, breaking every script task.
+      [[ -L "$USER_HOME/scripts" ]] && rm -f "$USER_HOME/scripts"
+      if [[ -d "$INSTALL_DIR/scripts" ]] && [[ ! -d "$USER_HOME/scripts" ]]; then
+          mkdir -p "$USER_HOME/scripts"
+          cp -a "$INSTALL_DIR/scripts/." "$USER_HOME/scripts/" 2>/dev/null || true
+          echo "==> Copied bundled scripts to $USER_HOME/scripts/"
       fi
 
       if [[ ! -f "$USER_HOME/config.json" ]] && [[ -f "$INSTALL_DIR/config.json.example" ]]; then
