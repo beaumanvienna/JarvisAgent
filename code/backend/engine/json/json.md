@@ -51,7 +51,7 @@ The string ↔ enum mapping is centralised in the file-local `kInterfaceTypeMapp
 
 **Type-checked but not stored:** `"file format identifier"` (must be a JSON number; presence is recorded for the format-info summary, value is not retained).
 
-For the field-by-field config.json reference (every `"queue folder"` / `"max threads"` / `"port"` / `"API interfaces"[]` key, with defaults and ranges) see `doc/jarvisagent.md` "Configuration".  The mapping from JSON key → `EngineConfig` member is mechanical 1:1 in `Parse()`.
+For the field-by-field config.json reference (every `"queue folder"` / `"max threads"` / `"port"` / `"api_file"` key, with defaults and ranges) see `doc/jarvisagent.md` "Configuration".  The mapping from JSON key → `EngineConfig` member is mechanical 1:1 in `Parse()`.  (AI interfaces live in the encrypted `API.json.enc`, not `config.json` — see §2.5.)
 
 ### 2.2 Parser State
 
@@ -85,33 +85,21 @@ bool ConfigParsed() const;
 2. Checks that the config path exists and is not a directory.
    - On failure: `FileNotFound`.
 3. Loads + parses JSON via `simdjson::ondemand` with explicit error checks at every step (file load, document iterate, top-level object access).  Each failure mode emits a distinct `LOG_CORE_ERROR` and returns the matching `State`: `FileNotFound` for load errors, `ParseFailure` for malformed JSON, `FileFormatFailure` if the top-level value is not an object.
-4. Iterates over top-level fields.  Each field-parse site is a single-line call into one of the file-local helpers in the anonymous namespace (`ParseStringField`, `ParseStringFieldLogOnly`, `ParseInt64Field` with a `NumericPolicy` enum, `ParseUint64Field`, `ParseBoolField`, `ParseInt64FieldWithBounds`).  Each helper uses simdjson's `.get<T>().get(target)` extractor and on type mismatch emits `LOG_CORE_ERROR("{} '{}' must be a {string|number|non-negative number|boolean|bool}", logPrefix, key)` and **returns without storing or counting** — a single malformed field does not abort the whole config load, so partially-valid configs still populate as much as they can.  The `NumericPolicy` enum captures the per-site post-extract checks (`AcceptAny`, `RejectNegative`, `ClampNegativeToZero`, `StoreOnlyIfPositive`) so negative-value handling stays declarative at the call site rather than open-coded.  `ParseInt64FieldWithBounds` handles closed-range fields (`port`, `session_timeout_hours`) with WARN-on-out-of-range and sane-default substitution.  A handful of sites stay inline because they're outliers: `use_bash` (platform-conditional INFO suffix), `API interfaces` (array dispatch), and several ApiInterface sub-fields with silent-on-failure semantics (`max_context_tokens`, `default_output_tokens`, `rate_limit` nested object, `API` enum-mapping with migration error, `is_mock`, `fixture_path`).
+4. Iterates over top-level fields.  Each field-parse site is a single-line call into one of the file-local helpers in the anonymous namespace (`ParseStringField`, `ParseStringFieldLogOnly`, `ParseInt64Field` with a `NumericPolicy` enum, `ParseUint64Field`, `ParseBoolField`, `ParseInt64FieldWithBounds`).  Each helper uses simdjson's `.get<T>().get(target)` extractor and on type mismatch emits `LOG_CORE_ERROR("{} '{}' must be a {string|number|non-negative number|boolean|bool}", logPrefix, key)` and **returns without storing or counting** — a single malformed field does not abort the whole config load, so partially-valid configs still populate as much as they can.  The `NumericPolicy` enum captures the per-site post-extract checks (`AcceptAny`, `RejectNegative`, `ClampNegativeToZero`, `StoreOnlyIfPositive`) so negative-value handling stays declarative at the call site rather than open-coded.  `ParseInt64FieldWithBounds` handles closed-range fields (`port`, `session_timeout_hours`) with WARN-on-out-of-range and sane-default substitution.  `use_bash` stays inline (platform-conditional INFO suffix).  AI interfaces are **no longer parsed here** — they moved to the encrypted `API.json.enc` (see §2.5).
    - `description`, `author`, and other informational fields are logged via `ParseStringFieldLogOnly` (no storage target).
    - Unknown top-level fields: best-effort stringified and logged as `"key: value"` (or `"[complex type]"` for arrays/objects).
 5. Sets state:
-   - `ConfigOk` if **both**:
-     - `"queue folder"` appeared at least once, **and**
-     - at least one `"url"` field appeared within `"API interfaces"`.
+   - `ConfigOk` if `"queue folder"` **and** `"workflows folder"` both appeared at least once.  (Before AI interfaces moved out of `config.json`, this also required a `"url"` inside `"API interfaces"` — that gate is gone, since the routing table is no longer in `config.json`.)
    - Otherwise: `FileFormatFailure`.
 6. Logs a "format info" summary of field occurrences.
 
 **Important:** `ConfigOk` indicates successful parsing and minimal required presence checks. It does **not** guarantee semantic correctness (directory existence, valid API selection, etc.). Semantic validation is done by `ConfigChecker` (Section 3).
 
-### 2.5 ParseInterfaces()
+### 2.5 AI interfaces — moved out of config.json
 
-```cpp
-void ParseInterfaces(simdjson::ondemand::array jsonArray,
-                     EngineConfig& engineConfig,
-                     FieldOccurances& fieldOccurances);
-```
+AI interfaces, the default interface, and the JCWF interface are **no longer parsed by `ConfigParser`** — they moved into the master-password-encrypted `API.json.enc`, owned by `ApiInterfaceManager` (`code/backend/application/web/apiInterfaceManager.{h,cpp}`).  That manager holds the single interface (de)serialization + validation that the old `ParseInterfaces` ran: auto-name via `EngineConfig::GenerateInterfaceName`, `max_context_tokens` resolution, `is_mock`/`fixture_path` confinement via `ConfineUnderProjectRoot`, the legacy-`"Test"` rejection, and the `UrlPolicy` plaintext/SSRF gate.  The `InterfaceType` ↔ `"API1".."API6"` mapping now lives in `EngineConfig::InterfaceType{From,To}String` (single source of truth, `static_assert`-guarded on `NumAPIs == 6`).
 
-- Iterates the `"API interfaces"` array.  String fields (`name`, `description`, `key_name`, `url`, `model`) route through `ParseStringField` with `logPrefix = "ConfigParser: API interface"` so error logs say e.g. `"ConfigParser: API interface 'url' must be a string"` — same shape as the top-level helper, narrower scope label.  Numeric + lenient sites stay inline (see Section 2.4 above).
-- For each element (full per-field semantics + provider list — including all six valid `"API"` values, `rate_limit` schema, `max_context_tokens`, `default_output_tokens`, `key_name`, `is_mock`, `fixture_path` — live in `doc/jarvisagent.md` "API interfaces").  Highlights specific to the parser:
-  - `"name"` is auto-generated from URL domain + model + API type via `GenerateInterfaceName()` (e.g. `api.openai.com/gpt-4.1/API1`) when omitted.  The enum→string side of the mapping uses the `InterfaceTypeName()` helper, which exhaustively switches every `InterfaceType` variant + `static_assert`s on `NumAPIs == 6` so a future provider addition fails to compile until the helper is extended.
-  - `"API"` parsing routes through the `ParseInterfaceType()` helper backed by the file-local `kInterfaceTypeMappings` table — single source of truth for both directions of the mapping (`"API1"` ↔ `InterfaceType::API1`, `"API6"` ↔ `InterfaceType::API6`, …).  An unknown value (e.g. `"API7"`) produces a `LOG_CORE_ERROR` and assigns `InterfaceType::InvalidAPI` to the interface; `ConfigChecker` then rejects it from the active-index slot but other interfaces still load.  No hard-stop.
-  - **Legacy `"Test"` api_type rejected:** `api_type: "Test"` is rejected at parse time with a migration error pointing at the `is_mock: true` + `fixture_path` flag pair on any real `api_type`.  Mock dispatch is orthogonal to the protocol shape — `is_mock: true` + `api_type: "API1"` routes through MockTransport while ReplyParserAPI1 still parses the JSON response body.
-  - `is_mock: true` requires `fixture_path: "<project-root-relative>"`.  The parser runs `ConfineUnderProjectRoot` on the path; rejection (absolute outside the root, symlink escape, unresolvable) marks the interface InvalidAPI with a structured ERROR.  MockTransport re-checks at load time — defense in depth.
-- Appends each `ApiInterface` to `engineConfig.m_ApiInterfaces`.
+At unlock, `WebServer::HydrateAiInterfaces` copies a snapshot into `engineConfig.m_ApiInterfaces` and resolves the stored default/jcwf **names** into `m_ApiIndex` / `m_JcwfAiInterfaceIndex`, so the dispatch read-sites are unchanged.  `config.json` keeps only the non-secret `api_file` path pointing at the store.  Per-interface field reference: `doc/jarvisagent.md` "AI interfaces".
 
 ---
 
@@ -157,7 +145,7 @@ private:
      - Interface type must not be `InvalidAPI`.
 
 3. If validation fails:
-   - Logs `LOG_CORE_ERROR` for the failing component(s) (folder path / API index + count). Operator-visible details land in `log/log.txt`.
+   - Logs `LOG_CORE_ERROR` for the failing component(s) (queue / workflows folder path). Operator-visible details land in `log/log.txt`.  (AI-interface validation moved to `ApiInterfaceManager`; ConfigChecker no longer checks the interface table — it is empty at config-load by design, hydrated only at unlock.)
    - Sets `engineConfig.m_ConfigValid = false`.
 
 4. If validation succeeds:

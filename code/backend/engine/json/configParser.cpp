@@ -117,34 +117,6 @@ namespace AIAssistant
             {"API6", ConfigParser::EngineConfig::InterfaceType::API6},
         }};
 
-        ConfigParser::EngineConfig::InterfaceType ParseInterfaceType(std::string_view name)
-        {
-            for (auto const& mapping : kInterfaceTypeMappings)
-            {
-                if (mapping.m_Name == name) return mapping.m_Type;
-            }
-            return ConfigParser::EngineConfig::InterfaceType::InvalidAPI;
-        }
-
-        std::string_view InterfaceTypeName(ConfigParser::EngineConfig::InterfaceType type)
-        {
-            static_assert(static_cast<int>(ConfigParser::EngineConfig::InterfaceType::NumAPIs) == 6,
-                          "InterfaceType count changed; update kInterfaceTypeMappings and this switch");
-            switch (type)
-            {
-                case ConfigParser::EngineConfig::InterfaceType::API1: return "API1";
-                case ConfigParser::EngineConfig::InterfaceType::API2: return "API2";
-                case ConfigParser::EngineConfig::InterfaceType::API3: return "API3";
-                case ConfigParser::EngineConfig::InterfaceType::API4: return "API4";
-                case ConfigParser::EngineConfig::InterfaceType::API5: return "API5";
-                case ConfigParser::EngineConfig::InterfaceType::API6: return "API6";
-                case ConfigParser::EngineConfig::InterfaceType::NumAPIs:
-                case ConfigParser::EngineConfig::InterfaceType::InvalidAPI:
-                    break;
-            }
-            return "";
-        }
-
         // -----------------------------------------------------------------------
         // Field-parse boilerplate helpers — one per JSON value type.
         //
@@ -342,6 +314,35 @@ namespace AIAssistant
         }
     } // namespace
 
+    ConfigParser::EngineConfig::InterfaceType
+    ConfigParser::EngineConfig::InterfaceTypeFromString(std::string_view apiType)
+    {
+        for (auto const& mapping : kInterfaceTypeMappings)
+        {
+            if (mapping.m_Name == apiType) return mapping.m_Type;
+        }
+        return InterfaceType::InvalidAPI;
+    }
+
+    std::string_view ConfigParser::EngineConfig::InterfaceTypeToString(InterfaceType type)
+    {
+        static_assert(static_cast<int>(InterfaceType::NumAPIs) == 6,
+                      "InterfaceType count changed; update kInterfaceTypeMappings and this switch");
+        switch (type)
+        {
+            case InterfaceType::API1: return "API1";
+            case InterfaceType::API2: return "API2";
+            case InterfaceType::API3: return "API3";
+            case InterfaceType::API4: return "API4";
+            case InterfaceType::API5: return "API5";
+            case InterfaceType::API6: return "API6";
+            case InterfaceType::NumAPIs:
+            case InterfaceType::InvalidAPI:
+                break;
+        }
+        return "";
+    }
+
     uint64_t ConfigParser::EngineConfig::ResolveMaxContextTokensFromModel(std::string const& modelName)
     {
         return ResolveMaxContextTokensFromModelImpl(modelName);
@@ -450,31 +451,25 @@ namespace AIAssistant
                 ParseBoolField(jsonObject.value(), jsonObjectKey, engineConfig.m_Verbose,
                                &fieldOccurances[ConfigFields::Verbose]);
             }
-            else if (jsonObjectKey == "API interfaces")
+            else if (jsonObjectKey == "api_file")
             {
-                ondemand::array array;
-                if (jsonObject.value().get_array().get(array) != simdjson::SUCCESS)
-                {
-                    LOG_CORE_ERROR("ConfigParser: '{}' must be an array", jsonObjectKey);
-                    continue;
-                }
-                ParseInterfaces(array, engineConfig, fieldOccurances);
+                // Path to the encrypted AI-routing store (API.json.enc).  The
+                // interfaces + default/jcwf selectors themselves live inside it,
+                // not in config.json — moved out so they can't be tampered with
+                // at rest without the master password.
+                ParseStringField(jsonObject.value(), jsonObjectKey, engineConfig.m_ApiFilePath,
+                                 &fieldOccurances[ConfigFields::ApiFile]);
             }
-            else if (jsonObjectKey == "API index")
+            else if (jsonObjectKey == "connections_file")
             {
-                ParseInt64Field(jsonObject.value(), jsonObjectKey, engineConfig.m_ApiIndex,
-                                NumericPolicy::RejectNegative, &fieldOccurances[ConfigFields::ApiIndex]);
+                ParseStringField(jsonObject.value(), jsonObjectKey, engineConfig.m_ConnectionsFilePath,
+                                 &fieldOccurances[ConfigFields::ConnectionsFile]);
             }
             else if (jsonObjectKey == "jcwf batch size")
             {
                 ParseInt64Field(jsonObject.value(), jsonObjectKey, engineConfig.m_JcwfBatchSize,
                                 NumericPolicy::StoreOnlyIfPositive,
                                 &fieldOccurances[ConfigFields::JcwfBatchSize]);
-            }
-            else if (jsonObjectKey == "jcwf AI interface")
-            {
-                ParseInt64Field(jsonObject.value(), jsonObjectKey, engineConfig.m_JcwfAiInterfaceIndex,
-                                NumericPolicy::AcceptAny, &fieldOccurances[ConfigFields::JcwfAiInterface]);
             }
             else if (jsonObjectKey == "keys_file")
             {
@@ -603,8 +598,12 @@ namespace AIAssistant
             }
         }
 
-        // declare it ok if queue folder filepath and url were found
-        if ((fieldOccurances[ConfigFields::QueueFolder] > 0) && (fieldOccurances[ConfigFields::Url] > 0))
+        // Declare it ok if the queue + workflows folders were found.  (AI
+        // interfaces no longer live in config.json — they moved to the encrypted
+        // API.json.enc — so the old "url was seen" gate, which only ever counted
+        // interface URLs, no longer applies.)
+        if ((fieldOccurances[ConfigFields::QueueFolder] > 0) &&
+            (fieldOccurances[ConfigFields::WorkflowsFolder] > 0))
         {
             m_State = ConfigParser::State::ConfigOk;
         }
@@ -665,285 +664,4 @@ namespace AIAssistant
         return name;
     }
 
-    void ConfigParser::ParseInterfaces(simdjson::ondemand::array jsonArray, EngineConfig& engineConfig,
-                                       FieldOccurances& fieldOccurances)
-    {
-        using namespace simdjson;
-
-        for (auto element : jsonArray)
-        {
-            ondemand::object interface = element.get_object();
-
-            EngineConfig::ApiInterface apiInterface;
-
-            for (auto field : interface)
-            {
-                std::string_view jsonObjectKey = field.unescaped_key();
-
-                if (jsonObjectKey == "name")
-                {
-                    ParseStringField(field.value(), jsonObjectKey, apiInterface.m_Name,
-                                     &fieldOccurances[ConfigFields::InterfaceName],
-                                     "ConfigParser: API interface");
-                }
-                else if (jsonObjectKey == "description")
-                {
-                    ParseStringField(field.value(), jsonObjectKey, apiInterface.m_Description,
-                                     &fieldOccurances[ConfigFields::InterfaceDescription],
-                                     "ConfigParser: API interface");
-                }
-                else if (jsonObjectKey == "key_name")
-                {
-                    ParseStringField(field.value(), jsonObjectKey, apiInterface.m_KeyName,
-                                     &fieldOccurances[ConfigFields::InterfaceKeyName],
-                                     "ConfigParser: API interface");
-                }
-                else if (jsonObjectKey == "url")
-                {
-                    ParseStringField(field.value(), jsonObjectKey, apiInterface.m_Url,
-                                     &fieldOccurances[ConfigFields::Url],
-                                     "ConfigParser: API interface");
-                }
-                else if (jsonObjectKey == "model")
-                {
-                    ParseStringField(field.value(), jsonObjectKey, apiInterface.m_Model,
-                                     &fieldOccurances[ConfigFields::Model],
-                                     "ConfigParser: API interface");
-                }
-                else if (jsonObjectKey == "max_context_tokens")
-                {
-                    uint64_t value = 0;
-                    if (field.value().get_uint64().get(value) == simdjson::SUCCESS)
-                    {
-                        apiInterface.m_MaxContextTokens = value;
-                        LOG_CORE_INFO("max_context_tokens: {}", value);
-                    }
-                }
-                else if (jsonObjectKey == "default_output_tokens")
-                {
-                    int64_t value = 0;
-                    if (field.value().get_int64().get(value) == simdjson::SUCCESS && value > 0)
-                    {
-                        apiInterface.m_DefaultOutputTokens = static_cast<int32_t>(value);
-                        LOG_CORE_INFO("default_output_tokens: {}", value);
-                    }
-                }
-                else if (jsonObjectKey == "rate_limit")
-                {
-                    // Adaptive rate-limit + size-aware budget block.  All sub-fields
-                    // optional; missing fields keep RateLimit/RequestBudget defaults.
-                    ondemand::object rateLimitObject;
-                    if (field.value().get_object().get(rateLimitObject) == simdjson::SUCCESS)
-                    {
-                        auto& rateLimit = apiInterface.m_RateLimit;
-                        auto& budget = rateLimit.m_RequestBudget;
-                        for (auto rlField : rateLimitObject)
-                        {
-                            std::string_view rlKey = rlField.unescaped_key();
-                            if (rlKey == "initial_concurrency_probe")
-                            {
-                                int64_t v = 0;
-                                if (rlField.value().get_int64().get(v) == simdjson::SUCCESS)
-                                    rateLimit.m_InitialConcurrencyProbe = static_cast<int>(v);
-                            }
-                            else if (rlKey == "max_concurrency")
-                            {
-                                int64_t v = 0;
-                                if (rlField.value().get_int64().get(v) == simdjson::SUCCESS && v > 0)
-                                    rateLimit.m_MaxConcurrency = static_cast<int>(v);
-                            }
-                            else if (rlKey == "max_retries_429")
-                            {
-                                int64_t v = 0;
-                                if (rlField.value().get_int64().get(v) == simdjson::SUCCESS && v >= 0)
-                                    rateLimit.m_MaxRetries429 = static_cast<int>(v);
-                            }
-                            else if (rlKey == "max_retries_transient")
-                            {
-                                int64_t v = 0;
-                                if (rlField.value().get_int64().get(v) == simdjson::SUCCESS && v >= 0)
-                                    rateLimit.m_MaxRetriesTransient = static_cast<int>(v);
-                            }
-                            else if (rlKey == "base_retry_ms")
-                            {
-                                int64_t v = 0;
-                                if (rlField.value().get_int64().get(v) == simdjson::SUCCESS && v > 0)
-                                    rateLimit.m_BaseRetryMs = static_cast<int>(v);
-                            }
-                            else if (rlKey == "request_budget")
-                            {
-                                ondemand::object budgetObject;
-                                if (rlField.value().get_object().get(budgetObject) == simdjson::SUCCESS)
-                                {
-                                    for (auto bField : budgetObject)
-                                    {
-                                        std::string_view bKey = bField.unescaped_key();
-                                        double v = 0.0;
-                                        if (bField.value().get_double().get(v) != simdjson::SUCCESS)
-                                            continue;
-                                        if (bKey == "per_1k_input_token_seconds")
-                                            budget.m_Per1kInputTokenSeconds = v;
-                                        else if (bKey == "per_1k_output_token_seconds")
-                                            budget.m_Per1kOutputTokenSeconds = v;
-                                        else if (bKey == "fixed_overhead_seconds")
-                                            budget.m_FixedOverheadSeconds = v;
-                                        else if (bKey == "safety_margin_factor")
-                                            budget.m_SafetyMarginFactor = v;
-                                        else if (bKey == "min_seconds")
-                                            budget.m_MinSeconds = v;
-                                        else if (bKey == "max_seconds")
-                                            budget.m_MaxSeconds = v;
-                                    }
-                                }
-                            }
-                        }
-                        LOG_CORE_INFO("rate_limit: maxConcurrency={} budget=[in={}s/1k out={}s/1k overhead={}s margin=x{} "
-                                      "min={}s max={}s]",
-                                      rateLimit.m_MaxConcurrency, budget.m_Per1kInputTokenSeconds,
-                                      budget.m_Per1kOutputTokenSeconds, budget.m_FixedOverheadSeconds,
-                                      budget.m_SafetyMarginFactor, budget.m_MinSeconds, budget.m_MaxSeconds);
-                    }
-                }
-                else if (jsonObjectKey == "API")
-                {
-                    std::string_view api;
-                    if (field.value().get_string().get(api) != simdjson::SUCCESS)
-                    {
-                        LOG_CORE_ERROR("ConfigParser: API interface '{}' must be a string", jsonObjectKey);
-                        continue;
-                    }
-                    LOG_CORE_INFO("API: {}", api);
-                    // Legacy "Test" api_type — superseded by the is_mock flag.
-                    // Reject with explicit migration guidance so the operator
-                    // knows what to change.
-                    if (api == "Test")
-                    {
-                        LOG_CORE_ERROR("ConfigParser: api_type 'Test' has been removed; migrate this interface to "
-                                       "api_type: '<API1..API6>' + is_mock: true + fixture_path: '<path>'.  See "
-                                       "doc/jarvisagent.md is_mock section.  Interface will be marked InvalidAPI "
-                                       "and skipped by configChecker.");
-                        apiInterface.m_InterfaceType = EngineConfig::InterfaceType::InvalidAPI;
-                        ++fieldOccurances[ConfigFields::InterfaceType];
-                        continue;
-                    }
-                    apiInterface.m_InterfaceType = ParseInterfaceType(api);
-                    if (apiInterface.m_InterfaceType == EngineConfig::InterfaceType::InvalidAPI)
-                    {
-                        LOG_CORE_ERROR("ConfigParser: unknown API '{}' in interface (expected API1-API6); "
-                                       "interface will be marked InvalidAPI and skipped by configChecker",
-                                       api);
-                    }
-                    ++fieldOccurances[ConfigFields::InterfaceType];
-                }
-                else if (jsonObjectKey == "is_mock")
-                {
-                    // Dispatch selection on this flag routes to MockTransport
-                    // instead of LiveTransport.  Fixture-path containment + size cap +
-                    // status/header allowlist enforced at consume time.
-                    bool value = false;
-                    if (field.value().get_bool().get(value) == simdjson::SUCCESS)
-                    {
-                        apiInterface.m_IsMock = value;
-                        LOG_CORE_INFO("is_mock: {}", value);
-                    }
-                    else
-                    {
-                        LOG_CORE_ERROR("ConfigParser: API interface 'is_mock' must be a bool");
-                    }
-                }
-                else if (jsonObjectKey == "fixture_path")
-                {
-                    std::string_view fixturePath;
-                    if (field.value().get_string().get(fixturePath) == simdjson::SUCCESS)
-                    {
-                        apiInterface.m_FixturePath = fixturePath;
-                        LOG_CORE_INFO("fixture_path: {}", fixturePath);
-                    }
-                    else
-                    {
-                        LOG_CORE_ERROR("ConfigParser: API interface 'fixture_path' must be a string");
-                    }
-                }
-            }
-
-            // is_mock + fixture_path coupling: when is_mock is true the
-            // fixture_path field must be present AND resolve under the
-            // project root.  Defense-in-depth — MockTransport re-checks at
-            // load time, but rejecting at config parse fails the interface
-            // up front and gives the operator a clear error message.
-            if (apiInterface.m_IsMock)
-            {
-                if (apiInterface.m_FixturePath.empty())
-                {
-                    LOG_CORE_ERROR("ConfigParser: API interface has is_mock=true but no fixture_path; mock dispatch "
-                                   "requires a non-empty fixture_path.  Marking interface InvalidAPI.");
-                    apiInterface.m_InterfaceType = EngineConfig::InterfaceType::InvalidAPI;
-                }
-                else
-                {
-                    std::filesystem::path const confined = ConfineUnderProjectRoot(apiInterface.m_FixturePath);
-                    if (confined.empty())
-                    {
-                        LOG_CORE_ERROR("ConfigParser: API interface fixture_path '{}' rejected by "
-                                       "ConfineUnderProjectRoot (outside project root, symlink escape, or "
-                                       "unresolvable).  Marking interface InvalidAPI.",
-                                       apiInterface.m_FixturePath);
-                        apiInterface.m_InterfaceType = EngineConfig::InterfaceType::InvalidAPI;
-                    }
-                }
-            }
-
-            // Auto-generate name from URL domain + model + API type if not provided
-            if (apiInterface.m_Name.empty())
-            {
-                std::string_view const apiTypeStr = InterfaceTypeName(apiInterface.m_InterfaceType);
-                apiInterface.m_Name =
-                    EngineConfig::GenerateInterfaceName(apiInterface.m_Url, apiInterface.m_Model, std::string(apiTypeStr));
-                LOG_CORE_INFO("auto-generated interface name: {}", apiInterface.m_Name);
-            }
-
-            // If config.json didn't set max_context_tokens explicitly, resolve it
-            // from a curated model-name table.  Unknown models fall back to a
-            // conservative 50 K limit so the chunker fires aggressively rather
-            // than dispatching an oversized request that the provider may reject.
-            if (apiInterface.m_MaxContextTokens == 0 && !apiInterface.m_Model.empty())
-            {
-                uint64_t const resolved = ResolveMaxContextTokensFromModelImpl(apiInterface.m_Model);
-                apiInterface.m_MaxContextTokens = resolved;
-                bool const matched = (resolved != kUnknownModelFallbackTokens);
-                LOG_CORE_INFO("max_context_tokens for '{}' model='{}': {} (source: {})",
-                              apiInterface.m_Name, apiInterface.m_Model, resolved,
-                              matched ? "model-name fallback table" : "unknown-model default 50000");
-            }
-
-            // Plain-HTTP policy gate: http:// is allowed only when every
-            // resolved host address is loopback (127.0.0.0/8 or ::1), and
-            // never when a key_name is configured (a credential over
-            // plaintext would expose the Bearer token in transit).  The
-            // shipped local-LLM path (ollama / llama.cpp at
-            // http://localhost:11434/...) passes this gate; cloud URLs that
-            // accidentally fell to http:// are rejected.  Fail-closed:
-            // rejected interfaces are skipped here so a misconfigured entry
-            // doesn't silently dispatch in clear text.
-            if (auto const result = UrlPolicy::ValidateAiInterfaceUrl(apiInterface.m_Url, apiInterface.m_KeyName);
-                !result.has_value())
-            {
-                if (result.error().m_Code == UrlPolicy::UrlPolicyErrorCode::CredentialedPlaintextHttp)
-                {
-                    UrlPolicy::RecordCredentialedPlaintextHttpRejection();
-                }
-                else
-                {
-                    UrlPolicy::RecordUrlPolicyRejection();
-                }
-                LOG_CORE_ERROR("ConfigParser: rejected AI interface '{}' url='{}' key_name='{}': {} ({})",
-                               apiInterface.m_Name, apiInterface.m_Url, apiInterface.m_KeyName,
-                               UrlPolicy::Describe(result.error().m_Code),
-                               result.error().m_Details);
-                continue;
-            }
-
-            engineConfig.m_ApiInterfaces.push_back(std::move(apiInterface));
-        }
-    }
 } // namespace AIAssistant

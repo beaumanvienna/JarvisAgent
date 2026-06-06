@@ -352,12 +352,12 @@ Tasks of type `ai_call` can optionally specify an AI interface via the `api_inte
 }
 ```
 
-The value references an AI interface `name` from `config.json` `"API interfaces"`. Each AI interface can in turn reference an API key via `key_name`.
+The value references an AI interface `name` from the encrypted AI-routing store `API.json.enc` (managed via the dashboard; hydrated into `m_ApiInterfaces` at unlock). Each AI interface can in turn reference an API key via `key_name`.
 
 Resolution order:
-1. Task-level `"api_interface"` → look up in config's `m_ApiInterfaces` by name
+1. Task-level `"api_interface"` → look up in the hydrated `m_ApiInterfaces` by name
 2. Interface's `key_name` → look up API key in KeyManager
-3. If no `api_interface` specified → use the global `"API index"` from config.json
+3. If no `api_interface` specified → use the store's default interface (resolved into `m_ApiIndex` at hydrate)
 4. If no `key_name` on the interface → use the default (first) provider from KeyManager
 
 The workflow editor Inspector shows an **AI Interface** dropdown for `ai_call` nodes, populated from the live list of configured interfaces.
@@ -387,11 +387,11 @@ The workflow editor Inspector shows an **AI Interface** dropdown for `ai_call` n
 
 | Method   | Path                                      | Description                |
 |----------|-------------------------------------------|----------------------------|
-| `GET`    | `/api/settings/ai-interfaces`             | List all interfaces (from config.json) |
-| `POST`   | `/api/settings/ai-interfaces`             | Add a new interface        |
-| `PUT`    | `/api/settings/ai-interfaces/<name>`      | Update an interface        |
-| `DELETE` | `/api/settings/ai-interfaces/<name>`      | Delete an interface        |
-| `POST`   | `/api/settings/ai-interfaces/save`        | Save interfaces to config.json |
+| `GET`    | `/api/settings/ai-interfaces`             | List all interfaces (from `API.json.enc`) |
+| `POST`   | `/api/settings/ai-interfaces`             | Add a new interface (master-password re-auth) |
+| `PUT`    | `/api/settings/ai-interfaces/<name>`      | Update an interface (master-password re-auth) |
+| `DELETE` | `/api/settings/ai-interfaces/<name>`      | Delete an interface (master-password re-auth) |
+| `POST`   | `/api/settings/ai-interfaces/save`        | Re-persist `API.json.enc` (vestigial; re-auth) |
 
 **Note:** URL path parameters are URL-decoded server-side to support names with spaces and special characters.
 
@@ -487,7 +487,7 @@ The selection is stored as `api_interface` on the task and preserved in `.jcwf` 
 ### Phase 5: Per-task AI interface selection — *frontend done, backend pending*
 
 21. ✅ `api_interface` field stored on `ai_call` tasks in `.jcwf` files (frontend).
-22. ✅ `key_name` field on AI interfaces in `config.json` linking interfaces to keys.
+22. ✅ `key_name` field on AI interfaces in `API.json.enc` linking interfaces to keys.
 23. ⚠️ Backend dispatch: resolve `api_interface` → interface config → `key_name` → API key at runtime.
 
 ---

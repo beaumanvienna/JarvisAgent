@@ -33,14 +33,18 @@ export async function getConfigSettings(): Promise<ConfigSettings>
   return (await response.json()) as ConfigSettings;
 }
 
+// The config-settings PUT is re-auth gated on the backend (it can change the
+// default/jcwf interface, which is routing).  Optional `masterPassword` at the
+// type level only so callers can be wired incrementally; omitting it → 401.
 export async function updateConfigSettings(
-  settings: Partial<Pick<ConfigSettings, "api_index" | "max_threads" | "verbose" | "max_file_size_kb" | "jcwf_batch_size" | "jcwf_ai_interface" | "use_bash">>
+  settings: Partial<Pick<ConfigSettings, "api_index" | "max_threads" | "verbose" | "max_file_size_kb" | "jcwf_batch_size" | "jcwf_ai_interface" | "use_bash">>,
+  masterPassword?: string,
 ): Promise<ConfigSettingsUpdateResponse>
 {
   const response = await authFetch("/api/settings/config", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(settings),
+    body: JSON.stringify({ ...settings, master_password: masterPassword }),
   });
   return (await response.json()) as ConfigSettingsUpdateResponse;
 }

@@ -36,7 +36,7 @@ Registry for connector plugins. Connectors register themselves at startup; task 
 
 ### CloudConnection
 
-Configuration for a named cloud connection, persisted in `connections.json`:
+Configuration for a named cloud connection, persisted in the master-password-encrypted `connections.json.enc`:
 
 ```json
 {
@@ -55,7 +55,7 @@ Configuration for a named cloud connection, persisted in `connections.json`:
 
 ### CloudConnectionManager
 
-In-memory CRUD store for `CloudConnection` configs, with JSON serialization for persistence. Thread-safe with `shared_mutex` (same pattern as `KeyManager`). Loaded from `connections.json` on startup.
+In-memory CRUD store for `CloudConnection` configs, with JSON serialization for persistence. Thread-safe with `shared_mutex` (same pattern as `KeyManager`). Loaded from the AES-256-GCM-encrypted `connections.json.enc` at unlock (`LoadEncrypted`) — moved out of the old plaintext `connections.json` so connection endpoint URLs + credential references can't be tampered with at rest without the master password. Mutations persist via `SaveEncrypted`.
 
 **Files:** `code/backend/application/cloud/cloudConnectionManager.h/cpp`
 
@@ -157,7 +157,7 @@ All endpoints are Studio-only.
 | `PUT` | `/api/connections/{name}` | Update an existing connection (merge semantics) |
 | `DELETE` | `/api/connections/{name}` | Delete a connection |
 | `POST` | `/api/connections/{name}/test` | Test connectivity via the registered connector |
-| `POST` | `/api/connections/save` | Persist to `connections.json` |
+| `POST` | `/api/connections/save` | Re-persist `connections.json.enc` (master-password re-auth required; mutations already persist per-call) |
 
 ### GET /api/connections
 
@@ -222,7 +222,7 @@ New "Connections" nav button between "Keys" and "Assistant" in the workflow edit
 - **Test** button per connection (calls `/api/connections/{name}/test`) with green/red LED indicators showing the test result on each connection row
 - Modal dialogs for connection and key editing (replacing earlier inline card layout)
 - Edit form with type dropdown, endpoint, key name, auth type, and dynamic key-value params editor
-- **Save** button persists to `connections.json`
+- **Save** button re-persists `connections.json.enc` (requires master-password re-auth; create/update/delete already persist per-mutation)
 - Dirty state indicator (`*`) in the nav button
 
 **Files:**

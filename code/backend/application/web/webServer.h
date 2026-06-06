@@ -23,6 +23,7 @@
 #include "crow.h"
 #include "auxiliary/threadPool.h"
 #include "simdjson/simdjson.h"
+#include "web/apiInterfaceManager.h"
 #include "web/mcpKeyManager.h"
 #include "web/webSessionManager.h"
 #include "workflow/adhocWorkflowManager.h"
@@ -183,11 +184,44 @@ namespace AIAssistant
         std::string CheckAuth(crow::request const& req, std::string_view minRole,
                               AuthResult& outAuth);
 
+        // Second-factor re-auth gate for routing/connection mutations.  An admin
+        // session reaching a routing-mutation endpoint must additionally prove
+        // possession of the master password in THIS request (closes the
+        // "unattended unlocked dashboard" vector — an open admin tab can no
+        // longer repoint where credentials are sent).  Returns "" on success or
+        // an error code ("rate_limited", "reauth_required", "locked",
+        // "reauth_failed") for MakeAuthErrorResponse.  Constant-time-compares the
+        // supplied secret against the held master password; a mismatch records an
+        // auth failure (same lockout path as /api/settings/keys/unlock) so the
+        // gate is brute-force-rate-limited.  Per-mutation: nothing is cached.
+        // Call AFTER CheckAdminAuth on every routing/connection mutation handler.
+        std::string CheckMasterPasswordReauth(crow::request const& req);
+
         // MCP key store lifecycle (shared with the existing KeyManager master password).
         // Returns true if the store is now initialised (loaded from disk, or empty-ready).
         bool InitMcpKeyStore(std::string_view masterPassword);
         // Persist pending changes using the cached master password.
         bool SaveMcpKeyStore();
+
+        // AI-routing store lifecycle (API.json.enc), unlocked by the same master
+        // password.  InitApiInterfaceStore loads (or creates empty) the file at
+        // unlock; HydrateAiInterfaces copies the validated table into
+        // EngineConfig::m_ApiInterfaces and resolves the default/jcwf names into
+        // m_ApiIndex/m_JcwfAiInterfaceIndex so the dispatch hot path is unchanged.
+        // SaveApiInterfaceStore persists via the cached master password and
+        // re-hydrates — called by the routing-mutation handlers after a change.
+        bool InitApiInterfaceStore(std::string_view masterPassword);
+        bool SaveApiInterfaceStore();
+        void HydrateAiInterfaces();
+
+        // Cloud-connection store lifecycle (connections.json.enc), unlocked by the
+        // same master password.  The CloudConnectionManager itself is the live
+        // in-memory authority dispatch reads, so there is no separate hydration
+        // cache — InitConnectionStore loads (or creates empty) at unlock, and
+        // SaveConnectionStore persists via the cached master password after a
+        // connection mutation.
+        bool InitConnectionStore(std::string_view masterPassword);
+        bool SaveConnectionStore();
 
         // Lookup an MCP auth result from a raw bearer token; returns nullopt if not MCP.
         // Non-const: calls RecordAuthFailure on invalid-key path.
@@ -214,6 +248,17 @@ namespace AIAssistant
         mutable WebSessionManager m_WebSessionManager;
         std::filesystem::path m_McpKeysFilePath;
         std::atomic<bool> m_McpKeysLoaded{false};
+
+        // ---- AI-routing store (API.json.enc) ----
+        mutable ApiInterfaceManager m_ApiInterfaceManager;
+        std::filesystem::path m_ApiFilePath;
+        std::atomic<bool> m_ApiInterfacesLoaded{false};
+
+        // ---- Cloud-connection store (connections.json.enc) ----
+        // The CloudConnectionManager lives in Core (engine), shared with dispatch;
+        // WebServer only holds the file path + loaded flag for its lifecycle.
+        std::filesystem::path m_ConnectionsFilePath;
+        std::atomic<bool> m_ConnectionsLoaded{false};
 
         // ---- Adhoc workflow submission ----
         // Held by unique_ptr because construction depends on WorkflowRegistry,

@@ -33,6 +33,8 @@
 #include <ctime>
 #include <fstream>
 #include <iomanip>
+#include <mutex>
+#include <shared_mutex>
 #include <sstream>
 
 #include "simdjson/simdjson.h"
@@ -158,78 +160,32 @@ namespace AIAssistant
         }
     } // namespace
 
-    bool McpKeyManager::IsLoaded() const
-    {
-        std::lock_guard lock(m_Mutex);
-        return m_Loaded;
-    }
-
     bool McpKeyManager::Load(std::filesystem::path const& path, std::string_view masterPassword)
     {
-        std::ifstream file(path, std::ios::binary);
-        if (!file)
+        if (auto const result = EncryptedJsonStore::Load(path, masterPassword); !result.has_value())
         {
-            LOG_CORE_ERROR("McpKeyManager::Load: cannot open '{}'", path.string());
+            LOG_CORE_ERROR("McpKeyManager::Load: {} — {}", Describe(result.error().m_Code),
+                           result.error().m_Details);
             return false;
         }
-
-        std::vector<uint8_t> blob((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-        file.close();
-
-        if (blob.empty())
+        size_t keyCount = 0, enrollCount = 0;
         {
-            LOG_CORE_ERROR("McpKeyManager::Load: '{}' is empty", path.string());
-            return false;
+            std::shared_lock lock(m_Mutex);
+            keyCount = m_Keys.size();
+            enrollCount = m_Enrollments.size();
         }
-
-        std::string json = KeyEncryption::Decrypt(blob, masterPassword);
-        if (json.empty())
-        {
-            LOG_CORE_ERROR("McpKeyManager::Load: decryption failed for '{}'", path.string());
-            return false;
-        }
-
-        std::lock_guard lock(m_Mutex);
-        if (!ParseFromJson(json))
-        {
-            LOG_CORE_ERROR("McpKeyManager::Load: failed to parse decrypted JSON from '{}'", path.string());
-            return false;
-        }
-        m_Loaded = true;
-        LOG_CORE_INFO("McpKeyManager::Load: loaded {} key(s), {} enrollment(s) from '{}'",
-                      m_Keys.size(), m_Enrollments.size(), path.string());
+        LOG_CORE_INFO("McpKeyManager::Load: loaded {} key(s), {} enrollment(s) from '{}'", keyCount,
+                      enrollCount, path.string());
         return true;
     }
 
     bool McpKeyManager::Save(std::filesystem::path const& path, std::string_view masterPassword)
     {
-        std::string json;
+        if (auto const result = EncryptedJsonStore::Save(path, masterPassword); !result.has_value())
         {
-            std::lock_guard lock(m_Mutex);
-            json = SerializeToJson();
-        }
-
-        std::vector<uint8_t> blob = KeyEncryption::Encrypt(json, masterPassword);
-        if (blob.empty())
-        {
-            LOG_CORE_ERROR("McpKeyManager::Save: encryption failed");
+            LOG_CORE_ERROR("McpKeyManager::Save: {} — {}", Describe(result.error().m_Code),
+                           result.error().m_Details);
             return false;
-        }
-
-        // Atomic write of the encrypted blob — a truncated keystore breaks
-        // all subsequent unlocks.  Helper renames the temp file in one step
-        // so readers see either the previous version or the new one.
-        std::string_view const blobView(reinterpret_cast<char const*>(blob.data()), blob.size());
-        std::string writeError;
-        if (!EngineCore::AtomicWriteFile(path, blobView, writeError))
-        {
-            LOG_CORE_ERROR("McpKeyManager::Save: {} (path='{}')", writeError, path.string());
-            return false;
-        }
-
-        {
-            std::lock_guard lock(m_Mutex);
-            m_Loaded = true;
         }
         LOG_CORE_INFO("McpKeyManager::Save: saved to '{}'", path.string());
         return true;
@@ -577,7 +533,7 @@ namespace AIAssistant
         return oss.str();
     }
 
-    bool McpKeyManager::ParseFromJson(std::string const& json)
+    std::expected<void, StoreError> McpKeyManager::ParseFromJson(std::string_view json)
     {
         m_Keys.clear();
         m_Enrollments.clear();
@@ -587,8 +543,7 @@ namespace AIAssistant
         simdjson::ondemand::document doc;
         if (parser.iterate(padded).get(doc) != simdjson::SUCCESS)
         {
-            LOG_CORE_ERROR("McpKeyManager::ParseFromJson: iterate failed");
-            return false;
+            return std::unexpected(StoreError::Make(StoreErrorCode::ParseFailed, "iterate failed"));
         }
 
         int64_t version = 1;
@@ -598,8 +553,8 @@ namespace AIAssistant
         }
         if (version != 1)
         {
-            LOG_CORE_ERROR("McpKeyManager::ParseFromJson: unsupported version {}", version);
-            return false;
+            return std::unexpected(StoreError::Make(StoreErrorCode::ParseFailed,
+                                                    "unsupported version " + std::to_string(version)));
         }
 
         // keys[]
@@ -657,6 +612,6 @@ namespace AIAssistant
             }
         }
 
-        return true;
+        return {};
     }
 } // namespace AIAssistant

@@ -11,6 +11,16 @@ import {
   type RateLimitConfig,
 } from "../api/aiInterfaces";
 import { listProviders, saveProviders, type ProviderEntry } from "../api/providers";
+import MasterPasswordDialog from "@shared/components/MasterPasswordDialog";
+
+// A pending routing mutation awaiting master-password re-auth.  `run` performs
+// the mutation (passing the entered password) + post-success side effects, and
+// reports {ok, message} back to the confirm dialog.
+type ReauthRequest = {
+  title: string;
+  description: string;
+  run: (password: string) => Promise<{ ok: boolean; message?: string }>;
+};
 
 type EditingInterface = {
   name: string;
@@ -207,29 +217,34 @@ export default function AiManagerView({ appMasterPassword, onDirtyStateChange }:
 
   useEffect(() => { refresh(); }, [refresh]);
 
-  const handleDelete = useCallback(async (name: string) => {
-    if (!window.confirm(`Delete AI interface "${name}"?`))
-    {
-      return;
-    }
-    const result = await deleteAiInterface(name);
-    if (result.ok)
-    {
-      setStatusMessage(`Deleted "${name}"`);
-      setErrorMessage("");
-      if (editing && editing.originalName === name)
-      {
-        setEditing(null);
-      }
-      await refresh();
-    }
-    else
-    {
-      setErrorMessage(result.message ?? "Delete failed");
-    }
+  // Routing mutations require master-password re-auth (per-mutation, no caching —
+  // matches the backend gate).  Setting `reauth` pops the confirm dialog; its
+  // run() performs the mutation with the entered password.
+  const [reauth, setReauth] = useState<ReauthRequest | null>(null);
+
+  const handleDelete = useCallback((name: string) => {
+    setReauth({
+      title: "Delete AI interface",
+      description: `Re-enter your master password to delete "${name}".`,
+      run: async (pw) => {
+        const result = await deleteAiInterface(name, pw);
+        if (!result.ok)
+        {
+          return { ok: false, message: result.message ?? "Delete failed" };
+        }
+        setStatusMessage(`Deleted "${name}"`);
+        setErrorMessage("");
+        if (editing && editing.originalName === name)
+        {
+          setEditing(null);
+        }
+        await refresh();
+        return { ok: true };
+      },
+    });
   }, [editing, refresh]);
 
-  const handleSave = useCallback(async () => {
+  const handleSave = useCallback(() => {
     if (!editing)
     {
       return;
@@ -242,53 +257,52 @@ export default function AiManagerView({ appMasterPassword, onDirtyStateChange }:
     }
 
     const ratePayload = buildRateLimitPayload(editing);
+    const snap = editing; // capture for the deferred re-auth run
 
-    if (editing.isNew)
-    {
-      const result = await createAiInterface({
-        url: editing.url.trim(),
-        model: editing.model.trim(),
-        api_type: editing.api_type,
-        name: editing.name.trim() || undefined,
-        description: editing.description.trim() || undefined,
-        key_name: editing.key_name || undefined,
-        rate_limit: ratePayload,
-      });
-      if (result.ok)
-      {
-        setStatusMessage(`Created "${result.name ?? editing.name}"`);
+    setReauth({
+      title: snap.isNew ? "Create AI interface" : "Update AI interface",
+      description: `Re-enter your master password to ${snap.isNew ? "create" : "update"} this interface.`,
+      run: async (pw) => {
+        if (snap.isNew)
+        {
+          const result = await createAiInterface({
+            url: snap.url.trim(),
+            model: snap.model.trim(),
+            api_type: snap.api_type,
+            name: snap.name.trim() || undefined,
+            description: snap.description.trim() || undefined,
+            key_name: snap.key_name || undefined,
+            rate_limit: ratePayload,
+          }, pw);
+          if (!result.ok)
+          {
+            return { ok: false, message: result.message ?? "Create failed" };
+          }
+          setStatusMessage(`Created "${result.name ?? snap.name}"`);
+        }
+        else
+        {
+          const result = await updateAiInterface(snap.originalName, {
+            url: snap.url.trim(),
+            model: snap.model.trim(),
+            api_type: snap.api_type,
+            name: snap.name.trim(),
+            description: snap.description.trim(),
+            key_name: snap.key_name,
+            rate_limit: ratePayload,
+          }, pw);
+          if (!result.ok)
+          {
+            return { ok: false, message: result.message ?? "Update failed" };
+          }
+          setStatusMessage(`Updated "${result.name ?? snap.name}"`);
+        }
         setErrorMessage("");
         setEditing(null);
         await refresh();
-      }
-      else
-      {
-        setErrorMessage(result.message ?? "Create failed");
-      }
-    }
-    else
-    {
-      const result = await updateAiInterface(editing.originalName, {
-        url: editing.url.trim(),
-        model: editing.model.trim(),
-        api_type: editing.api_type,
-        name: editing.name.trim(),
-        description: editing.description.trim(),
-        key_name: editing.key_name,
-        rate_limit: ratePayload,
-      });
-      if (result.ok)
-      {
-        setStatusMessage(`Updated "${result.name ?? editing.name}"`);
-        setErrorMessage("");
-        setEditing(null);
-        await refresh();
-      }
-      else
-      {
-        setErrorMessage(result.message ?? "Update failed");
-      }
-    }
+        return { ok: true };
+      },
+    });
   }, [editing, refresh]);
 
   const doSaveAll = useCallback(async (pw: string, fromPrompt: boolean) => {
@@ -296,7 +310,7 @@ export default function AiManagerView({ appMasterPassword, onDirtyStateChange }:
     setErrorMessage("");
     setSavePasswordError(null);
 
-    const configResult = await saveAiInterfaces();
+    const configResult = await saveAiInterfaces(pw);
     if (!configResult.ok)
     {
       setErrorMessage(configResult.message ?? "Config save failed");
@@ -609,10 +623,21 @@ export default function AiManagerView({ appMasterPassword, onDirtyStateChange }:
                     className="input"
                     style={{ fontSize: 12, padding: "2px 6px", maxWidth: 260 }}
                     value={iface.key_name || ""}
-                    onChange={async (e) => {
+                    onChange={(e) => {
                       const newKeyName = e.target.value;
-                      await updateAiInterface(iface.name, { key_name: newKeyName });
-                      await refresh();
+                      setReauth({
+                        title: "Change interface key",
+                        description: `Re-enter your master password to set the key for "${iface.name}".`,
+                        run: async (pw) => {
+                          const result = await updateAiInterface(iface.name, { key_name: newKeyName }, pw);
+                          if (!result.ok)
+                          {
+                            return { ok: false, message: result.message ?? "Update failed" };
+                          }
+                          await refresh();
+                          return { ok: true };
+                        },
+                      });
                     }}
                   >
                     {keys.length === 0 ? (
@@ -768,6 +793,23 @@ export default function AiManagerView({ appMasterPassword, onDirtyStateChange }:
             </div>
           </div>
         </div>
+      )}
+
+      {reauth && (
+        <MasterPasswordDialog
+          mode="confirm"
+          title={reauth.title}
+          description={reauth.description}
+          onConfirm={async (pw) => {
+            const result = await reauth.run(pw);
+            if (result.ok)
+            {
+              setReauth(null);
+            }
+            return result;
+          }}
+          onCancel={() => setReauth(null)}
+        />
       )}
     </div>
   );

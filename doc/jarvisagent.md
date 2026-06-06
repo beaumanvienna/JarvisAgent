@@ -202,15 +202,24 @@ The following fields are recognized:
 - **`"max file size in kB"`** — (number) Maximum input file size in kilobytes. Files larger than this are chunked before being sent to the AI. Default: 20. Valid range: 1–256.
 - **`"jcwf batch size"`** — (number) Number of tasks per batch when the AI JCWF generator fans out to multiple parallel calls for large workflows. Workflows with fewer tasks than this threshold are generated in a single call. Default: 10.
 - **`"verbose"`** — (boolean) Enable verbose logging output.
-- **`"keys_file"`** — (string) Path to the encrypted API keys file. Default: `keys.json.enc`.
+- **`"keys_file"`** — (string) Path to the encrypted provider-keys file. Default: `keys.json.enc`.
+- **`"mcp_keys_file"`** — (string) Path to the encrypted MCP-keys file. Default: `mcp_keys.json.enc`.
+- **`"api_file"`** — (string) Path to the encrypted AI-routing store (interfaces + default/jcwf selectors). Default: `API.json.enc`. The file is encrypted with the master password; its *contents* are managed via the dashboard, not config.json (see [AI interfaces](#ai-interfaces) below).
+- **`"connections_file"`** — (string) Path to the encrypted cloud-connection store. Default: `connections.json.enc`. Same master-password encryption + dashboard management as `api_file`.
 - **`"use_bash"`** — (boolean) Windows only: prefer bash (MSYS2/Git Bash) over PowerShell for shell tasks. Default: `false`. Ignored on Linux/macOS.
 - **`"TlsCert"`** — (string) Path to a PEM-format TLS certificate file. Both `TlsCert` and `TlsKey` must be set to enable HTTPS. See [Security](#security).
 - **`"TlsKey"`** — (string) Path to a PEM-format TLS private key file.
 - **`"TrustedProxyHeader"`** — (string) HTTP header name for gateway-injected user identity (e.g. `X-Forwarded-User`). Engine edition only. See [Security](#security).
 - **`"TrustedRoleHeader"`** — (string) HTTP header name for gateway-injected user role (e.g. `X-Forwarded-Role`). Engine edition only.
 - **`"MaxRequestBodyMB"`** — (number) Maximum HTTP request body size in megabytes. Oversized requests are rejected with HTTP 413 before parsing. Engine edition only. Default: 10.
-- **`"API index"`** — (number) Zero-based index of the default AI interface to use from the `"API interfaces"` array.
-- **`"API interfaces"`** — (array) List of AI provider configurations. Each entry is an object with:
+### AI interfaces
+
+AI interfaces and the default / JCWF interface selectors are **not** stored in `config.json`. They live in the master-password-encrypted **`API.json.enc`** (`api_file`) and are managed through the dashboard (**Settings → AI Interfaces**) or the REST API after unlock. This keeps the routing table — each interface's `url` + `key_name` and the default selection — out of any plaintext file, so it can't be tampered with at rest (an attacker editing a plaintext config could otherwise repoint a `key_name`'s URL and exfiltrate the credential, or reroute the default). Changing any interface (create / update / delete / set-default) requires **re-entering the master password** in that request (the [re-auth gate](#security)), even within an authenticated admin session.
+
+The default and JCWF interfaces are selected by interface **name**. New installs start with no interfaces; add them in the dashboard after entering the master password.
+
+Each interface is an object with the following fields:
+
   - **`"url"`** — (string, **required**) The API endpoint URL (e.g. `https://api.openai.com/v1/chat/completions`).  Plain `http://` is loopback-only — accepted only when every resolved address falls in `127.0.0.0/8` or `::1` (the local-LLM case, e.g. `http://localhost:11434/...` for ollama / llama.cpp).  A non-loopback `http://` URL is rejected at config-load (interface dropped from `m_ApiInterfaces` with `LOG_CORE_ERROR`) and at REST CRUD time (HTTP 400 `url_policy_violation`).  An `http://` URL combined with a non-empty `key_name` is always rejected (`credentialed_plaintext_http`) — a credential over plaintext would leak the Bearer token in transit on every dispatch.  See `doc/cyber security.md` § "AI Interface URL Policy".
   - **`"model"`** — (string) The model name (e.g. `gpt-4o`, `gemini-2.5-flash`).
   - **`"API"`** — (string) The reply parser type:

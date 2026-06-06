@@ -732,19 +732,21 @@ To omit task output content from the callback payload (e.g. for runs handling PI
 
 ## Settings — AI Interfaces — Both editions (admin only)
 
-Manage the `"API interfaces"` array in `config.json` (in-memory + persist to disk).
+Manage the AI interfaces stored in the master-password-encrypted `API.json.enc` (hydrated into memory at unlock; each mutation persists to the encrypted store and requires master-password re-auth — see the re-auth note above).
 
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/settings/ai-interfaces` | List all configured AI interfaces. |
-| POST | `/api/settings/ai-interfaces` | Create a new AI interface. |
-| PUT | `/api/settings/ai-interfaces/<name>` | Update an existing AI interface (by name, URL-encoded). |
-| DELETE | `/api/settings/ai-interfaces/<name>` | Delete an AI interface (by name). |
-| POST | `/api/settings/ai-interfaces/save` | Persist in-memory AI interfaces to `config.json` on disk. |
+| POST | `/api/settings/ai-interfaces` | Create a new AI interface. **Requires `master_password` re-auth.** |
+| PUT | `/api/settings/ai-interfaces/<name>` | Update an existing AI interface (by name, URL-encoded). **Requires `master_password` re-auth.** |
+| DELETE | `/api/settings/ai-interfaces/<name>` | Delete an AI interface (by name). **Requires `master_password` re-auth.** |
+| POST | `/api/settings/ai-interfaces/save` | Re-persist the encrypted AI-routing store (`API.json.enc`). **Requires `master_password` re-auth.** (Mutations already persist per-call; this endpoint is now vestigial.) |
 | POST | `/api/settings/ai-interfaces/test` | Ping-test a specific AI interface (direct curl, 30s timeout). Both editions. |
 | GET | `/api/settings/config` | Read current scalar config values + platform. |
-| PUT | `/api/settings/config` | Update scalar config fields and persist to `config.json`. |
+| PUT | `/api/settings/config` | Update scalar config fields; default/jcwf-interface changes route to the encrypted store. **Requires `master_password` re-auth.** |
 | POST | `/api/settings/config/reload` | Reload `config.json` from disk into memory. |
+
+> **Re-auth gate:** AI-interface and cloud-connection **mutations** (create / update / delete / save / default-change) require the master password to be re-supplied in the request body as `"master_password"`, in addition to the admin session — closes the unattended-unlocked-dashboard vector. Missing → `401 reauth_required`; wrong → `403 reauth_failed` (counts toward the unlock lockout). Read-only list/get endpoints are unaffected. Interfaces live in the encrypted `API.json.enc` and connections in `connections.json.enc` (not plaintext `config.json` / `connections.json`).
 
 ### GET /api/settings/ai-interfaces
 **Response (200):**
@@ -806,7 +808,7 @@ Manage the `"API interfaces"` array in `config.json` (in-memory + persist to dis
 Additional MockTransport hardening enforced at request dispatch (not at this endpoint): 10 MiB per-fixture size cap; optional `<fixture>.meta.json` sibling controls HTTP status (must be `[200, 599]`) and headers (allowlist `{Content-Type, Retry-After}` only — others dropped with WARN); PROV sidecar carries `"mocked": true` + the resolved `fixture_path` so post-mortem tooling distinguishes mock dispatches from live ones.  See `doc/jarvisagent.md` "API interfaces" and `doc/cyber security.md` "MockTransport Security" for the complete posture.
 
 ### POST /api/settings/ai-interfaces/save
-Writes the in-memory interfaces back to the `config.json` file by replacing the `"API interfaces"` array.  String fields (`name`, `description`, `url`, `model`, `key_name`) are JSON-escaped, the patched document is re-parsed with simdjson before the on-disk write, and the rename is atomic — on any 5xx error the existing `config.json` is left unchanged.
+Re-encrypts and atomically writes the in-memory interface table to `API.json.enc` (serialize → `KeyEncryption::Encrypt` → `AtomicWriteFile`).  Now largely vestigial — create/update/delete already persist to the encrypted store per-mutation.  Requires master-password re-auth like any routing mutation.
 
 **Response (200):**
 ```json
@@ -1330,11 +1332,11 @@ Manage named cloud connections for external service integrations. Connections re
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/connections` | List all connections with status. |
-| POST | `/api/connections` | Create a new connection. |
-| PUT | `/api/connections/<name>` | Update an existing connection (merge semantics). |
-| DELETE | `/api/connections/<name>` | Delete a connection. |
+| POST | `/api/connections` | Create a new connection. **Requires `master_password` re-auth.** |
+| PUT | `/api/connections/<name>` | Update an existing connection (merge semantics). **Requires `master_password` re-auth.** |
+| DELETE | `/api/connections/<name>` | Delete a connection. **Requires `master_password` re-auth.** |
 | POST | `/api/connections/<name>/test` | Test connectivity via the registered connector. |
-| POST | `/api/connections/save` | Persist connections to `connections.json`. |
+| POST | `/api/connections/save` | Re-persist the encrypted connection store (`connections.json.enc`). **Requires `master_password` re-auth.** (Mutations already persist per-call.) |
 | GET | `/api/connections/<name>/oauth/authorize` | Start OAuth PKCE flow — returns authorization URL. |
 | GET | `/api/connections/<name>/oauth/callback` | OAuth redirect callback — exchanges code for tokens. |
 
@@ -1388,11 +1390,11 @@ Tests the connection using the `ICloudConnector::TestConnection()` method for th
 The `code` field on `test_failed` responses is the lowercase-snake form of `ConnectorErrorCode` — one of `invalid_config` / `invalid_endpoint` / `credential_missing` / `credential_invalid` / `oauth_error` / `network_error` / `auth_failure` / `http_error` / `value_out_of_range` / `unknown_error`.  Stable identifiers the dashboard switches on for remediation copy.  The breaker records the same code via `CloudCircuitBreaker::RecordFailure`; it surfaces as `last_failure_code` on the per-connection entry of `/api/status::connection_health`.  Codes are classified by `IsConnectionFailure(code)` — connection-class codes tick the breaker's consecutive-failure counter and can trip it Open; `value_out_of_range` (known-good-connection app-level rejection: db_query `max_rows` / `max_output_bytes` / `statement_timeout` exceeded) is recorded for display but does NOT tick the counter, so a user repeatedly hitting an app-level cap does not lock themselves out of the connection.
 
 ### POST /api/connections/save
-Serializes all connections to `connections.json` in the launch directory.  The write is atomic (tmp-file + rename) — on a 5xx response the existing `connections.json` is left unchanged.
+Re-encrypts and atomically writes all connections to `connections.json.enc` (serialize → `KeyEncryption::Encrypt` → `AtomicWriteFile`) — on a 5xx the existing file is left unchanged.  Now largely vestigial (create/update/delete persist per-mutation).  Requires master-password re-auth.
 
-**Response (200):** `{ "ok": true, "path": "/abs/path/connections.json" }`
+**Response (200):** `{ "ok": true }`
 
-**Response (500):** `{ "ok": false, "error": "save_failed", "message": "Failed to write '/abs/path/connections.json': <underlying-error>" }`
+**Response (500):** `{ "ok": false, "error": "save_failed", "message": "Could not save the cloud-connection store." }`
 
 ### GET /api/connections/\<name\>/oauth/authorize
 Initiates an OAuth 2.0 authorization code flow with PKCE for the named connection. The connection must have `auth_type: "oauth2"` and a `client_id` parameter.

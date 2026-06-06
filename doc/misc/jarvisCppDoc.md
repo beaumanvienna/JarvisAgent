@@ -1,6 +1,6 @@
 # jarvisCppDocu — header → cpp pairing review
 
-Walked `code/backend/engine/` and `code/backend/application/` — found 141 headers and 121 cpp files (excluding the two generated headers under `code/backend/application/json/`).
+Walked `code/backend/engine/` and `code/backend/application/` — found 153 headers and 131 cpp files (excluding the two generated headers under `code/backend/application/json/`).
 Pairing rule: a header pairs with the .cpp of the same stem in the same directory.  Additional files in a row's second column are bundled into the same ai_call so the auditor sees the base class or critical helper alongside the primary file (without bundling, an audit of `azureBlobConnector.cpp` would not see the `ICloudConnector` contract it implements; an audit of `pythonTaskExecutor.cpp` would not see the `ConfineUnderProjectRoot` security gate it depends on).
 
 | Header (.h) | Paired cpp (same dir, same stem) |
@@ -14,11 +14,12 @@ Pairing rule: a header pairs with the .cpp of the same stem in the same director
 | `application/assistant/contextAssembler.h` | `application/assistant/contextAssembler.cpp` |
 | `application/assistant/workspaceIndexer.h` | `application/assistant/workspaceIndexer.cpp` |
 | `application/cloud/azureBlobCloudTaskExecutor.h` | `application/cloud/azureBlobCloudTaskExecutor.cpp`, `application/cloud/cloudTaskExecutor.h` |
+| `application/cloud/connectorError.h` | `application/cloud/connectorError.cpp` |
 | `application/cloud/connectorHttp.h` | `application/cloud/connectorHttp.cpp` |
 | `application/cloud/azureBlobConnector.h` | `application/cloud/azureBlobConnector.cpp`, `application/cloud/cloudConnector.h` |
 | `application/cloud/azureSharedKeySigner.h` | `application/cloud/azureSharedKeySigner.cpp` |
 | `application/cloud/cloudCircuitBreaker.h` | `application/cloud/cloudCircuitBreaker.cpp` |
-| `application/cloud/cloudConnectionManager.h` | `application/cloud/cloudConnectionManager.cpp` |
+| `application/cloud/cloudConnectionManager.h` | `application/cloud/cloudConnectionManager.cpp`, `engine/keys/encryptedJsonStore.h` |
 | `application/cloud/cloudConnectionPool.h` | `application/cloud/cloudConnectionPool.cpp` |
 | `application/cloud/cloudConnector.h` |  |
 | `application/cloud/cloudConnectorRegistry.h` | `application/cloud/cloudConnectorRegistry.cpp` |
@@ -68,6 +69,8 @@ Pairing rule: a header pairs with the .cpp of the same stem in the same director
 | `application/json/requestBuilder.h` | `application/json/requestBuilder.cpp` |
 | `application/json/schemaValidator.h` | `application/json/schemaValidator.cpp` |
 | `application/log/statusRenderer.h` | `application/log/statusRenderer.cpp` |
+| `application/network/urlPolicy.h` | `application/network/urlPolicy.cpp` |
+
 | `application/python/pythonEngine.h` | `application/python/pythonEngine.cpp`, `application/file/pathConfinement.h`, `application/file/pathConfinement.cpp` |
 | `application/python/pythonEnginePool.h` | `application/python/pythonEnginePool.cpp` |
 | `application/session/fileWriter.h` | `application/session/fileWriter.cpp` |
@@ -75,8 +78,9 @@ Pairing rule: a header pairs with the .cpp of the same stem in the same director
 | `application/task/internalTaskRegistry.h` |  |
 | `application/task/taskBase.h` |  |
 | `application/web/aiJcwfService.h` | `application/web/aiJcwfService.cpp` |
-| `application/web/mcpKeyManager.h` | `application/web/mcpKeyManager.cpp` |
-| `application/web/webServer.h` | `application/web/webServer.cpp`, `application/web/webServer_helpers.h`, `application/web/webServer_studio.cpp` |
+| `application/web/apiInterfaceManager.h` | `application/web/apiInterfaceManager.cpp`, `engine/keys/encryptedJsonStore.h` |
+| `application/web/mcpKeyManager.h` | `application/web/mcpKeyManager.cpp`, `engine/keys/encryptedJsonStore.h` |
+| `application/web/webServer.h` | `application/web/webServer.cpp`, `application/web/webServer_helpers.h`, `application/web/webServer_studio.cpp`, `application/web/webServer_engine.cpp` |
 | `application/web/webSessionManager.h` | `application/web/webSessionManager.cpp` |
 | `application/workflow/adhocWorkflowManager.h` | `application/workflow/adhocWorkflowManager.cpp` |
 | `application/workflow/aiCallEvents.h` |  |
@@ -92,7 +96,10 @@ Pairing rule: a header pairs with the .cpp of the same stem in the same director
 | `application/workflow/filter/queryParser.h` | `application/workflow/filter/queryParser.cpp` |
 | `application/workflow/internalTaskExecutor.h` | `application/workflow/internalTaskExecutor.cpp`, `application/workflow/taskExecutor.h` |
 | `application/workflow/jcwfContainer.h` | `application/workflow/jcwfContainer.cpp` |
+| `application/workflow/parserError.h` | `application/workflow/parserError.cpp` |
+| `application/workflow/providerHealth.h` |  |
 | `application/workflow/pythonTaskExecutor.h` | `application/workflow/pythonTaskExecutor.cpp`, `application/workflow/taskExecutor.h`, `application/file/pathConfinement.h`, `application/file/pathConfinement.cpp` |
+| `application/workflow/registryError.h` | `application/workflow/registryError.cpp` |
 | `application/workflow/scriptCatalog.h` | `application/workflow/scriptCatalog.cpp` |
 | `application/workflow/shellTaskExecutor.h` | `application/workflow/shellTaskExecutor.cpp`, `application/workflow/taskExecutor.h`, `application/file/pathConfinement.h`, `application/file/pathConfinement.cpp` |
 | `application/workflow/subWorkflowTaskExecutor.h` | `application/workflow/subWorkflowTaskExecutor.cpp`, `application/workflow/taskExecutor.h`, `application/file/pathConfinement.h`, `application/file/pathConfinement.cpp` |
@@ -111,6 +118,7 @@ Pairing rule: a header pairs with the .cpp of the same stem in the same director
 | `application/workflow/workflowTypes.h` |  |
 | `application/workflow/workflowValidator.h` | `application/workflow/workflowValidator.cpp` |
 | `engine/auxiliary/file.h` | `engine/auxiliary/file.cpp` |
+| `engine/auxiliary/sha256.h` | `engine/auxiliary/sha256.cpp` |
 | `engine/auxiliary/threadPool.h` | `engine/auxiliary/threadPool.cpp` |
 | `engine/core.h` | `engine/core.cpp` |
 | `engine/curlWrapper/authSigner.h` | `engine/curlWrapper/authSigner.cpp`, `engine/curlWrapper/credValidation.h` |
@@ -118,7 +126,11 @@ Pairing rule: a header pairs with the .cpp of the same stem in the same director
 | `engine/curlWrapper/credValidation.h` |  |
 | `engine/curlWrapper/curlManager.h` |  |
 | `engine/curlWrapper/curlMultiDispatcher.h` | `engine/curlWrapper/curlMultiDispatcher.cpp` |
+| `engine/curlWrapper/curlSlistHelper.h` | `engine/curlWrapper/curlSlistHelper.cpp` |
 | `engine/curlWrapper/curlWrapper.h` | `engine/curlWrapper/curlWrapper.cpp` |
+| `engine/curlWrapper/interfaceTransport.h` |  |
+| `engine/curlWrapper/liveTransport.h` | `engine/curlWrapper/liveTransport.cpp`, `engine/curlWrapper/interfaceTransport.h` |
+| `engine/curlWrapper/mockTransport.h` | `engine/curlWrapper/mockTransport.cpp`, `engine/curlWrapper/interfaceTransport.h` |
 | `engine/curlWrapper/rateLimitController.h` | `engine/curlWrapper/rateLimitController.cpp` |
 | `engine/curlWrapper/rateLimitObservation.h` |  |
 | `engine/curlWrapper/rateLimitStrategy.h` | `engine/curlWrapper/rateLimitStrategy.cpp` |
@@ -137,10 +149,12 @@ Pairing rule: a header pairs with the .cpp of the same stem in the same director
 | `engine/json/configParser.h` | `engine/json/configParser.cpp` |
 | `engine/json/jsonHelper.h` | `engine/json/jsonHelper.cpp` |
 | `engine/keys/credential.h` | `engine/keys/credential.cpp` |
+| `engine/keys/encryptedJsonStore.h` | `engine/keys/encryptedJsonStore.cpp` |
 | `engine/keys/jwtGenerator.h` | `engine/keys/jwtGenerator.cpp` |
 | `engine/keys/keyEncryption.h` | `engine/keys/keyEncryption.cpp` |
 | `engine/keys/keyManager.h` | `engine/keys/keyManager.cpp` |
 | `engine/keys/oauthTokenManager.h` | `engine/keys/oauthTokenManager.cpp` |
+| `engine/keys/scopedSecretBytes.h` |  |
 | `engine/keys/secureString.h` | `engine/keys/secureString.cpp` |
 | `engine/log/log.h` | `engine/log/log.cpp` |
 | `engine/log/secretRedactor.h` | `engine/log/secretRedactor.cpp` |

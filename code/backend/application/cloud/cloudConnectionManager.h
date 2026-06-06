@@ -24,9 +24,11 @@
 #pragma once
 
 #include <atomic>
+#include <filesystem>
 #include <optional>
 #include <shared_mutex>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -68,6 +70,17 @@ namespace AIAssistant
         // Serialization for persistence
         bool ParseConnectionsJson(std::string const& json);
         std::string SerializeToJson() const;
+
+        // Master-password-encrypted persistence (connections.json.enc).  Reuses
+        // the shared crypto+IO helpers in encryptedJsonStore.h around the existing
+        // ParseConnectionsJson / SerializeToJson (which lock m_Mutex themselves, so
+        // this manager does NOT derive EncryptedJsonStore — that would re-lock).
+        // Connection definitions (endpoint URLs + credential references) are the
+        // same tamper class as AI interfaces, so they move out of plaintext
+        // connections.json into this encrypted store, unlocked by the master
+        // password.  Return false + log on failure.
+        bool LoadEncrypted(std::filesystem::path const& path, std::string_view masterPassword);
+        bool SaveEncrypted(std::filesystem::path const& path, std::string_view masterPassword);
 
     private:
         std::unordered_map<std::string, CloudConnection> m_Connections;

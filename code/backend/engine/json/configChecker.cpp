@@ -55,61 +55,21 @@ namespace AIAssistant
         auto checkQueueFolderFilepath = ensureRuntimeDir;
         auto checkWorkflowsFolder = ensureRuntimeDir;
 
-        auto checkApiInterface = [](std::vector<ConfigParser::EngineConfig::ApiInterface> const& apiInterfaces,
-                                    size_t apiIndex) -> bool
-        {
-            if (apiInterfaces.empty())
-            {
-                return false;
-            }
-
-            if (apiIndex >= apiInterfaces.size())
-            {
-                return false;
-            }
-
-            auto checkUrl = [](std::string const& url) -> bool
-            {
-                // Scheme prefix check, not substring — guards against URLs
-                // like "http://evil.com/?x=https://fake" passing the gate.
-                // `http://` is accepted because `UrlPolicy::ValidateAiInterfaceUrl`
-                // already gated it at parse time: any http:// URL that reaches
-                // ConfigChecker is loopback-only and has no key_name (the local-
-                // LLM case — ollama, llama.cpp, vLLM).  Non-loopback http://
-                // is dropped from `m_ApiInterfaces` at parse, so it cannot
-                // surface here.
-                if (url.starts_with("https://") && url.size() > sizeof("https://") - 1)
-                {
-                    return true;
-                }
-                if (url.starts_with("http://") && url.size() > sizeof("http://") - 1)
-                {
-                    return true;
-                }
-                return false;
-            };
-
-            auto checkModel = [](std::string const& model) -> bool
-            {
-                return !model.empty();
-            };
-
-            bool hasUrl = checkUrl(apiInterfaces[apiIndex].m_Url);
-            bool hasModel = checkModel(apiInterfaces[apiIndex].m_Model);
-            bool hasType = apiInterfaces[apiIndex].m_InterfaceType != ConfigParser::EngineConfig::InterfaceType::InvalidAPI;
-            return hasUrl && hasModel && hasType;
-        };
+        // AI interfaces are no longer part of config.json — they live in the
+        // encrypted API.json.enc and are validated by ApiInterfaceManager at
+        // load/upsert time, then hydrated into m_ApiInterfaces after unlock.  So
+        // there is nothing interface-related to validate here at config-load
+        // (the table is legitimately empty until the master password is entered).
 
         // references for convenience
         auto& queueFolderFilepath = engineConfig.m_QueueFolderFilepath;
         auto& workflowsFolder = engineConfig.m_WorkflowsFolderFilepath;
 
-        bool ok1 = checkQueueFolderFilepath(queueFolderFilepath);                            //
-        bool ok2 = checkWorkflowsFolder(workflowsFolder);                                    //
-        bool ok3 = checkApiInterface(engineConfig.m_ApiInterfaces, engineConfig.m_ApiIndex); //
+        bool ok1 = checkQueueFolderFilepath(queueFolderFilepath); //
+        bool ok2 = checkWorkflowsFolder(workflowsFolder);         //
 
         // conclusion
-        m_ConfigIsOk = ok1 && ok2 && ok3;
+        m_ConfigIsOk = ok1 && ok2;
 
         // handling
         if (!m_ConfigIsOk)
@@ -123,12 +83,6 @@ namespace AIAssistant
             {
                 LOG_CORE_ERROR("config error: workflows folder is not a directory '{}' — see log/log.txt for details",
                                workflowsFolder);
-            }
-            if (!ok3)
-            {
-                LOG_CORE_ERROR("config error: invalid API interface configuration (index {}, count {}) — see log/log.txt "
-                               "for details",
-                               engineConfig.m_ApiIndex, engineConfig.m_ApiInterfaces.size());
             }
         }
         else

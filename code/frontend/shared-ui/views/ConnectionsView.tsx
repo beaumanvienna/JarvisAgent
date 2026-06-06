@@ -10,6 +10,14 @@ import {
   type ConnectionEntry,
 } from "../api/connections";
 import { listProviders, saveProviders } from "../api/providers";
+import MasterPasswordDialog from "@shared/components/MasterPasswordDialog";
+
+// A pending connection mutation awaiting master-password re-auth.
+type ReauthRequest = {
+  title: string;
+  description: string;
+  run: (password: string) => Promise<{ ok: boolean; message?: string }>;
+};
 
 const CONNECTION_TYPES = ["polarion", "s3", "onedrive", "snowflake", "postgres", "slack", "email", "github", "jira", "redmine", "google_sheets", "azure_blob", "gcs"];
 const AUTH_TYPES = ["bearer", "oauth2", "jwt_rsa", "basic_auth", "sigv4", "azure_shared_key"];
@@ -83,21 +91,27 @@ export default function ConnectionsView({ appMasterPassword, onDirtyStateChange 
       .catch(() => {});
   }, []);
 
-  const handleDelete = useCallback(async (name: string) => {
-    if (!window.confirm(`Delete connection "${name}"?`)) return;
-    const result = await deleteConnection(name);
-    if (result.ok)
-    {
-      setStatusMessage(`Deleted "${name}"`);
-      setErrorMessage("");
-      if (editing && editing.name === name) setEditing(null);
-      setTestResults((prev) => { const next = { ...prev }; delete next[name]; return next; });
-      await refresh();
-    }
-    else
-    {
-      setErrorMessage(result.message ?? "Delete failed");
-    }
+  // Connection mutations require master-password re-auth (per-mutation).
+  const [reauth, setReauth] = useState<ReauthRequest | null>(null);
+
+  const handleDelete = useCallback((name: string) => {
+    setReauth({
+      title: "Delete connection",
+      description: `Re-enter your master password to delete "${name}".`,
+      run: async (pw) => {
+        const result = await deleteConnection(name, pw);
+        if (!result.ok)
+        {
+          return { ok: false, message: result.message ?? "Delete failed" };
+        }
+        setStatusMessage(`Deleted "${name}"`);
+        setErrorMessage("");
+        if (editing && editing.name === name) setEditing(null);
+        setTestResults((prev) => { const next = { ...prev }; delete next[name]; return next; });
+        await refresh();
+        return { ok: true };
+      },
+    });
   }, [editing, refresh]);
 
   const handleTest = useCallback(async (name: string) => {
@@ -118,7 +132,7 @@ export default function ConnectionsView({ appMasterPassword, onDirtyStateChange 
     }
   }, []);
 
-  const handleSave = useCallback(async () => {
+  const handleSave = useCallback(() => {
     if (!editing) return;
     if (!editing.name.trim())
     {
@@ -126,50 +140,49 @@ export default function ConnectionsView({ appMasterPassword, onDirtyStateChange 
       return;
     }
 
-    if (editing.isNew)
-    {
-      const result = await createConnection({
-        name: editing.name.trim(),
-        type: editing.type,
-        endpoint: editing.endpoint,
-        key_name: editing.key_name,
-        auth_type: editing.auth_type,
-        params: Object.keys(editing.params).length > 0 ? editing.params : undefined,
-      });
-      if (result.ok)
-      {
-        setStatusMessage(`Created connection "${editing.name.trim()}"`);
+    const snap = editing; // capture for the deferred re-auth run
+    setReauth({
+      title: snap.isNew ? "Create connection" : "Update connection",
+      description: `Re-enter your master password to ${snap.isNew ? "create" : "update"} "${snap.name.trim()}".`,
+      run: async (pw) => {
+        if (snap.isNew)
+        {
+          const result = await createConnection({
+            name: snap.name.trim(),
+            type: snap.type,
+            endpoint: snap.endpoint,
+            key_name: snap.key_name,
+            auth_type: snap.auth_type,
+            params: Object.keys(snap.params).length > 0 ? snap.params : undefined,
+          }, pw);
+          if (!result.ok)
+          {
+            return { ok: false, message: result.message ?? "Create failed" };
+          }
+          setStatusMessage(`Created connection "${snap.name.trim()}"`);
+        }
+        else
+        {
+          const result = await updateConnection(snap.name, {
+            type: snap.type,
+            endpoint: snap.endpoint,
+            key_name: snap.key_name,
+            auth_type: snap.auth_type,
+            params: snap.params,
+          }, pw);
+          if (!result.ok)
+          {
+            return { ok: false, message: result.message ?? "Update failed" };
+          }
+          setStatusMessage(`Updated connection "${snap.name}"`);
+          setTestResults((prev) => { const next = { ...prev }; delete next[snap.name]; return next; });
+        }
         setErrorMessage("");
         setEditing(null);
         await refresh();
-      }
-      else
-      {
-        setErrorMessage(result.message ?? "Create failed");
-      }
-    }
-    else
-    {
-      const result = await updateConnection(editing.name, {
-        type: editing.type,
-        endpoint: editing.endpoint,
-        key_name: editing.key_name,
-        auth_type: editing.auth_type,
-        params: editing.params,
-      });
-      if (result.ok)
-      {
-        setStatusMessage(`Updated connection "${editing.name}"`);
-        setErrorMessage("");
-        setEditing(null);
-        setTestResults((prev) => { const next = { ...prev }; delete next[editing.name]; return next; });
-        await refresh();
-      }
-      else
-      {
-        setErrorMessage(result.message ?? "Update failed");
-      }
-    }
+        return { ok: true };
+      },
+    });
   }, [editing, refresh]);
 
   const doSaveAll = useCallback(async (pw: string, fromPrompt: boolean) => {
@@ -177,8 +190,8 @@ export default function ConnectionsView({ appMasterPassword, onDirtyStateChange 
     setErrorMessage("");
     setSavePasswordError(null);
 
-    // Save connections.json
-    const connResult = await saveConnections();
+    // Persist the encrypted connection store (re-auth gated — pw from this flow)
+    const connResult = await saveConnections(pw);
     if (!connResult.ok)
     {
       setErrorMessage(connResult.message ?? "Connection save failed");
@@ -760,6 +773,23 @@ export default function ConnectionsView({ appMasterPassword, onDirtyStateChange 
             </div>
           </div>
         </div>
+      )}
+
+      {reauth && (
+        <MasterPasswordDialog
+          mode="confirm"
+          title={reauth.title}
+          description={reauth.description}
+          onConfirm={async (pw) => {
+            const result = await reauth.run(pw);
+            if (result.ok)
+            {
+              setReauth(null);
+            }
+            return result;
+          }}
+          onCancel={() => setReauth(null)}
+        />
       )}
     </div>
   );

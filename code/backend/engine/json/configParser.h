@@ -127,6 +127,13 @@ namespace AIAssistant
             // interfaces (REST POST) pick up the same default.
             static uint64_t ResolveMaxContextTokensFromModel(std::string const& modelName);
 
+            // InterfaceType <-> "API1".."API6" string mapping.  Single source of
+            // truth for the api_type token (used by the encrypted ApiInterfaceManager
+            // serde and any logging site).  FromString returns InvalidAPI for an
+            // unrecognised token; ToString returns "" for NumAPIs/InvalidAPI.
+            static InterfaceType InterfaceTypeFromString(std::string_view apiType);
+            static std::string_view InterfaceTypeToString(InterfaceType type);
+
             size_t m_MaxThreads{0};
             size_t m_MaxInflightAiCalls{1000};
             size_t m_MaxAiCallsPerJcwf{0};  // 0 = no cap; per-run safety limit
@@ -148,6 +155,12 @@ namespace AIAssistant
             int m_JcwfAiInterfaceIndex{-1}; // -1 = use global default (m_ApiIndex)
             std::string m_KeysFilePath{"keys.json.enc"};
             std::string m_McpKeysFilePath{"mcp_keys.json.enc"};
+            // Encrypted AI-routing store (interfaces + default/jcwf selectors).
+            // Path is non-secret and stays in config.json; the contents move out
+            // of config.json into this master-password-encrypted file.
+            std::string m_ApiFilePath{"API.json.enc"};
+            // Encrypted cloud-connection store (was plaintext connections.json).
+            std::string m_ConnectionsFilePath{"connections.json.enc"};
             int m_SessionTimeoutHours{8};
             std::string m_TlsCert;
             std::string m_TlsKey;
@@ -205,6 +218,8 @@ namespace AIAssistant
             Port,
             McpKeysFile,
             SessionTimeoutHours,
+            ApiFile,
+            ConnectionsFile,
             NumConfigFields
         };
 
@@ -243,7 +258,9 @@ namespace AIAssistant
                 "PythonEngines",        //
                 "Port",                 //
                 "McpKeysFile",          //
-                "SessionTimeoutHours"   //
+                "SessionTimeoutHours",  //
+                "ApiFile",              //
+                "ConnectionsFile"       //
         };
 
     public:
@@ -255,7 +272,6 @@ namespace AIAssistant
         bool ConfigParsed() const;
 
     private:
-        void ParseInterfaces(simdjson::ondemand::array, EngineConfig&, FieldOccurances&);
 
     private:
         ConfigParser::State m_State;

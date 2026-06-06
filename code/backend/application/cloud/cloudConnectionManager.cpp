@@ -28,6 +28,7 @@
 #include "engine.h"
 #include "cloud/cloudConnectionManager.h"
 #include "json/jsonHelper.h"
+#include "keys/encryptedJsonStore.h"
 
 namespace AIAssistant
 {
@@ -344,5 +345,42 @@ namespace AIAssistant
         oss << "    ]\n";
         oss << "}\n";
         return oss.str();
+    }
+
+    bool CloudConnectionManager::LoadEncrypted(std::filesystem::path const& path, std::string_view masterPassword)
+    {
+        // 4 MiB cap on the encrypted blob (the base-store default); the plaintext
+        // connections doc is bounded separately inside ParseConnectionsJson.
+        auto json = DecryptStoreFile(path, masterPassword, 4u * 1024u * 1024u);
+        if (!json.has_value())
+        {
+            LOG_CORE_ERROR("CloudConnectionManager::LoadEncrypted: {} — {}", Describe(json.error().m_Code),
+                           json.error().m_Details);
+            return false;
+        }
+        if (!ParseConnectionsJson(*json))
+        {
+            LOG_CORE_ERROR("CloudConnectionManager::LoadEncrypted: failed to parse decrypted JSON from '{}'",
+                           path.string());
+            return false;
+        }
+        ClearDirty();
+        LOG_CORE_INFO("CloudConnectionManager::LoadEncrypted: loaded {} connection(s) from '{}'",
+                      GetConnectionNames().size(), path.string());
+        return true;
+    }
+
+    bool CloudConnectionManager::SaveEncrypted(std::filesystem::path const& path, std::string_view masterPassword)
+    {
+        std::string const json = SerializeToJson();
+        if (auto written = EncryptAndWriteStoreFile(path, masterPassword, json); !written.has_value())
+        {
+            LOG_CORE_ERROR("CloudConnectionManager::SaveEncrypted: {} — {}", Describe(written.error().m_Code),
+                           written.error().m_Details);
+            return false;
+        }
+        ClearDirty();
+        LOG_CORE_INFO("CloudConnectionManager::SaveEncrypted: saved to '{}'", path.string());
+        return true;
     }
 } // namespace AIAssistant

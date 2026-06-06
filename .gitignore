@@ -13,6 +13,8 @@ build
 /keys.json
 /keys.json.enc
 /mcp_keys.json.enc
+/API.json.enc
+/connections.json.enc
 /.mcp_admin_token
 # .mcp.json is per-developer MCP sidecar config: paths and J9T_TOKEN_FILE point
 # at local files, and keeping it tracked leaks user/home info. Each dev keeps

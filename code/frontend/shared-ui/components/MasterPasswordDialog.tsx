@@ -1,15 +1,129 @@
 import { useCallback, useState } from "react";
 import { unlockKeys, type IssuedAdminKey } from "@shared/api/keys";
 
-type MasterPasswordDialogProps = {
+// Two purposes, one dialog:
+//  - "unlock"  (default): first-run bootstrap / unlock of the encrypted key
+//    stores via POST /api/settings/keys/unlock.  May surface a freshly-minted
+//    admin MCP key on a second screen.
+//  - "confirm": second-factor re-auth for a routing/connection mutation.  Does
+//    NOT call the server itself — it resolves the entered password to the caller
+//    via onConfirm(), which performs the mutation (attaching master_password) and
+//    reports back {ok, message}.  Closes the "unattended unlocked dashboard"
+//    vector: every AI-interface / connection change re-prompts for the password.
+type UnlockProps = {
+  mode?: "unlock";
   reason: "no_password" | "wrong_password" | "no_keys_file";
   onUnlocked: () => void;
 };
 
-export default function MasterPasswordDialog({
-  reason,
-  onUnlocked,
-}: MasterPasswordDialogProps) {
+type ConfirmProps = {
+  mode: "confirm";
+  title?: string;
+  description?: string;
+  confirmLabel?: string;
+  onConfirm: (password: string) => Promise<{ ok: boolean; message?: string }>;
+  onCancel: () => void;
+};
+
+type MasterPasswordDialogProps = UnlockProps | ConfirmProps;
+
+export default function MasterPasswordDialog(props: MasterPasswordDialogProps) {
+  if (props.mode === "confirm") {
+    return <ConfirmDialog {...props} />;
+  }
+  return <UnlockDialog {...props} />;
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Re-auth confirm dialog
+// ───────────────────────────────────────────────────────────────────────────
+function ConfirmDialog({ title, description, confirmLabel, onConfirm, onCancel }: ConfirmProps) {
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+
+  const handleSubmit = useCallback(
+    async (e: React.FormEvent) => {
+      e.preventDefault();
+      if (!password.trim()) {
+        setError("Password cannot be empty.");
+        return;
+      }
+      setSubmitting(true);
+      setError(null);
+      try {
+        const result = await onConfirm(password);
+        if (!result.ok) {
+          setError(result.message ?? "Incorrect master password. Please try again.");
+          return;
+        }
+        // Success — the caller unmounts this dialog (it owns visibility).
+      } catch {
+        setError("Failed to apply change.");
+      } finally {
+        setSubmitting(false);
+      }
+    },
+    [password, onConfirm],
+  );
+
+  return (
+    <div className="mpd-overlay">
+      <div className="mpd-dialog">
+        <div className="mpd-header">
+          <h2>{title ?? "Confirm master password"}</h2>
+        </div>
+        <form onSubmit={handleSubmit}>
+          <div className="mpd-body">
+            <p className="mpd-description">
+              {description ?? "Re-enter your master password to apply this change."}
+            </p>
+            <div className="mpd-input-wrap">
+              <input
+                type={showPassword ? "text" : "password"}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="Master password"
+                autoFocus
+                disabled={submitting}
+                className="mpd-input"
+              />
+              <button
+                type="button"
+                onClick={() => setShowPassword((prev) => !prev)}
+                className="mpd-eye-btn"
+                title={showPassword ? "Hide password" : "Show password"}
+              >
+                {showPassword ? "\u{1F441}" : "\u{1F441}\u{200D}\u{1F5E8}"}
+              </button>
+            </div>
+            {error && <div className="mpd-error">{error}</div>}
+          </div>
+          <div className="mpd-footer" style={{ display: "flex", gap: 8 }}>
+            <button
+              type="button"
+              className="btn"
+              onClick={onCancel}
+              disabled={submitting}
+              style={{ flex: 1 }}
+            >
+              Cancel
+            </button>
+            <button className="btn btn-editor" type="submit" disabled={submitting} style={{ flex: 1 }}>
+              {submitting ? "Applying..." : confirmLabel ?? "Confirm"}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Unlock / bootstrap dialog (unchanged behaviour)
+// ───────────────────────────────────────────────────────────────────────────
+function UnlockDialog({ reason, onUnlocked }: UnlockProps) {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);

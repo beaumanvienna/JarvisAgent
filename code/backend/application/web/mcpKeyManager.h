@@ -24,13 +24,15 @@
 #pragma once
 
 #include <cstddef>
+#include <expected>
 #include <filesystem>
-#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
 #include <vector>
+
+#include "keys/encryptedJsonStore.h"
 
 namespace AIAssistant
 {
@@ -46,7 +48,7 @@ namespace AIAssistant
     // Key ID:         "mcp_" + first 8 hex chars (prefix of the raw key — safe to log).
     //
     // Raw enrollment token format: "enroll_" + 64 hex chars.
-    class McpKeyManager
+    class McpKeyManager : public EncryptedJsonStore
     {
     public:
         struct Record
@@ -93,10 +95,11 @@ namespace AIAssistant
             std::string m_CreatedAt;
         };
 
-        // Storage lifecycle
+        // Storage lifecycle — thin wrappers over EncryptedJsonStore that log at
+        // CORE level (preserving callers' bool contract) and expose key/enrollment
+        // counts in the success line.  IsLoaded() is inherited from the base.
         bool Load(std::filesystem::path const& path, std::string_view masterPassword);
         bool Save(std::filesystem::path const& path, std::string_view masterPassword);
-        bool IsLoaded() const;
 
         // Enrollment flow — admin creates, user exchanges for the real key.
         // Returns the raw enrollment token (shown to the admin once) or empty string on failure.
@@ -160,17 +163,16 @@ namespace AIAssistant
         void PurgeExpiredEnrollments();
 
     private:
-        std::string SerializeToJson() const;
-        bool ParseFromJson(std::string const& json);
+        std::string SerializeToJson() const override;
+        std::expected<void, StoreError> ParseFromJson(std::string_view json) override;
 
         // Mutex-free helpers — caller already holds m_Mutex.
         Record* FindByKeyIdUnlocked(std::string const& keyId);
         Record const* FindByKeyIdUnlocked(std::string const& keyId) const;
 
-        mutable std::mutex m_Mutex;
+        // m_Mutex + m_Loaded live in the EncryptedJsonStore base.
         std::vector<Record> m_Keys;
         std::vector<EnrollmentRecord> m_Enrollments;
         std::unordered_map<std::string, size_t> m_DiskUsageByUser;
-        bool m_Loaded{false};
     };
 } // namespace AIAssistant

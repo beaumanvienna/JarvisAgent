@@ -409,6 +409,14 @@ namespace AIAssistant
 
     ConfigParser::EngineConfig::InterfaceType const& Core::GetInterfaceType() const
     {
+        // Interfaces are hydrated from the encrypted store only after unlock, so
+        // the table is legitimately empty before then — guard the index.
+        static constexpr ConfigParser::EngineConfig::InterfaceType invalid =
+            ConfigParser::EngineConfig::InterfaceType::InvalidAPI;
+        if (m_EngineConfig.m_ApiIndex >= m_EngineConfig.m_ApiInterfaces.size())
+        {
+            return invalid;
+        }
         return m_EngineConfig.m_ApiInterfaces[m_EngineConfig.m_ApiIndex].m_InterfaceType;
     }
 

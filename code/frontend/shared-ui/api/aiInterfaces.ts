@@ -85,12 +85,20 @@ export type AiInterfaceCreateInput = {
   rate_limit?: RateLimitConfig;
 };
 
-export async function createAiInterface(input: AiInterfaceCreateInput): Promise<AiInterfaceMutationResponse>
+// All routing mutations require the master password re-supplied in the body
+// (the backend re-auth gate, WebServer::CheckMasterPasswordReauth).  The caller
+// obtains it from the MasterPasswordDialog confirm flow.  Optional at the type
+// level only so the views can be wired incrementally; omitting it yields a
+// 401 reauth_required from the server.
+export async function createAiInterface(
+  input: AiInterfaceCreateInput,
+  masterPassword?: string,
+): Promise<AiInterfaceMutationResponse>
 {
   const response = await authFetch("/api/settings/ai-interfaces", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
+    body: JSON.stringify({ ...input, master_password: masterPassword }),
   });
   return (await response.json()) as AiInterfaceMutationResponse;
 }
@@ -107,28 +115,36 @@ export type AiInterfaceUpdateInput = {
   rate_limit?: RateLimitConfig;
 };
 
-export async function updateAiInterface(name: string, input: AiInterfaceUpdateInput): Promise<AiInterfaceMutationResponse>
+export async function updateAiInterface(
+  name: string,
+  input: AiInterfaceUpdateInput,
+  masterPassword?: string,
+): Promise<AiInterfaceMutationResponse>
 {
   const response = await authFetch(`/api/settings/ai-interfaces/${encodeURIComponent(name)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
+    body: JSON.stringify({ ...input, master_password: masterPassword }),
   });
   return (await response.json()) as AiInterfaceMutationResponse;
 }
 
-export async function deleteAiInterface(name: string): Promise<AiInterfaceMutationResponse>
+export async function deleteAiInterface(name: string, masterPassword?: string): Promise<AiInterfaceMutationResponse>
 {
   const response = await authFetch(`/api/settings/ai-interfaces/${encodeURIComponent(name)}`, {
     method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ master_password: masterPassword }),
   });
   return (await response.json()) as AiInterfaceMutationResponse;
 }
 
-export async function saveAiInterfaces(): Promise<AiInterfacesSaveResponse>
+export async function saveAiInterfaces(masterPassword?: string): Promise<AiInterfacesSaveResponse>
 {
   const response = await authFetch("/api/settings/ai-interfaces/save", {
     method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ master_password: masterPassword }),
   });
   return (await response.json()) as AiInterfacesSaveResponse;
 }

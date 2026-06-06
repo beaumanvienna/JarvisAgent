@@ -14,6 +14,7 @@ import {
   updateConfigSettings,
   type ConfigSettings,
 } from "@shared/api/configSettings";
+import MasterPasswordDialog from "@shared/components/MasterPasswordDialog";
 
 type Tab =
   | "general"
@@ -226,31 +227,43 @@ function GeneralTab() {
     draftUseBash !== serverConfig.use_bash
   );
 
-  const handleSaveServerSettings = useCallback(async () => {
-    setSaving(true);
-    setServerMessage("");
-    try {
-      const result = await updateConfigSettings({
-        api_index: draftApiIndex,
-        max_threads: Number(draftMaxThreads),
-        verbose: draftVerbose,
-        max_file_size_kb: Number(draftMaxFileSize),
-        jcwf_batch_size: Number(draftBatchSize),
-        jcwf_ai_interface: draftJcwfAiInterface,
-        use_bash: draftUseBash,
-      });
-      if (result.ok) {
-        setServerMessage("Saved to config.json");
-        const cfg = await getConfigSettings();
-        setServerConfig(cfg);
-      } else {
-        setServerMessage(result.message ?? "Save failed");
-      }
-    } catch (err: unknown) {
-      setServerMessage(err instanceof Error ? err.message : "Save failed");
-    } finally {
-      setSaving(false);
-    }
+  // Settings save is re-auth gated on the backend (it can change the default /
+  // jcwf AI interface, which is routing).  Prompt for the master password.
+  const [reauth, setReauth] = useState<
+    { title: string; description: string; run: (pw: string) => Promise<{ ok: boolean; message?: string }> } | null
+  >(null);
+
+  const handleSaveServerSettings = useCallback(() => {
+    setReauth({
+      title: "Save server settings",
+      description: "Re-enter your master password to save the server configuration.",
+      run: async (pw) => {
+        setSaving(true);
+        setServerMessage("");
+        try {
+          const result = await updateConfigSettings({
+            api_index: draftApiIndex,
+            max_threads: Number(draftMaxThreads),
+            verbose: draftVerbose,
+            max_file_size_kb: Number(draftMaxFileSize),
+            jcwf_batch_size: Number(draftBatchSize),
+            jcwf_ai_interface: draftJcwfAiInterface,
+            use_bash: draftUseBash,
+          }, pw);
+          if (!result.ok) {
+            return { ok: false, message: result.message ?? "Save failed" };
+          }
+          setServerMessage("Saved to config.json");
+          const cfg = await getConfigSettings();
+          setServerConfig(cfg);
+          return { ok: true };
+        } catch (err: unknown) {
+          return { ok: false, message: err instanceof Error ? err.message : "Save failed" };
+        } finally {
+          setSaving(false);
+        }
+      },
+    });
   }, [draftApiIndex, draftMaxThreads, draftVerbose, draftMaxFileSize, draftBatchSize, draftJcwfAiInterface, draftUseBash]);
 
   const fieldRow = (label: string, content: React.ReactNode, hint?: string) => (
@@ -373,6 +386,22 @@ function GeneralTab() {
             </button>
           </div>
         </>
+      )}
+
+      {reauth && (
+        <MasterPasswordDialog
+          mode="confirm"
+          title={reauth.title}
+          description={reauth.description}
+          onConfirm={async (pw) => {
+            const result = await reauth.run(pw);
+            if (result.ok) {
+              setReauth(null);
+            }
+            return result;
+          }}
+          onCancel={() => setReauth(null)}
+        />
       )}
     </div>
   );

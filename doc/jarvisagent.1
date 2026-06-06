@@ -224,6 +224,14 @@ See
 .B ENVIRONMENT
 below.
 .TP
+.B "connections_file"
+(string) Path to the encrypted cloud\-connection store. Default:
+.IR connections.json.enc .
+Connection definitions (endpoint URLs + credential references) are stored here
+(AES\-256\-GCM, master password), \fBnot\fR in a plaintext connections.json;
+manage them via the dashboard after unlock. Changing one requires re\-entering
+the master password.
+.TP
 .B "use_bash"
 (boolean) Windows only: prefer bash (MSYS2/Git Bash) over PowerShell for
 shell tasks.
@@ -257,14 +265,13 @@ Oversized requests are rejected with HTTP 413 before parsing.
 Engine edition only.
 Default: 10.
 .TP
-.B "API index"
-(number) Zero\-based index of the default AI interface to use from the
-.B "API interfaces"
-array.
-.TP
-.B "API interfaces"
-(array) List of AI provider configurations.
-Each entry is an object with the following fields:
+.B "api_file"
+(string) Path to the encrypted AI\-routing store. Default: \fBAPI.json.enc\fR.
+The AI interfaces and the default / JCWF interface selectors are stored here
+(AES\-256\-GCM, unlocked with the master password), \fBnot\fR in config.json \(em
+manage them via the dashboard (Settings > AI Interfaces) after unlock.
+Changing an interface requires re\-entering the master password.
+Each interface is an object with the following fields:
 .RS
 .TP
 .B url

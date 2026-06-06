@@ -542,7 +542,19 @@ threshold are generated in a single call. Default: 10.</li>
 <li><strong><code>"verbose"</code></strong> — (boolean) Enable verbose
 logging output.</li>
 <li><strong><code>"keys_file"</code></strong> — (string) Path to the
-encrypted API keys file. Default: <code>keys.json.enc</code>.</li>
+encrypted provider-keys file. Default: <code>keys.json.enc</code>.</li>
+<li><strong><code>"mcp_keys_file"</code></strong> — (string) Path to the
+encrypted MCP-keys file. Default: <code>mcp_keys.json.enc</code>.</li>
+<li><strong><code>"api_file"</code></strong> — (string) Path to the
+encrypted AI-routing store (interfaces + default/jcwf selectors).
+Default: <code>API.json.enc</code>. The file is encrypted with the
+master password; its <em>contents</em> are managed via the dashboard,
+not config.json (see <a href="#ai-interfaces">AI interfaces</a>
+below).</li>
+<li><strong><code>"connections_file"</code></strong> — (string) Path to
+the encrypted cloud-connection store. Default:
+<code>connections.json.enc</code>. Same master-password encryption +
+dashboard management as <code>api_file</code>.</li>
 <li><strong><code>"use_bash"</code></strong> — (boolean) Windows only:
 prefer bash (MSYS2/Git Bash) over PowerShell for shell tasks. Default:
 <code>false</code>. Ignored on Linux/macOS.</li>
@@ -561,12 +573,27 @@ header name for gateway-injected user role
 (e.g. <code>X-Forwarded-Role</code>). Engine edition only.</li>
 <li><strong><code>"MaxRequestBodyMB"</code></strong> — (number) Maximum
 HTTP request body size in megabytes. Oversized requests are rejected
-with HTTP 413 before parsing. Engine edition only. Default: 10.</li>
-<li><strong><code>"API index"</code></strong> — (number) Zero-based
-index of the default AI interface to use from the
-<code>"API interfaces"</code> array.</li>
-<li><strong><code>"API interfaces"</code></strong> — (array) List of AI
-provider configurations. Each entry is an object with:
+with HTTP 413 before parsing. Engine edition only. Default: 10. ### AI
+interfaces</li>
+</ul>
+<p>AI interfaces and the default / JCWF interface selectors are
+<strong>not</strong> stored in <code>config.json</code>. They live in
+the master-password-encrypted <strong><code>API.json.enc</code></strong>
+(<code>api_file</code>) and are managed through the dashboard
+(<strong>Settings → AI Interfaces</strong>) or the REST API after
+unlock. This keeps the routing table — each interface’s <code>url</code>
++ <code>key_name</code> and the default selection — out of any plaintext
+file, so it can’t be tampered with at rest (an attacker editing a
+plaintext config could otherwise repoint a <code>key_name</code>’s URL
+and exfiltrate the credential, or reroute the default). Changing any
+interface (create / update / delete / set-default) requires
+<strong>re-entering the master password</strong> in that request (the <a
+href="#security">re-auth gate</a>), even within an authenticated admin
+session.</p>
+<p>The default and JCWF interfaces are selected by interface
+<strong>name</strong>. New installs start with no interfaces; add them
+in the dashboard after entering the master password.</p>
+<p>Each interface is an object with the following fields:</p>
 <ul>
 <li><strong><code>"url"</code></strong> — (string,
 <strong>required</strong>) The API endpoint URL
@@ -663,7 +690,6 @@ All sub-fields optional; missing fields fall back to
 per-<code>InterfaceType</code> defaults shipped in the binary. See
 <strong>Rate-limit configuration</strong> below for the schema and
 tuning examples.</li>
-</ul></li>
 </ul>
 <h3 id="rate-limit-configuration">Rate-limit configuration</h3>
 <p>Every interface has an associated adaptive controller that decides

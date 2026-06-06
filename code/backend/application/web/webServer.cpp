@@ -43,6 +43,7 @@
 #include <netinet/in.h>
 #include <unistd.h>
 #endif
+#include <openssl/crypto.h>
 #include <openssl/sha.h>
 
 #include "simdjson/simdjson.h"
@@ -830,6 +831,78 @@ namespace AIAssistant
         return "";
     }
 
+    std::string WebServer::CheckMasterPasswordReauth(crow::request const& req)
+    {
+        // Brute-force throttle on the source IP — same tier as /api/settings/keys/unlock.
+        if (IsRateLimited(RateLimitTier::PreAuth, req.remote_ip_address))
+        {
+            LOG_SECURITY_WARN("[security] rate_limited_preauth ip={} endpoint=reauth",
+                              req.remote_ip_address);
+            return "rate_limited";
+        }
+
+        // Body carries only the master password; cap before parsing.
+        if (IsBodyTooLarge(req, 1))
+        {
+            return "reauth_required";
+        }
+
+        // Extract master_password from the request body (mirrors HandleKeysUnlockPost).
+        std::string supplied;
+        {
+            simdjson::ondemand::parser parser;
+            try
+            {
+                simdjson::padded_string json(req.body);
+                auto doc = parser.iterate(json);
+                std::string_view sv;
+                if (doc["master_password"].get_string().get(sv) == simdjson::SUCCESS)
+                {
+                    supplied = std::string(sv);
+                }
+            }
+            catch (...)
+            {
+                // malformed body — treated as missing below
+            }
+        }
+        if (supplied.empty())
+        {
+            return "reauth_required";
+        }
+
+        // Constant-time compare against the held master password.  WithMasterPassword
+        // returns false when the keystore is locked (no password held) — an admin
+        // routing mutation should never reach here locked; treat it as a hard fail.
+        bool matched = false;
+        bool const held = Core::g_Core->GetKeyManager().WithMasterPassword(
+            [&](std::string_view heldPw)
+            {
+                if (heldPw.size() == supplied.size() &&
+                    CRYPTO_memcmp(heldPw.data(), supplied.data(), supplied.size()) == 0)
+                {
+                    matched = true;
+                }
+            });
+
+        // Zero the inbound plaintext copy as soon as the comparison is done.
+        OPENSSL_cleanse(supplied.data(), supplied.size());
+
+        if (!held)
+        {
+            LOG_SECURITY_WARN("[security] reauth_locked ip={} endpoint={}", req.remote_ip_address, req.url);
+            return "locked";
+        }
+        if (!matched)
+        {
+            // Same lockout accounting as a wrong unlock password.
+            RecordAuthFailure(req.remote_ip_address);
+            LOG_SECURITY_WARN("[security] reauth_failed ip={} endpoint={}", req.remote_ip_address, req.url);
+            return "reauth_failed";
+        }
+        return "";
+    }
+
     void WebServer::RecordAuthFailure(std::string const& ip)
     {
         auto const now = std::chrono::steady_clock::now();
@@ -1483,6 +1556,8 @@ namespace AIAssistant
                 {
                     auto err = CheckAdminAuth(req);
                     if (!err.empty()) return MakeAuthErrorResponse(err);
+                    if (auto rerr = CheckMasterPasswordReauth(req); !rerr.empty())
+                        return MakeAuthErrorResponse(rerr);
                     return HandleAiInterfaceCreatePost(req);
                 });
 
@@ -1492,6 +1567,8 @@ namespace AIAssistant
                 {
                     auto err = CheckAdminAuth(req);
                     if (!err.empty()) return MakeAuthErrorResponse(err);
+                    if (auto rerr = CheckMasterPasswordReauth(req); !rerr.empty())
+                        return MakeAuthErrorResponse(rerr);
                     return HandleAiInterfaceUpdatePut(req, name);
                 });
 
@@ -1501,6 +1578,8 @@ namespace AIAssistant
                 {
                     auto err = CheckAdminAuth(req);
                     if (!err.empty()) return MakeAuthErrorResponse(err);
+                    if (auto rerr = CheckMasterPasswordReauth(req); !rerr.empty())
+                        return MakeAuthErrorResponse(rerr);
                     return HandleAiInterfaceDeleteDelete(name);
                 });
 
@@ -1510,6 +1589,8 @@ namespace AIAssistant
                 {
                     auto err = CheckAdminAuth(req);
                     if (!err.empty()) return MakeAuthErrorResponse(err);
+                    if (auto rerr = CheckMasterPasswordReauth(req); !rerr.empty())
+                        return MakeAuthErrorResponse(rerr);
                     return HandleAiInterfacesSavePost();
                 });
 
@@ -1538,6 +1619,8 @@ namespace AIAssistant
                 {
                     auto err = CheckAdminAuth(req);
                     if (!err.empty()) return MakeAuthErrorResponse(err);
+                    if (auto rerr = CheckMasterPasswordReauth(req); !rerr.empty())
+                        return MakeAuthErrorResponse(rerr);
                     return HandleConfigSettingsPut(req);
                 });
 
@@ -1621,6 +1704,8 @@ namespace AIAssistant
                 {
                     auto err = CheckAdminAuth(req);
                     if (!err.empty()) return MakeAuthErrorResponse(err);
+                    if (auto rerr = CheckMasterPasswordReauth(req); !rerr.empty())
+                        return MakeAuthErrorResponse(rerr);
                     return HandleConnectionCreatePost(req);
                 });
 
@@ -1630,6 +1715,8 @@ namespace AIAssistant
                 {
                     auto err = CheckAdminAuth(req);
                     if (!err.empty()) return MakeAuthErrorResponse(err);
+                    if (auto rerr = CheckMasterPasswordReauth(req); !rerr.empty())
+                        return MakeAuthErrorResponse(rerr);
                     return HandleConnectionUpdatePut(req, connectionName);
                 });
 
@@ -1639,6 +1726,8 @@ namespace AIAssistant
                 {
                     auto err = CheckAdminAuth(req);
                     if (!err.empty()) return MakeAuthErrorResponse(err);
+                    if (auto rerr = CheckMasterPasswordReauth(req); !rerr.empty())
+                        return MakeAuthErrorResponse(rerr);
                     return HandleConnectionDelete(connectionName);
                 });
 
@@ -1657,6 +1746,8 @@ namespace AIAssistant
                 {
                     auto err = CheckAdminAuth(req);
                     if (!err.empty()) return MakeAuthErrorResponse(err);
+                    if (auto rerr = CheckMasterPasswordReauth(req); !rerr.empty())
+                        return MakeAuthErrorResponse(rerr);
                     return HandleConnectionsSavePost();
                 });
 
@@ -4798,8 +4889,6 @@ namespace AIAssistant
 
     crow::response WebServer::HandleAiInterfaceCreatePost(crow::request const& req)
     {
-        auto& config = Core::g_Core->GetMutableConfig();
-
         std::string name, description, url, model, apiTypeStr, keyName, fixturePath;
         uint64_t maxContextTokensOverride = 0; // 0 = fall back to model-name resolution
         bool isMock = false;
@@ -4978,36 +5067,53 @@ namespace AIAssistant
         else
             newIface.m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API1;
 
-        // Check for duplicate name
-        for (auto const& existing : config.m_ApiInterfaces)
+        // Create must not clobber an existing interface (PUT is the update path).
+        std::string const finalName = newIface.m_Name;
+        if (m_ApiInterfaceManager.HasInterface(finalName))
         {
-            if (existing.m_Name == newIface.m_Name)
-            {
-                crow::json::wvalue err;
-                err["ok"] = false;
-                err["error"] = "duplicate_name";
-                err["message"] = "An AI interface with name '" + newIface.m_Name + "' already exists.";
-                return MakeJsonResponse(409, err);
-            }
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "duplicate_name";
+            err["message"] = "An AI interface with name '" + finalName + "' already exists.";
+            return MakeJsonResponse(409, err);
         }
 
-        config.m_ApiInterfaces.push_back(std::move(newIface));
-        config.m_InterfacesDirty = true;
+        // Persist into the encrypted store (re-validates) then re-hydrate the
+        // live dispatch cache.
+        std::string upsertError;
+        if (!m_ApiInterfaceManager.UpsertInterface(std::move(newIface), upsertError))
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "invalid_interface";
+            err["message"] = upsertError;
+            return MakeJsonResponse(400, err);
+        }
+        if (!SaveApiInterfaceStore())
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "persist_failed";
+            err["message"] = "Interface validated but could not be saved to the encrypted store.";
+            return MakeJsonResponse(500, err);
+        }
 
         crow::json::wvalue responseJson;
         responseJson["ok"] = true;
-        responseJson["name"] = config.m_ApiInterfaces.back().m_Name;
+        responseJson["name"] = finalName;
         return MakeJsonResponse(201, responseJson);
     }
 
     crow::response WebServer::HandleAiInterfaceUpdatePut(crow::request const& req, std::string const& name)
     {
-        auto& config = Core::g_Core->GetMutableConfig();
         std::string const decodedName = UrlDecode(name);
 
-        // Find the interface by name
+        // Work on a copy of the stored interface; the edit is persisted via the
+        // encrypted manager (and re-hydrated) at the end, not mutated in the
+        // live config cache directly.
+        auto interfaces = m_ApiInterfaceManager.GetInterfaces();
         ConfigParser::EngineConfig::ApiInterface* target = nullptr;
-        for (auto& iface : config.m_ApiInterfaces)
+        for (auto& iface : interfaces)
         {
             if (iface.m_Name == decodedName)
             {
@@ -5177,23 +5283,46 @@ namespace AIAssistant
             ApplyAiInterfaceRateLimitFromJson(req.body, target->m_RateLimit, target->m_DefaultOutputTokens);
         }
 
-        config.m_InterfacesDirty = true;
+        // Persist the edited interface into the encrypted store.  A rename (the
+        // name field changed) upserts under the new name then drops the old
+        // entry; RemoveInterface also repairs a now-dangling default/jcwf selector.
+        ConfigParser::EngineConfig::ApiInterface updated = *target;
+        std::string const newName = updated.m_Name;
+        std::string upsertError;
+        if (!m_ApiInterfaceManager.UpsertInterface(std::move(updated), upsertError))
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "invalid_interface";
+            err["message"] = upsertError;
+            return MakeJsonResponse(400, err);
+        }
+        if (newName != decodedName)
+        {
+            std::string rmErr;
+            m_ApiInterfaceManager.RemoveInterface(decodedName, rmErr);
+        }
+        if (!SaveApiInterfaceStore())
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "persist_failed";
+            err["message"] = "Interface validated but could not be saved to the encrypted store.";
+            return MakeJsonResponse(500, err);
+        }
 
         crow::json::wvalue responseJson;
         responseJson["ok"] = true;
-        responseJson["name"] = target->m_Name;
+        responseJson["name"] = newName;
         return MakeJsonResponse(200, responseJson);
     }
 
     crow::response WebServer::HandleAiInterfaceDeleteDelete(std::string const& name)
     {
-        auto& config = Core::g_Core->GetMutableConfig();
         std::string const decodedName = UrlDecode(name);
 
-        auto it = std::find_if(config.m_ApiInterfaces.begin(), config.m_ApiInterfaces.end(),
-                               [&decodedName](auto const& iface) { return iface.m_Name == decodedName; });
-
-        if (it == config.m_ApiInterfaces.end())
+        std::string rmErr;
+        if (!m_ApiInterfaceManager.RemoveInterface(decodedName, rmErr))
         {
             crow::json::wvalue err;
             err["ok"] = false;
@@ -5201,14 +5330,13 @@ namespace AIAssistant
             err["message"] = "AI interface '" + decodedName + "' not found.";
             return MakeJsonResponse(404, err);
         }
-
-        config.m_ApiInterfaces.erase(it);
-        config.m_InterfacesDirty = true;
-
-        // Fix API index if it now exceeds bounds
-        if (!config.m_ApiInterfaces.empty() && config.m_ApiIndex >= config.m_ApiInterfaces.size())
+        if (!SaveApiInterfaceStore())
         {
-            config.m_ApiIndex = config.m_ApiInterfaces.size() - 1;
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "persist_failed";
+            err["message"] = "Interface removed in memory but could not be saved to the encrypted store.";
+            return MakeJsonResponse(500, err);
         }
 
         crow::json::wvalue responseJson;
@@ -5218,267 +5346,20 @@ namespace AIAssistant
 
     crow::response WebServer::HandleAiInterfacesSavePost()
     {
-        auto const& config = Core::g_Core->GetConfig();
-        auto const& configPath = Core::g_Core->GetConfigFilePath();
-
-        if (configPath.empty() || !std::filesystem::exists(configPath))
+        // Interfaces now persist to the encrypted API.json.enc on every mutation
+        // (create/update/delete/default), so an explicit save is no longer needed.
+        // The endpoint is retained for compatibility and simply re-persists the
+        // current store + re-hydrates.
+        if (!SaveApiInterfaceStore())
         {
             crow::json::wvalue err;
             err["ok"] = false;
-            err["error"] = "no_config";
-            err["message"] = "Config file path not set or file does not exist.";
+            err["error"] = "persist_failed";
+            err["message"] = "Could not save the AI-routing store.";
             return MakeJsonResponse(500, err);
         }
-
-        // Read the existing config.json
-        std::string fileContent;
-        {
-            std::ifstream ifs(configPath, std::ios::binary);
-            if (!ifs)
-            {
-                crow::json::wvalue err;
-                err["ok"] = false;
-                err["error"] = "read_failed";
-                err["message"] = "Failed to read config file.";
-                return MakeJsonResponse(500, err);
-            }
-            std::ostringstream oss;
-            oss << ifs.rdbuf();
-            fileContent = oss.str();
-        }
-
-        // Build the new "API interfaces" JSON array
-        std::string newArray = "[\n";
-        for (size_t i = 0; i < config.m_ApiInterfaces.size(); ++i)
-        {
-            auto const& iface = config.m_ApiInterfaces[i];
-            std::string apiStr;
-            switch (iface.m_InterfaceType)
-            {
-                case ConfigParser::EngineConfig::InterfaceType::API2: apiStr = "API2"; break;
-                case ConfigParser::EngineConfig::InterfaceType::API3: apiStr = "API3"; break;
-                case ConfigParser::EngineConfig::InterfaceType::API4: apiStr = "API4"; break;
-                case ConfigParser::EngineConfig::InterfaceType::API5: apiStr = "API5"; break;
-                case ConfigParser::EngineConfig::InterfaceType::API6: apiStr = "API6"; break;
-                default: apiStr = "API1"; break;
-            }
-
-            // Detect whether the rate_limit struct deviates from the
-            // baked-in defaults (RateLimit{}, RequestBudget{}). Only emit
-            // the block when it does — keeps the saved config.json minimal
-            // and stable for users who never touched the knobs.
-            ConfigParser::EngineConfig::RateLimit const defaultRateLimit{};
-            ConfigParser::EngineConfig::RequestBudget const defaultBudget{};
-            auto const& rl = iface.m_RateLimit;
-            auto const& budget = rl.m_RequestBudget;
-            bool const rateLimitDeviates =
-                rl.m_InitialConcurrencyProbe != defaultRateLimit.m_InitialConcurrencyProbe ||
-                rl.m_MaxConcurrency           != defaultRateLimit.m_MaxConcurrency ||
-                rl.m_MaxRetries429            != defaultRateLimit.m_MaxRetries429 ||
-                rl.m_MaxRetriesTransient      != defaultRateLimit.m_MaxRetriesTransient ||
-                rl.m_BaseRetryMs              != defaultRateLimit.m_BaseRetryMs ||
-                budget.m_Per1kInputTokenSeconds  != defaultBudget.m_Per1kInputTokenSeconds ||
-                budget.m_Per1kOutputTokenSeconds != defaultBudget.m_Per1kOutputTokenSeconds ||
-                budget.m_FixedOverheadSeconds    != defaultBudget.m_FixedOverheadSeconds ||
-                budget.m_SafetyMarginFactor      != defaultBudget.m_SafetyMarginFactor ||
-                budget.m_MinSeconds              != defaultBudget.m_MinSeconds ||
-                budget.m_MaxSeconds              != defaultBudget.m_MaxSeconds;
-
-            // RFC 8259 escape every caller-supplied string field — without this an admin
-            // submitting a name / description / url / model / key_name with `"`, `\`,
-            // newline, or any control byte would corrupt the resulting config.json
-            // (naive string replacement without JSON escaping breaks the file).  apiStr
-            // comes from a closed enum and needs no escaping.
-            newArray += "        {\n";
-            newArray += "            \"name\": \"" + JsonHelper::EscapeJsonString(iface.m_Name) + "\",\n";
-            if (!iface.m_Description.empty())
-            {
-                newArray += "            \"description\": \"" + JsonHelper::EscapeJsonString(iface.m_Description) + "\",\n";
-            }
-            newArray += "            \"url\": \"" + JsonHelper::EscapeJsonString(iface.m_Url) + "\",\n";
-            newArray += "            \"model\": \"" + JsonHelper::EscapeJsonString(iface.m_Model) + "\",\n";
-            newArray += "            \"API\": \"" + apiStr + "\"";
-            if (!iface.m_KeyName.empty())
-            {
-                newArray += ",\n";
-                newArray += "            \"key_name\": \"" + JsonHelper::EscapeJsonString(iface.m_KeyName) + "\"";
-            }
-            if (iface.m_IsMock)
-            {
-                newArray += ",\n";
-                newArray += "            \"is_mock\": true";
-            }
-            if (!iface.m_FixturePath.empty())
-            {
-                newArray += ",\n";
-                newArray += "            \"fixture_path\": \"" + JsonHelper::EscapeJsonString(iface.m_FixturePath) + "\"";
-            }
-            if (iface.m_DefaultOutputTokens != 4096)
-            {
-                newArray += ",\n";
-                newArray += "            \"default_output_tokens\": " + std::to_string(iface.m_DefaultOutputTokens);
-            }
-            if (rateLimitDeviates)
-            {
-                auto const num = [](double v) {
-                    char buf[32];
-                    std::snprintf(buf, sizeof(buf), "%g", v);
-                    return std::string(buf);
-                };
-                newArray += ",\n";
-                newArray += "            \"rate_limit\": {\n";
-                newArray += "                \"initial_concurrency_probe\": " + std::to_string(rl.m_InitialConcurrencyProbe) + ",\n";
-                newArray += "                \"max_concurrency\": "           + std::to_string(rl.m_MaxConcurrency) + ",\n";
-                newArray += "                \"max_retries_429\": "           + std::to_string(rl.m_MaxRetries429) + ",\n";
-                newArray += "                \"max_retries_transient\": "     + std::to_string(rl.m_MaxRetriesTransient) + ",\n";
-                newArray += "                \"base_retry_ms\": "             + std::to_string(rl.m_BaseRetryMs) + ",\n";
-                newArray += "                \"request_budget\": {\n";
-                newArray += "                    \"per_1k_input_token_seconds\": "  + num(budget.m_Per1kInputTokenSeconds) + ",\n";
-                newArray += "                    \"per_1k_output_token_seconds\": " + num(budget.m_Per1kOutputTokenSeconds) + ",\n";
-                newArray += "                    \"fixed_overhead_seconds\": "      + num(budget.m_FixedOverheadSeconds) + ",\n";
-                newArray += "                    \"safety_margin_factor\": "        + num(budget.m_SafetyMarginFactor) + ",\n";
-                newArray += "                    \"min_seconds\": "                 + num(budget.m_MinSeconds) + ",\n";
-                newArray += "                    \"max_seconds\": "                 + num(budget.m_MaxSeconds) + "\n";
-                newArray += "                }\n";
-                newArray += "            }";
-            }
-            newArray += "\n";
-            newArray += "        }";
-            if (i + 1 < config.m_ApiInterfaces.size())
-            {
-                newArray += ",";
-            }
-            newArray += "\n";
-        }
-        newArray += "    ]";
-
-        // Find and replace the "API interfaces" array in the file content
-        auto keyPos = fileContent.find("\"API interfaces\"");
-        if (keyPos == std::string::npos)
-        {
-            crow::json::wvalue err;
-            err["ok"] = false;
-            err["error"] = "parse_failed";
-            err["message"] = "Could not find 'API interfaces' key in config.json.";
-            return MakeJsonResponse(500, err);
-        }
-
-        // Find the opening [ after "API interfaces"
-        auto arrayStart = fileContent.find('[', keyPos);
-        if (arrayStart == std::string::npos)
-        {
-            crow::json::wvalue err;
-            err["ok"] = false;
-            err["error"] = "parse_failed";
-            err["message"] = "Could not find array start for 'API interfaces'.";
-            return MakeJsonResponse(500, err);
-        }
-
-        // Find matching ] (skip brackets inside strings)
-        int depth = 0;
-        size_t arrayEnd = std::string::npos;
-        for (size_t i = arrayStart; i < fileContent.size(); ++i)
-        {
-            char c = fileContent[i];
-            if (c == '"')
-            {
-                ++i;
-                while (i < fileContent.size() && fileContent[i] != '"')
-                {
-                    if (fileContent[i] == '\\')
-                        ++i;
-                    ++i;
-                }
-            }
-            else if (c == '[')
-            {
-                ++depth;
-            }
-            else if (c == ']')
-            {
-                --depth;
-                if (depth == 0)
-                {
-                    arrayEnd = i;
-                    break;
-                }
-            }
-        }
-
-        if (arrayEnd == std::string::npos)
-        {
-            crow::json::wvalue err;
-            err["ok"] = false;
-            err["error"] = "parse_failed";
-            err["message"] = "Could not find matching ']' for 'API interfaces' array.";
-            return MakeJsonResponse(500, err);
-        }
-
-        fileContent.replace(arrayStart, arrayEnd - arrayStart + 1, newArray);
-
-        // Tripwire: parse the post-replacement text with simdjson and confirm the
-        // "API interfaces" array round-trips with the expected element count.  This
-        // catches any future bug in the bracket-counting find-replace (e.g. a
-        // mismatched `]` inside a string that the scanner misclassifies) before
-        // the corrupt content lands on disk.
-        {
-            simdjson::ondemand::parser validateParser;
-            simdjson::padded_string padded(fileContent);
-            auto validateDoc = validateParser.iterate(padded);
-            auto interfacesField = validateDoc["API interfaces"].get_array();
-            if (interfacesField.error() != simdjson::SUCCESS)
-            {
-                LOG_APP_ERROR("WebServer::HandleAiInterfacesSavePost: post-replacement validation failed "
-                              "path='{}' reason=interfaces_field_unparsable",
-                              configPath.string());
-                crow::json::wvalue err;
-                err["ok"] = false;
-                err["error"] = "validation_failed";
-                err["message"] = "Generated config.json did not re-parse cleanly; aborting write.";
-                return MakeJsonResponse(500, err);
-            }
-            size_t reparsedCount = 0;
-            for (auto element : interfacesField.value())
-            {
-                (void)element;
-                ++reparsedCount;
-            }
-            if (reparsedCount != config.m_ApiInterfaces.size())
-            {
-                LOG_APP_ERROR("WebServer::HandleAiInterfacesSavePost: post-replacement count mismatch "
-                              "path='{}' expected={} got={}",
-                              configPath.string(), config.m_ApiInterfaces.size(), reparsedCount);
-                crow::json::wvalue err;
-                err["ok"] = false;
-                err["error"] = "validation_failed";
-                err["message"] = "Generated config.json had wrong interface count; aborting write.";
-                return MakeJsonResponse(500, err);
-            }
-        }
-
-        // Atomic write — tmp-file + rename.  A failed / partial write previously
-        // truncated config.json (non-atomic write would corrupt the file on disk-
-        // full / SIGKILL mid-write).  WriteTextFileAtomic returns false without
-        // touching the target file on any failure.
-        std::string writeError;
-        if (!WriteTextFileAtomic(configPath, fileContent, writeError))
-        {
-            LOG_APP_ERROR("WebServer::HandleAiInterfacesSavePost: atomic write failed path='{}' reason='{}'",
-                          configPath.string(), writeError);
-            crow::json::wvalue err;
-            err["ok"] = false;
-            err["error"] = "write_failed";
-            err["message"] = "Failed to write '" + configPath.string() + "': " + writeError;
-            return MakeJsonResponse(500, err);
-        }
-
-        LOG_CORE_INFO("WebServer: saved {} AI interfaces to '{}'", config.m_ApiInterfaces.size(), configPath.string());
-
-        Core::g_Core->GetMutableConfig().m_InterfacesDirty = false;
-
         crow::json::wvalue responseJson;
         responseJson["ok"] = true;
-        responseJson["path"] = configPath.string();
         return MakeJsonResponse(200, responseJson);
     }
 
@@ -5628,9 +5509,12 @@ namespace AIAssistant
         auto doc = parser.iterate(json);
 
         auto& config = Core::g_Core->GetMutableConfig();
-        bool anyChanged = false;
+        bool anyChanged = false;     // a config.json-resident field changed
+        bool routingChanged = false; // the default/jcwf interface selector changed (lives in API.json.enc)
 
-        // api_index
+        // api_index — the default interface.  Now stored by NAME in the encrypted
+        // API.json.enc; translate the index (against the hydrated cache) to a name
+        // and set it via the manager, then persist + re-hydrate below.
         {
             auto result = doc["api_index"].get_int64();
             if (result.error() == simdjson::SUCCESS)
@@ -5638,8 +5522,11 @@ namespace AIAssistant
                 int64_t val = result.value();
                 if (val >= 0 && static_cast<size_t>(val) < config.m_ApiInterfaces.size())
                 {
-                    config.m_ApiIndex = static_cast<size_t>(val);
-                    anyChanged = true;
+                    std::string setErr;
+                    if (m_ApiInterfaceManager.SetDefaultInterface(config.m_ApiInterfaces[val].m_Name, setErr))
+                    {
+                        routingChanged = true;
+                    }
                 }
             }
         }
@@ -5696,7 +5583,8 @@ namespace AIAssistant
             }
         }
 
-        // jcwf_ai_interface (-1 = use global default, >= 0 = specific interface index)
+        // jcwf_ai_interface (-1 = use global default, >= 0 = specific interface).
+        // Stored by NAME in API.json.enc ("" = use default); translate the index.
         {
             auto result = doc["jcwf_ai_interface"].get_int64();
             if (result.error() == simdjson::SUCCESS)
@@ -5704,8 +5592,13 @@ namespace AIAssistant
                 int64_t val = result.value();
                 if (val >= -1 && (val < 0 || static_cast<size_t>(val) < config.m_ApiInterfaces.size()))
                 {
-                    config.m_JcwfAiInterfaceIndex = static_cast<int>(val);
-                    anyChanged = true;
+                    std::string const jcwfName =
+                        (val < 0) ? std::string{} : config.m_ApiInterfaces[static_cast<size_t>(val)].m_Name;
+                    std::string setErr;
+                    if (m_ApiInterfaceManager.SetJcwfInterface(jcwfName, setErr))
+                    {
+                        routingChanged = true;
+                    }
                 }
             }
         }
@@ -5720,7 +5613,7 @@ namespace AIAssistant
             }
         }
 
-        if (!anyChanged)
+        if (!anyChanged && !routingChanged)
         {
             crow::json::wvalue err;
             err["ok"] = false;
@@ -5729,9 +5622,23 @@ namespace AIAssistant
             return MakeJsonResponse(400, err);
         }
 
-        // Persist to config.json: read, patch the scalar fields, write back.
+        // Persist a default/jcwf selector change into the encrypted store (this
+        // re-hydrates m_ApiIndex / m_JcwfAiInterfaceIndex for the dispatch path).
+        if (routingChanged)
+        {
+            if (!SaveApiInterfaceStore())
+            {
+                crow::json::wvalue err;
+                err["ok"] = false;
+                err["error"] = "persist_failed";
+                err["message"] = "Could not save the AI-routing selector change.";
+                return MakeJsonResponse(500, err);
+            }
+        }
+
+        // Persist config.json-resident scalar fields: read, patch, write back.
         auto const& configPath = Core::g_Core->GetConfigFilePath();
-        if (!configPath.empty() && std::filesystem::exists(configPath))
+        if (anyChanged && !configPath.empty() && std::filesystem::exists(configPath))
         {
             std::string fileContent;
             {
@@ -5835,12 +5742,13 @@ namespace AIAssistant
                     }
                 };
 
-                replaceField("API index", std::to_string(config.m_ApiIndex));
+                // "API index" / "jcwf AI interface" no longer live in config.json
+                // (they moved to API.json.enc, persisted above), so they are not
+                // patched here.
                 replaceField("max threads", std::to_string(config.m_MaxThreads));
                 replaceField("verbose", config.m_Verbose ? "true" : "false");
                 replaceField("max file size in kB", std::to_string(config.m_MaxFileSizekB));
                 replaceField("jcwf batch size", std::to_string(config.m_JcwfBatchSize));
-                replaceField("jcwf AI interface", std::to_string(config.m_JcwfAiInterfaceIndex));
                 replaceField("use_bash", config.m_UseBashOnWindows ? "true" : "false");
 
                 // Tripwire: confirm the patched text re-parses as valid JSON before
@@ -6054,6 +5962,19 @@ namespace AIAssistant
 
         // Same master password unlocks (or creates) the MCP key store.
         InitMcpKeyStore(masterPassword);
+
+        // Same master password unlocks (or creates) the AI-routing store, then
+        // hydrate the in-memory dispatch cache (EngineConfig::m_ApiInterfaces +
+        // resolved default/jcwf indices) from it.
+        if (InitApiInterfaceStore(masterPassword))
+        {
+            HydrateAiInterfaces();
+        }
+
+        // Same master password unlocks (or creates) the cloud-connection store.
+        // The CloudConnectionManager is the live in-memory authority, so loading
+        // it here is the hydration step (no separate cache).
+        InitConnectionStore(masterPassword);
 
         // Re-hydrate OAuth tokens now that providers are readable. The initial
         // HydrateFromKeyManager call in Core::Initialize ran before unlock, so
@@ -6593,6 +6514,7 @@ namespace AIAssistant
                 }
             }
 
+            std::string const createdName = conn.m_Name;
             if (!connectionManager.AddConnection(std::move(conn)))
             {
                 crow::json::wvalue err;
@@ -6601,10 +6523,18 @@ namespace AIAssistant
                 err["message"] = "Connection with this name already exists";
                 return MakeJsonResponse(409, err);
             }
+            if (!SaveConnectionStore())
+            {
+                crow::json::wvalue err;
+                err["ok"] = false;
+                err["error"] = "persist_failed";
+                err["message"] = "Connection added in memory but could not be saved to the encrypted store.";
+                return MakeJsonResponse(500, err);
+            }
 
             crow::json::wvalue responseJson;
             responseJson["ok"] = true;
-            responseJson["name"] = std::string(conn.m_Name);
+            responseJson["name"] = createdName;
             return MakeJsonResponse(201, responseJson);
         }
         catch (simdjson::simdjson_error const& e)
@@ -6692,6 +6622,14 @@ namespace AIAssistant
             err["message"] = "Failed to update connection";
             return MakeJsonResponse(500, err);
         }
+        if (!SaveConnectionStore())
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "persist_failed";
+            err["message"] = "Connection updated in memory but could not be saved to the encrypted store.";
+            return MakeJsonResponse(500, err);
+        }
 
         crow::json::wvalue responseJson;
         responseJson["ok"] = true;
@@ -6710,6 +6648,14 @@ namespace AIAssistant
             err["error"] = "not_found";
             err["message"] = "Connection '" + connectionName + "' not found";
             return MakeJsonResponse(404, err);
+        }
+        if (!SaveConnectionStore())
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "persist_failed";
+            err["message"] = "Connection removed in memory but could not be saved to the encrypted store.";
+            return MakeJsonResponse(500, err);
         }
 
         crow::json::wvalue responseJson;
@@ -6770,37 +6716,21 @@ namespace AIAssistant
 
     crow::response WebServer::HandleConnectionsSavePost()
     {
-        auto& connectionManager = Core::g_Core->GetCloudConnectionManager();
-
-        std::string json = connectionManager.SerializeToJson();
-
-        // Save to connections.json in the launch directory.  Atomic write
-        // (tmp-file + rename) so a partial / failed write never leaves the
-        // existing connections.json truncated or empty.
-        std::filesystem::path const connectionsFilePath =
-            Core::g_Core->GetLaunchCWDAbsolute() / "connections.json";
-
-        std::string writeError;
-        if (!WriteTextFileAtomic(connectionsFilePath, json, writeError))
+        // Connections now persist to the encrypted connections.json.enc on every
+        // mutation (create/update/delete), so an explicit save is no longer needed.
+        // The endpoint is retained for compatibility and simply re-persists.
+        if (!SaveConnectionStore())
         {
-            LOG_APP_ERROR("WebServer::HandleConnectionsSavePost: atomic write failed path='{}' reason='{}'",
-                          connectionsFilePath.string(), writeError);
-            LOG_SECURITY_WARN("[security] connections_save_failed path={} reason={}",
-                              connectionsFilePath.string(), writeError);
             crow::json::wvalue err;
             err["ok"] = false;
             err["error"] = "save_failed";
-            err["message"] = "Failed to write '" + connectionsFilePath.string() + "': " + writeError;
+            err["message"] = "Could not save the cloud-connection store.";
             return MakeJsonResponse(500, err);
         }
-
-        connectionManager.ClearDirty();
-
-        LOG_SECURITY_INFO("[security] cloud_connections saved to {}", connectionsFilePath.string());
+        LOG_SECURITY_INFO("[security] cloud_connections saved to {}", m_ConnectionsFilePath.string());
 
         crow::json::wvalue responseJson;
         responseJson["ok"] = true;
-        responseJson["path"] = connectionsFilePath.string();
         return MakeJsonResponse(200, responseJson);
     }
 
@@ -7405,6 +7335,162 @@ namespace AIAssistant
         if (!hadPassword)
         {
             LOG_CORE_WARN("SaveMcpKeyStore: master password not held in mlock memory — cannot persist");
+            return false;
+        }
+        return saved;
+    }
+
+    bool WebServer::InitApiInterfaceStore(std::string_view masterPassword)
+    {
+        if (m_ApiFilePath.empty())
+        {
+            auto const& config = Core::g_Core->GetConfig();
+            m_ApiFilePath = Core::g_Core->GetLaunchCWDAbsolute() / config.m_ApiFilePath;
+        }
+
+        bool loaded = false;
+        if (std::filesystem::exists(m_ApiFilePath))
+        {
+            loaded = m_ApiInterfaceManager.Load(m_ApiFilePath, masterPassword);
+            if (!loaded)
+            {
+                LOG_CORE_ERROR("AI interface store present at '{}' but decryption failed — master password mismatch?",
+                               m_ApiFilePath.string());
+                m_ApiInterfacesLoaded.store(false);
+                return false;
+            }
+        }
+        else
+        {
+            // No file yet — empty-but-ready; Save() creates it on first change.
+            loaded = m_ApiInterfaceManager.Save(m_ApiFilePath, masterPassword);
+            if (!loaded)
+            {
+                LOG_CORE_ERROR("Failed to create initial empty AI interface store at '{}'", m_ApiFilePath.string());
+                m_ApiInterfacesLoaded.store(false);
+                return false;
+            }
+            LOG_CORE_INFO("Created empty AI interface store at '{}'", m_ApiFilePath.string());
+        }
+
+        m_ApiInterfacesLoaded.store(true);
+        return true;
+    }
+
+    void WebServer::HydrateAiInterfaces()
+    {
+        auto interfaces = m_ApiInterfaceManager.GetInterfaces();
+        std::string const defaultName = m_ApiInterfaceManager.GetDefaultInterfaceName();
+        std::string const jcwfName = m_ApiInterfaceManager.GetJcwfInterfaceName();
+
+        // Resolve the by-name selectors to indices BEFORE moving the vector, so
+        // the dispatch read-sites keep using m_ApiIndex / m_JcwfAiInterfaceIndex
+        // exactly as they did when these came from config.json.
+        size_t apiIndex = 0; // first interface when no default is set
+        if (!defaultName.empty())
+        {
+            if (auto const idx = ApiInterfaceManager::FindInterfaceIndexByName(interfaces, defaultName);
+                idx.has_value())
+            {
+                apiIndex = *idx;
+            }
+        }
+        int jcwfIndex = -1; // -1 = use the global default
+        if (!jcwfName.empty())
+        {
+            if (auto const idx = ApiInterfaceManager::FindInterfaceIndexByName(interfaces, jcwfName);
+                idx.has_value())
+            {
+                jcwfIndex = static_cast<int>(*idx);
+            }
+        }
+
+        auto& config = Core::g_Core->GetMutableConfig();
+        config.m_ApiInterfaces = std::move(interfaces);
+        config.m_ApiIndex = apiIndex;
+        config.m_JcwfAiInterfaceIndex = jcwfIndex;
+        LOG_CORE_INFO("HydrateAiInterfaces: {} interface(s), default='{}' (idx {}), jcwf='{}' (idx {})",
+                      config.m_ApiInterfaces.size(), defaultName, apiIndex, jcwfName, jcwfIndex);
+    }
+
+    bool WebServer::SaveApiInterfaceStore()
+    {
+        if (!m_ApiInterfacesLoaded.load())
+        {
+            LOG_CORE_WARN("SaveApiInterfaceStore called before init — ignoring");
+            return false;
+        }
+        auto& keyManager = Core::g_Core->GetKeyManager();
+        bool saved = false;
+        bool const hadPassword = keyManager.WithMasterPassword(
+            [this, &saved](std::string_view pwd) { saved = m_ApiInterfaceManager.Save(m_ApiFilePath, pwd); });
+        if (!hadPassword)
+        {
+            LOG_CORE_WARN("SaveApiInterfaceStore: master password not held in mlock memory — cannot persist");
+            return false;
+        }
+        if (saved)
+        {
+            // Reflect the persisted change into the live dispatch cache.
+            HydrateAiInterfaces();
+        }
+        return saved;
+    }
+
+    bool WebServer::InitConnectionStore(std::string_view masterPassword)
+    {
+        if (m_ConnectionsFilePath.empty())
+        {
+            auto const& config = Core::g_Core->GetConfig();
+            m_ConnectionsFilePath = Core::g_Core->GetLaunchCWDAbsolute() / config.m_ConnectionsFilePath;
+        }
+
+        auto& manager = Core::g_Core->GetCloudConnectionManager();
+        bool loaded = false;
+        if (std::filesystem::exists(m_ConnectionsFilePath))
+        {
+            loaded = manager.LoadEncrypted(m_ConnectionsFilePath, masterPassword);
+            if (!loaded)
+            {
+                LOG_CORE_ERROR("Connection store present at '{}' but decryption failed — master password mismatch?",
+                               m_ConnectionsFilePath.string());
+                m_ConnectionsLoaded.store(false);
+                return false;
+            }
+        }
+        else
+        {
+            loaded = manager.SaveEncrypted(m_ConnectionsFilePath, masterPassword);
+            if (!loaded)
+            {
+                LOG_CORE_ERROR("Failed to create initial empty connection store at '{}'",
+                               m_ConnectionsFilePath.string());
+                m_ConnectionsLoaded.store(false);
+                return false;
+            }
+            LOG_CORE_INFO("Created empty connection store at '{}'", m_ConnectionsFilePath.string());
+        }
+
+        m_ConnectionsLoaded.store(true);
+        return true;
+    }
+
+    bool WebServer::SaveConnectionStore()
+    {
+        if (!m_ConnectionsLoaded.load())
+        {
+            LOG_CORE_WARN("SaveConnectionStore called before init — ignoring");
+            return false;
+        }
+        auto& keyManager = Core::g_Core->GetKeyManager();
+        auto& manager = Core::g_Core->GetCloudConnectionManager();
+        bool saved = false;
+        bool const hadPassword = keyManager.WithMasterPassword(
+            [&saved, &manager, this](std::string_view pwd)
+            { saved = manager.SaveEncrypted(m_ConnectionsFilePath, pwd); });
+        if (!hadPassword)
+        {
+            LOG_CORE_WARN("SaveConnectionStore: master password not held in mlock memory — cannot persist");
             return false;
         }
         return saved;

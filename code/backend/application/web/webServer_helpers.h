@@ -240,6 +240,31 @@ namespace AIAssistant
                 SetJsonHeaders(resp);
                 return resp;
             }
+            else if (error == "reauth_required")
+            {
+                body["error"] = "reauth_required";
+                body["message"] = "Master password confirmation is required to change AI-routing or connection "
+                                  "settings. Re-enter your master password.";
+                crow::response resp(401, body.dump());
+                SetJsonHeaders(resp);
+                return resp;
+            }
+            else if (error == "reauth_failed")
+            {
+                body["error"] = "reauth_failed";
+                body["message"] = "Incorrect master password.";
+                crow::response resp(403, body.dump());
+                SetJsonHeaders(resp);
+                return resp;
+            }
+            else if (error == "locked")
+            {
+                body["error"] = "locked";
+                body["message"] = "Key store is locked. Unlock with the master password first.";
+                crow::response resp(403, body.dump());
+                SetJsonHeaders(resp);
+                return resp;
+            }
             else
             {
                 body["error"] = "forbidden";

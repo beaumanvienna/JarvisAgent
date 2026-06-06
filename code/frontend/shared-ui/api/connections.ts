@@ -59,12 +59,18 @@ export type ConnectionCreateInput = {
   params?: Record<string, string>;
 };
 
-export async function createConnection(input: ConnectionCreateInput): Promise<ConnectionMutationResponse>
+// Connection mutations require the master password re-supplied in the body
+// (backend re-auth gate).  Optional at the type level only so the views can be
+// wired incrementally; omitting it yields a 401 reauth_required.
+export async function createConnection(
+  input: ConnectionCreateInput,
+  masterPassword?: string,
+): Promise<ConnectionMutationResponse>
 {
   const response = await authFetch("/api/connections", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
+    body: JSON.stringify({ ...input, master_password: masterPassword }),
   });
   return (await response.json()) as ConnectionMutationResponse;
 }
@@ -77,20 +83,26 @@ export type ConnectionUpdateInput = {
   params?: Record<string, string>;
 };
 
-export async function updateConnection(name: string, input: ConnectionUpdateInput): Promise<ConnectionMutationResponse>
+export async function updateConnection(
+  name: string,
+  input: ConnectionUpdateInput,
+  masterPassword?: string,
+): Promise<ConnectionMutationResponse>
 {
   const response = await authFetch(`/api/connections/${encodeURIComponent(name)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
+    body: JSON.stringify({ ...input, master_password: masterPassword }),
   });
   return (await response.json()) as ConnectionMutationResponse;
 }
 
-export async function deleteConnection(name: string): Promise<ConnectionMutationResponse>
+export async function deleteConnection(name: string, masterPassword?: string): Promise<ConnectionMutationResponse>
 {
   const response = await authFetch(`/api/connections/${encodeURIComponent(name)}`, {
     method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ master_password: masterPassword }),
   });
   return (await response.json()) as ConnectionMutationResponse;
 }
@@ -103,11 +115,12 @@ export async function testConnection(name: string): Promise<ConnectionTestRespon
   return (await response.json()) as ConnectionTestResponse;
 }
 
-export async function saveConnections(): Promise<ConnectionSaveResponse>
+export async function saveConnections(masterPassword?: string): Promise<ConnectionSaveResponse>
 {
   const response = await authFetch("/api/connections/save", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ master_password: masterPassword }),
   });
   return (await response.json()) as ConnectionSaveResponse;
 }
