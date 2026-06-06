@@ -5851,7 +5851,10 @@ namespace AIAssistant
         responseJson["ok"] = true;
         responseJson["status"] = statusStr;
         responseJson["message"] = message;
-        responseJson["has_providers"] = keyManager.HasProviders();
+        // "has_providers" reports whether AI is usable, not whether credentials
+        // exist — a keyless loopback interface (ollama / llama.cpp / vLLM) is a
+        // valid provider.  Drives the dashboard's "no provider" banner.
+        responseJson["has_providers"] = Core::g_Core->HasUsableAiInterface();
         return MakeJsonResponse(200, responseJson);
     }
 

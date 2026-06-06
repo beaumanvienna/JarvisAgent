@@ -8,14 +8,5 @@
     "queue folder": "queue",
     "workflows folder": "workflows",
     "port": 99999,
-    "session_timeout_hours": 500,
-    "API interfaces": [
-        {
-            "name": "api.openai.com/gpt-4.1/API1",
-            "url": "https://api.openai.com/v1/chat/completions",
-            "model": "gpt-4.1",
-            "API": "API1",
-            "key_name": "openai"
-        }
-    ]
+    "session_timeout_hours": 500
 }

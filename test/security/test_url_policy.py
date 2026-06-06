@@ -6,7 +6,8 @@ The policy: plain http:// is loopback-only AND never with a key_name.  The
 reference implementation lives in `code/backend/application/network/urlPolicy.h` and is
 wired in at:
 
-  - `code/backend/engine/json/configParser.cpp::ParseInterfaces` (config-load enforcement)
+  - `ApiInterfaceManager::ValidateAndNormalize` (store-load + persist enforcement;
+    interfaces live in the encrypted API.json.enc store, not config.json)
   - `code/backend/application/web/webServer.cpp::HandleAiInterfaceCreatePost`
     + `HandleAiInterfaceUpdatePut` (REST enforcement)
 
@@ -62,6 +63,12 @@ def warn(msg):   print(f"  {C.YELLOW}⚠{C.RESET} {msg}")
 def header(msg): print(f"\n{C.BOLD}{C.CYAN}{'-'*60}\n  {msg}\n{'-'*60}{C.RESET}")
 
 
+# Master password for the re-auth gate on AI-interface create/delete (added by
+# the keystore refactor — interface mutations now require master-password
+# confirmation).  Set from --master-password / $JARVIS_MASTER_PASSWORD in main().
+MASTER_PASSWORD = ""
+
+
 def http(method, base, path, key=None, **kw):
     headers = kw.pop("headers", {})
     if key:
@@ -99,11 +106,14 @@ def create_interface(base, admin_key, name, url, key_name="", api_type="API1"):
     }
     if key_name:
         body["key_name"] = key_name
+    if MASTER_PASSWORD:
+        body["master_password"] = MASTER_PASSWORD
     return http("POST", base, "/api/settings/ai-interfaces", key=admin_key, json=body)
 
 
 def delete_interface(base, admin_key, name):
-    http("DELETE", base, f"/api/settings/ai-interfaces/{name}", key=admin_key)
+    body = {"master_password": MASTER_PASSWORD} if MASTER_PASSWORD else None
+    http("DELETE", base, f"/api/settings/ai-interfaces/{name}", key=admin_key, json=body)
 
 
 def assert_reject(base, admin_key, name, url, key_name, expected_error_code, results):
@@ -137,10 +147,20 @@ def main() -> int:
     parser.add_argument("--base-url", default=os.environ.get("J9T_URL", "https://localhost:8443"))
     parser.add_argument("--admin-key", default=os.environ.get("J9T_TOKEN"),
                         help="Admin MCP key (Bearer).  Required.")
+    parser.add_argument("--master-password", default=os.environ.get("JARVIS_MASTER_PASSWORD"),
+                        help="Master password for the re-auth gate on interface create/delete "
+                             "(or set $JARVIS_MASTER_PASSWORD).  Required since the keystore refactor.")
     args = parser.parse_args()
 
     if not args.admin_key:
         print(f"ERROR: --admin-key or $J9T_TOKEN required.")
+        return 2
+
+    global MASTER_PASSWORD
+    MASTER_PASSWORD = args.master_password or ""
+    if not MASTER_PASSWORD:
+        print(f"ERROR: --master-password or $JARVIS_MASTER_PASSWORD required "
+              f"(interface mutations are re-auth-gated since the keystore refactor).")
         return 2
 
     base = args.base_url

@@ -193,10 +193,8 @@ public:
 
     // Existence checks (cheap shared_lock + map lookup).
     bool HasCredential(std::string const& name) const;
-    bool HasDefaultCredential() const;
 
     std::vector<std::string> GetProviderNames() const;
-    bool HasProviders() const;
 
     // Write access (thread-safe, unique lock).  Take ownership of a pre-built credential.
     // REST handlers build via `CredentialFactory::CreateFromJson` (CREATE) or

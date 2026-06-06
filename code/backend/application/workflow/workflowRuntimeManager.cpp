@@ -2873,59 +2873,32 @@ namespace AIAssistant
             return true;
         }
 
-        auto const& keyManager = Core::g_Core->GetKeyManager();
+        Core& core = *Core::g_Core;
 
-        if (!keyManager.HasProviders())
+        // A keyless loopback interface (ollama / llama.cpp / vLLM) is a valid
+        // provider that needs no credential, so the gate is "is at least one
+        // interface usable?", NOT "are there any credentials?".  Checking
+        // credential presence here would block local-LLM-only setups outright.
+        if (!core.HasUsableAiInterface())
         {
-            LOG_APP_WARN("Blocked workflow run '{}': contains ai_call tasks but no AI providers "
-                         "are configured. Unlock the key store via POST /api/settings/keys/unlock "
-                         "or configure providers via the Settings UI, then reload workflows.",
+            LOG_APP_WARN("Blocked workflow run '{}': contains ai_call tasks but no usable AI "
+                         "interface is configured. Unlock the key store via POST /api/settings/keys/unlock "
+                         "or configure an interface via the Settings UI, then reload workflows.",
                          workflowDefinition.m_Id);
             return false;
         }
 
-        // Check each required provider individually.
-        // The providerName may be an interface name (e.g. "api.openai.com/gpt-4.1-mini/API1")
-        // or a legacy key name (e.g. "openai").  Resolve interface name → key_name first.
-        auto const& interfaces = Core::g_Core->GetConfig().m_ApiInterfaces;
+        // Each ai_call's required provider must resolve to a usable interface
+        // (keyless interfaces pass without a credential; an empty name = the
+        // system default interface; a non-interface name = a legacy key).
         for (std::string const& providerName : workflowDefinition.m_RequiredAiProviders)
         {
-            if (providerName.empty())
+            if (!core.IsAiProviderAvailable(providerName))
             {
-                if (!keyManager.HasDefaultCredential())
-                {
-                    LOG_APP_WARN("Blocked workflow run '{}': ai_call task requires system default "
-                                 "provider, but no default provider is configured",
-                                 workflowDefinition.m_Id);
-                    return false;
-                }
-            }
-            else
-            {
-                // Try interface name → key_name resolution first.
-                std::string keyName;
-                for (auto const& iface : interfaces)
-                {
-                    if (iface.m_Name == providerName)
-                    {
-                        keyName = iface.m_KeyName;
-                        break;
-                    }
-                }
-
-                // Fall back: treat providerName as a key name directly (legacy JCWFs).
-                if (keyName.empty())
-                {
-                    keyName = providerName;
-                }
-
-                if (!keyManager.HasCredential(keyName))
-                {
-                    LOG_APP_WARN("Blocked workflow run '{}': ai_call task requires provider '{}' "
-                                 "(key '{}') which is not configured",
-                                 workflowDefinition.m_Id, providerName, keyName);
-                    return false;
-                }
+                LOG_APP_WARN("Blocked workflow run '{}': ai_call task requires AI provider '{}' "
+                             "which is not configured or usable",
+                             workflowDefinition.m_Id, providerName.empty() ? "<system default>" : providerName);
+                return false;
             }
         }
 

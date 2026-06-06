@@ -420,6 +420,56 @@ namespace AIAssistant
         return m_EngineConfig.m_ApiInterfaces[m_EngineConfig.m_ApiIndex].m_InterfaceType;
     }
 
+    bool Core::IsAiInterfaceUsable(ConfigParser::EngineConfig::ApiInterface const& iface) const
+    {
+        // Keyless interfaces are loopback-only by policy (ollama / llama.cpp /
+        // vLLM at 127.0.0.1) and need no credential — they are usable as-is.
+        if (iface.m_KeyName.empty())
+        {
+            return true;
+        }
+        return m_KeyManager.HasCredential(iface.m_KeyName);
+    }
+
+    bool Core::HasUsableAiInterface() const
+    {
+        for (auto const& iface : m_EngineConfig.m_ApiInterfaces)
+        {
+            if (IsAiInterfaceUsable(iface))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool Core::IsAiProviderAvailable(std::string const& providerName) const
+    {
+        // Empty name → the ai_call uses the system default interface; it must
+        // exist (index in range) and be usable.
+        if (providerName.empty())
+        {
+            if (m_EngineConfig.m_ApiIndex >= m_EngineConfig.m_ApiInterfaces.size())
+            {
+                return false;
+            }
+            return IsAiInterfaceUsable(m_EngineConfig.m_ApiInterfaces[m_EngineConfig.m_ApiIndex]);
+        }
+
+        // A name matching a configured interface → that interface must be usable
+        // (keyless interfaces pass without a credential).
+        for (auto const& iface : m_EngineConfig.m_ApiInterfaces)
+        {
+            if (iface.m_Name == providerName)
+            {
+                return IsAiInterfaceUsable(iface);
+            }
+        }
+
+        // Otherwise treat the name as a legacy key name (pre-interface JCWFs).
+        return m_KeyManager.HasCredential(providerName);
+    }
+
     ThreadPool& Core::GetThreadPool() { return m_ThreadPool; }
 
     TerminalManager* Core::GetTerminalManager() { return m_TerminalManager.get(); }

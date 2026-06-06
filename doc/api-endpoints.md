@@ -1002,6 +1002,7 @@ Returns 400 if a required field is missing or malformed. Validation errors (e.g.
 ```json
 { "ok": true, "status": "ok|no_password|wrong_password|no_keys_file", "message": "...", "has_providers": true }
 ```
+`has_providers` is `true` when at least one **usable** AI interface is configured — usable meaning keyless (a loopback provider such as ollama / llama.cpp / vLLM needs no credential) **or** its `key_name` has a stored credential. It is *not* a raw credential count: a keyless local-LLM interface alone makes it `true`. The dashboard drives its "no AI provider" banner off this field.
 
 ### POST /api/settings/keys/unlock
 **Request body:**

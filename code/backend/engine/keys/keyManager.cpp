@@ -188,16 +188,6 @@ namespace AIAssistant
         return m_Credentials.find(name) != m_Credentials.end();
     }
 
-    bool KeyManager::HasDefaultCredential() const
-    {
-        std::shared_lock lock(m_Mutex);
-        if (m_DefaultProviderName.empty())
-        {
-            return false;
-        }
-        return m_Credentials.find(m_DefaultProviderName) != m_Credentials.end();
-    }
-
     std::string KeyManager::GetDefaultProviderName() const
     {
         std::shared_lock lock(m_Mutex);
@@ -214,12 +204,6 @@ namespace AIAssistant
             names.push_back(name);
         }
         return names;
-    }
-
-    bool KeyManager::HasProviders() const
-    {
-        std::shared_lock lock(m_Mutex);
-        return !m_Credentials.empty();
     }
 
     bool KeyManager::AddCredential(std::string const& name, std::unique_ptr<ICredential> cred)

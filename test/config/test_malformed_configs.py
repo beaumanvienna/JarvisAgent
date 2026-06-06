@@ -28,15 +28,19 @@ For each fixture under test/config/fixtures/*.json:
 
   5. Tear down the spawned process before moving to the next fixture.
 
-Default fixture set (8 fixtures as of 2026-05-23):
+Default fixture set:
 
   malformed_types.json       — every wrong JSON type for its key
   out_of_range.json          — port + session_timeout_hours bounded clamps
   negative_rejected.json     — RejectNegative policy fields
   clamped_negatives.json     — ClampNegativeToZero + StoreOnlyIfPositive
-  unknown_API.json           — API: "API7" → InvalidAPI + ConfigChecker reject
-  oob_API_index.json         — API index 50 with 1 interface → reject
-  url_substring_attack.json  — verify URL stored verbatim (fail-open in parser)
+
+AI interfaces no longer live in config.json (they moved to the encrypted
+API.json.enc store managed by ApiInterfaceManager), so the parser ignores
+any "API interfaces" / "API index" / "jcwf AI interface" keys.  The former
+interface-validation fixtures (unknown_API, oob_API_index,
+url_policy_violation, url_substring_attack) were retired; the URL-policy gate
+is now exercised end-to-end at the REST layer by test/security/test_url_policy.py.
 
 Usage:
 

@@ -8,6 +8,7 @@ import {
   type ProviderEntry,
   type CredentialType,
 } from "../api/providers";
+import MasterPasswordDialog from "@shared/components/MasterPasswordDialog";
 
 type EditingKey = {
   name: string;
@@ -48,10 +49,7 @@ export default function ProvidersSettingsView({ appMasterPassword, onDirtyStateC
   const [showPassword, setShowPassword] = useState(false);
   const [localMasterPassword, setLocalMasterPassword] = useState<string | null>(null);
   const [showMasterPasswordPrompt, setShowMasterPasswordPrompt] = useState(false);
-  const [masterPasswordInput, setMasterPasswordInput] = useState("");
-  const [showMasterPwVisible, setShowMasterPwVisible] = useState(false);
   const [dirty, setDirty] = useState(false);
-  const [savePasswordError, setSavePasswordError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try
@@ -182,63 +180,44 @@ export default function ProvidersSettingsView({ appMasterPassword, onDirtyStateC
     }
   }, [editing, refresh]);
 
-  const doSaveWithPassword = useCallback(async (pw: string, fromPrompt: boolean) => {
-    setStatusMessage("Saving encrypted keys file...");
-    setErrorMessage("");
-    setSavePasswordError(null);
+  // Encrypt + persist the keystore with `pw`.  On success, caches the password
+  // (so a clean session won't re-prompt) and refreshes; on a wrong password,
+  // clears the stale cache.  Returns the raw save result so callers route
+  // failure to the right surface (inline error vs. the re-auth dialog).
+  const persistWithPassword = useCallback(async (pw: string) => {
     const result = await saveProviders(pw);
     if (result.ok)
     {
       setLocalMasterPassword(pw);
-      setShowMasterPasswordPrompt(false);
       setStatusMessage(`Saved to ${result.path ?? "keys.json.enc"}`);
       await refresh();
     }
     else if (result.error === "wrong_password")
     {
-      setStatusMessage("");
       setLocalMasterPassword(null);
-      if (fromPrompt)
-      {
-        setSavePasswordError(result.message ?? "Incorrect password.");
-      }
-      else
-      {
-        setSavePasswordError(null);
-        setMasterPasswordInput("");
-        setShowMasterPasswordPrompt(true);
-        setErrorMessage(result.message ?? "Incorrect password.");
-      }
     }
-    else
-    {
-      setErrorMessage(result.message ?? "Save failed");
-      setStatusMessage("");
-    }
-  }, []);
+    return result;
+  }, [refresh]);
 
   const handlePersistEncrypted = useCallback(async () => {
     const pw = localMasterPassword ?? appMasterPassword;
-    if (pw)
+    if (!pw)
     {
-      await doSaveWithPassword(pw, false);
-    }
-    else
-    {
-      setMasterPasswordInput("");
-      setSavePasswordError(null);
       setShowMasterPasswordPrompt(true);
-    }
-  }, [localMasterPassword, appMasterPassword, doSaveWithPassword]);
-
-  const handleMasterPasswordSubmit = useCallback(async () => {
-    if (!masterPasswordInput.trim())
-    {
-      setSavePasswordError("Master password cannot be empty.");
       return;
     }
-    await doSaveWithPassword(masterPasswordInput, true);
-  }, [masterPasswordInput, doSaveWithPassword]);
+    setStatusMessage("Saving encrypted keys file...");
+    setErrorMessage("");
+    const result = await persistWithPassword(pw);
+    if (!result.ok)
+    {
+      setStatusMessage("");
+      // A stale cached password re-prompts via the shared dialog; any other
+      // failure surfaces inline.
+      if (result.error === "wrong_password") setShowMasterPasswordPrompt(true);
+      else setErrorMessage(result.message ?? "Save failed");
+    }
+  }, [localMasterPassword, appMasterPassword, persistWithPassword]);
 
   return (
     <div className="panel" style={{ maxWidth: 720, margin: "0 auto" }}>
@@ -312,77 +291,26 @@ export default function ProvidersSettingsView({ appMasterPassword, onDirtyStateC
       )}
 
       {showMasterPasswordPrompt && (
-        <div className="modalOverlay">
-          <div className="modalContent" style={{ maxWidth: 420 }}>
-            <div className="modalHeader">
-              <h2 style={{ margin: 0, fontSize: 16 }}>Master Password Required</h2>
-            </div>
-            <form onSubmit={(e) => { e.preventDefault(); handleMasterPasswordSubmit(); }}>
-              <div className="modalBody">
-                <p style={{ marginTop: 0, marginBottom: 16, color: "#ccc" }}>
-                  Enter your master password to encrypt and save the keys file.
-                </p>
-                <div style={{ position: "relative" }}>
-                  <input
-                    type={showMasterPwVisible ? "text" : "password"}
-                    value={masterPasswordInput}
-                    onChange={(e) => setMasterPasswordInput(e.target.value)}
-                    placeholder="Master password"
-                    autoFocus
-                    style={{
-                      width: "100%",
-                      padding: "8px 36px 8px 12px",
-                      fontSize: 14,
-                      borderRadius: 4,
-                      border: "1px solid #555",
-                      background: "#1e1e1e",
-                      color: "#eee",
-                      boxSizing: "border-box",
-                    }}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowMasterPwVisible((prev) => !prev)}
-                    style={{
-                      position: "absolute",
-                      right: 8,
-                      top: "50%",
-                      transform: "translateY(-50%)",
-                      background: "none",
-                      border: "none",
-                      cursor: "pointer",
-                      color: "#aaa",
-                      fontSize: 16,
-                      padding: 0,
-                      lineHeight: 1,
-                    }}
-                    title={showMasterPwVisible ? "Hide password" : "Show password"}
-                  >
-                    {showMasterPwVisible ? "\u{1F441}" : "\u{1F441}\u{200D}\u{1F5E8}"}
-                  </button>
-                </div>
-                {savePasswordError && (
-                  <div
-                    style={{
-                      marginTop: 8,
-                      padding: "6px 10px",
-                      borderRadius: 4,
-                      background: "#3a1c1c",
-                      color: "#f88",
-                      fontSize: 13,
-                    }}
-                  >
-                    {savePasswordError}
-                  </div>
-                )}
-              </div>
-              <div className="modalFooter">
-                <button className="btn" type="submit">Save</button>
-                <button className="btn" type="button" onClick={() => setShowMasterPasswordPrompt(false)} style={{ marginLeft: 8 }}>Cancel</button>
-              </div>
-            </form>
-          </div>
-        </div>
+        <MasterPasswordDialog
+          mode="confirm"
+          title="Master password required"
+          description="Enter your master password to encrypt and save the keys file."
+          confirmLabel="Save"
+          onConfirm={async (pw) => {
+            const result = await persistWithPassword(pw);
+            if (result.ok)
+            {
+              setShowMasterPasswordPrompt(false);
+              return { ok: true };
+            }
+            return {
+              ok: false,
+              message: result.message ??
+                (result.error === "wrong_password" ? "Incorrect master password." : "Save failed"),
+            };
+          }}
+          onCancel={() => setShowMasterPasswordPrompt(false)}
+        />
       )}
 
       {editing && (

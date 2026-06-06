@@ -4,8 +4,7 @@
         "ConfigParser: 'max threads' is negative (-1), ignoring; configChecker will assign default",
         "ConfigParser: 'max file size in kB' is negative (-5), ignoring; configChecker will assign default",
         "ConfigParser: 'max inflight ai calls' is negative (-100), ignoring; configChecker will assign default",
-        "ConfigParser: 'python engines' is negative (-2), ignoring; configChecker will assign default",
-        "ConfigParser: 'API index' is negative (-1), ignoring; configChecker will assign default"
+        "ConfigParser: 'python engines' is negative (-2), ignoring; configChecker will assign default"
     ],
 
     "queue folder": "queue",
@@ -13,15 +12,5 @@
     "max threads": -1,
     "max file size in kB": -5,
     "max inflight ai calls": -100,
-    "python engines": -2,
-    "API index": -1,
-    "API interfaces": [
-        {
-            "name": "api.openai.com/gpt-4.1/API1",
-            "url": "https://api.openai.com/v1/chat/completions",
-            "model": "gpt-4.1",
-            "API": "API1",
-            "key_name": "openai"
-        }
-    ]
+    "python engines": -2
 }

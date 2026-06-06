@@ -159,11 +159,9 @@ namespace AIAssistant
 
         // Existence checks (cheap shared_lock + map lookup).
         bool HasCredential(std::string const& name) const;
-        bool HasDefaultCredential() const;
 
         std::string GetDefaultProviderName() const;
         std::vector<std::string> GetProviderNames() const;
-        bool HasProviders() const;
 
         // CRUD (thread-safe, write-locked).  Take ownership of a pre-built `ICredential`
         // (typically built by `CredentialFactory::CreateFromJson` from a REST request body

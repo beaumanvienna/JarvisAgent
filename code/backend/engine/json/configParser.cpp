@@ -121,21 +121,17 @@ namespace AIAssistant
         // Field-parse boilerplate helpers — one per JSON value type.
         //
         // Every config field used to be 5–7 lines of `get_X().get(target)` ->
-        // LOG_CORE_ERROR -> store -> ++counter, repeated 29 times across
-        // Parse() and ParseInterfaces().  These helpers collapse that to a
-        // single line per site so the parser body reads as a field table.
+        // LOG_CORE_ERROR -> store -> ++counter, repeated across every field in
+        // Parse().  These helpers collapse that to a single line per site so the
+        // parser body reads as a field table.
         //
         // Contract for every helper:
         //   - Extract once via simdjson; on type mismatch log
-        //     `LOG_CORE_ERROR("{} '{}' must be a <type>", logPrefix, key)`
+        //     `LOG_CORE_ERROR("ConfigParser: '{}' must be a <type>", key)`
         //     and return without touching the target or counter.
         //   - On success: store into the caller's target, log
         //     `LOG_CORE_INFO("{}: {}", key, value)`, and (if `counter`
         //     is non-null) `++(*counter)`.
-        //
-        // The `logPrefix` parameter exists because the top-level Parse()
-        // says "ConfigParser:" while ParseInterfaces() says
-        // "ConfigParser: API interface" — same shape, different scope.
         //
         // Counter pointer is optional: a few ApiInterface sub-fields don't
         // track occurrences (`max_context_tokens`, `default_output_tokens`)
@@ -163,13 +159,12 @@ namespace AIAssistant
         void ParseStringField(simdjson::ondemand::value value,
                               std::string_view key,
                               std::string& target,
-                              uint32_t* counter,
-                              char const* logPrefix = "ConfigParser:")
+                              uint32_t* counter)
         {
             std::string_view sv;
             if (value.get_string().get(sv) != simdjson::SUCCESS)
             {
-                LOG_CORE_ERROR("{} '{}' must be a string", logPrefix, key);
+                LOG_CORE_ERROR("ConfigParser: '{}' must be a string", key);
                 return;
             }
             target = std::string(sv);
@@ -182,13 +177,12 @@ namespace AIAssistant
         // only and never end up in `EngineConfig`.
         void ParseStringFieldLogOnly(simdjson::ondemand::value value,
                                      std::string_view key,
-                                     uint32_t* counter,
-                                     char const* logPrefix = "ConfigParser:")
+                                     uint32_t* counter)
         {
             std::string_view sv;
             if (value.get_string().get(sv) != simdjson::SUCCESS)
             {
-                LOG_CORE_ERROR("{} '{}' must be a string", logPrefix, key);
+                LOG_CORE_ERROR("ConfigParser: '{}' must be a string", key);
                 return;
             }
             LOG_CORE_INFO("{}: {}", key, sv);
@@ -200,13 +194,12 @@ namespace AIAssistant
                              std::string_view key,
                              TargetT& target,
                              NumericPolicy policy,
-                             uint32_t* counter,
-                             char const* logPrefix = "ConfigParser:")
+                             uint32_t* counter)
         {
             int64_t v = 0;
             if (value.get_int64().get(v) != simdjson::SUCCESS)
             {
-                LOG_CORE_ERROR("{} '{}' must be a number", logPrefix, key);
+                LOG_CORE_ERROR("ConfigParser: '{}' must be a number", key);
                 return;
             }
             // INFO log placement matches pre-refactor: AcceptAny / RejectNegative /
@@ -222,8 +215,8 @@ namespace AIAssistant
                     LOG_CORE_INFO("{}: {}", key, v);
                     if (v < 0)
                     {
-                        LOG_CORE_ERROR("{} '{}' is negative ({}), ignoring; configChecker will assign default",
-                                       logPrefix, key, v);
+                        LOG_CORE_ERROR("ConfigParser: '{}' is negative ({}), ignoring; configChecker will assign default",
+                                       key, v);
                         return;
                     }
                     target = static_cast<TargetT>(v);
@@ -245,13 +238,12 @@ namespace AIAssistant
         void ParseUint64Field(simdjson::ondemand::value value,
                               std::string_view key,
                               TargetT& target,
-                              uint32_t* counter,
-                              char const* logPrefix = "ConfigParser:")
+                              uint32_t* counter)
         {
             uint64_t v = 0;
             if (value.get_uint64().get(v) != simdjson::SUCCESS)
             {
-                LOG_CORE_ERROR("{} '{}' must be a non-negative number", logPrefix, key);
+                LOG_CORE_ERROR("ConfigParser: '{}' must be a non-negative number", key);
                 return;
             }
             target = static_cast<TargetT>(v);
@@ -262,13 +254,12 @@ namespace AIAssistant
         void ParseBoolField(simdjson::ondemand::value value,
                             std::string_view key,
                             bool& target,
-                            uint32_t* counter,
-                            char const* logPrefix = "ConfigParser:")
+                            uint32_t* counter)
         {
             bool v = false;
             if (value.get_bool().get(v) != simdjson::SUCCESS)
             {
-                LOG_CORE_ERROR("{} '{}' must be a boolean", logPrefix, key);
+                LOG_CORE_ERROR("ConfigParser: '{}' must be a boolean", key);
                 return;
             }
             target = v;
@@ -293,13 +284,12 @@ namespace AIAssistant
                                        int64_t minInclusive, int64_t maxInclusive,
                                        int64_t defaultIfOutOfRange,
                                        uint32_t* counter,
-                                       char const* warnSuffix = "",
-                                       char const* logPrefix = "ConfigParser:")
+                                       char const* warnSuffix = "")
         {
             int64_t v = 0;
             if (value.get_int64().get(v) != simdjson::SUCCESS)
             {
-                LOG_CORE_ERROR("{} '{}' must be a number", logPrefix, key);
+                LOG_CORE_ERROR("ConfigParser: '{}' must be a number", key);
                 return;
             }
             if (v < minInclusive || v > maxInclusive)

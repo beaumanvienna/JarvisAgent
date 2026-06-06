@@ -997,15 +997,15 @@ namespace AIAssistant
                     return;
                 }
             };
-            auto& keyManager = Core::g_Core->GetKeyManager();
+            // A keyless interface (loopback ollama / llama.cpp / vLLM) dispatches
+            // with no credential — return empty rather than borrowing the default
+            // key, which would both mask a missing-provider condition and attach an
+            // unrelated secret to a plaintext loopback request.
             if (api.m_KeyName.empty())
             {
-                keyManager.WithDefaultCredential(extract);
+                return result;
             }
-            else
-            {
-                keyManager.WithCredential(api.m_KeyName, extract);
-            }
+            Core::g_Core->GetKeyManager().WithCredential(api.m_KeyName, extract);
             return result;
         }
 
@@ -1337,9 +1337,12 @@ namespace AIAssistant
         CurlWrapper::AuthStyle const authStyle = requestBuilder->GetAuthStyle();
 
         SecureString apiKey = ResolveApiKey(*api);
-        if (apiKey.IsEmpty())
+        // Keyless interfaces (loopback ollama / llama.cpp / vLLM) dispatch with no
+        // credential, so an empty key is only fatal when the interface DECLARES a
+        // key_name that could not be resolved from the keystore.
+        if (apiKey.IsEmpty() && !api->m_KeyName.empty())
         {
-            LOG_APP_ERROR("AiRequestPool::Submit: no API key resolvable run='{}' workflow='{}' task='{}' "
+            LOG_APP_ERROR("AiRequestPool::Submit: declared API key not resolvable run='{}' workflow='{}' task='{}' "
                           "interface='{}' key_name='{}'",
                           runIdForLog, workflowIdForLog, taskIdForLog, api->m_Name, api->m_KeyName);
             return false;

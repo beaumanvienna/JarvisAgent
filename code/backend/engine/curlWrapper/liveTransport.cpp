@@ -215,7 +215,13 @@ namespace AIAssistant
         std::vector<std::string> publicHeaders;
         SecureString secretHeader;
         std::string authError;
-        if (!IAuthSigner::Get(req.m_QueryData.m_AuthStyle).Apply(req.m_QueryData, publicHeaders, secretHeader,
+        // Keyless interfaces (loopback ollama / llama.cpp / vLLM) dispatch with no
+        // auth header — skip the signer entirely.  A keyed interface whose
+        // credential failed to resolve is already rejected in AiRequestPool::Submit,
+        // so an empty key here means "intentionally none".  (AWS SigV4 always
+        // carries a non-empty access-key-id, so it never takes this branch.)
+        if (!req.m_QueryData.m_ApiKey.IsEmpty() &&
+            !IAuthSigner::Get(req.m_QueryData.m_AuthStyle).Apply(req.m_QueryData, publicHeaders, secretHeader,
                                                                  authError))
         {
             errorKind = SetupError::AuthSigner;

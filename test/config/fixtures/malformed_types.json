@@ -1,5 +1,5 @@
 {
-    "_comment": "Wrong-type field values — each is intentionally the wrong JSON type for its key. Expected: every wrong-type field logs a LOG_CORE_ERROR 'must be a <type>' line; ConfigParser continues to the next field; the queue folder + API interfaces survive so the overall parse state stays ConfigOk.",
+    "_comment": "Wrong-type field values — each is intentionally the wrong JSON type for its key. Expected: every wrong-type field logs a LOG_CORE_ERROR 'must be a <type>' line; ConfigParser continues to the next field; queue folder + workflows folder survive so the overall parse state stays ConfigOk.",
     "_expected_errors": [
         "ConfigParser: 'description' must be a string",
         "ConfigParser: 'author' must be a string",
@@ -7,9 +7,9 @@
         "ConfigParser: 'engine sleep time in run loop in ms' must be a number",
         "ConfigParser: 'max file size in kB' must be a number",
         "ConfigParser: 'verbose' must be a boolean",
-        "ConfigParser: 'API index' must be a number",
+        "ConfigParser: 'api_file' must be a string",
+        "ConfigParser: 'connections_file' must be a string",
         "ConfigParser: 'jcwf batch size' must be a number",
-        "ConfigParser: 'jcwf AI interface' must be a number",
         "ConfigParser: 'keys_file' must be a string",
         "ConfigParser: 'use_bash' must be a boolean",
         "ConfigParser: 'TlsCert' must be a string",
@@ -23,9 +23,7 @@
         "ConfigParser: 'python engines' must be a number",
         "ConfigParser: 'port' must be a number",
         "ConfigParser: 'mcp_keys_file' must be a string",
-        "ConfigParser: 'session_timeout_hours' must be a number",
-        "ConfigParser: API interface 'description' must be a string",
-        "ConfigParser: API interface 'is_mock' must be a bool"
+        "ConfigParser: 'session_timeout_hours' must be a number"
     ],
 
     "queue folder": "queue",
@@ -37,9 +35,9 @@
     "engine sleep time in run loop in ms": "fast",
     "max file size in kB": [],
     "verbose": "yes",
-    "API index": "first",
+    "api_file": 12345,
+    "connections_file": [],
     "jcwf batch size": null,
-    "jcwf AI interface": "default",
     "keys_file": 12345,
     "use_bash": "yes",
     "TlsCert": 1,
@@ -53,17 +51,5 @@
     "python engines": "auto",
     "port": "https",
     "mcp_keys_file": false,
-    "session_timeout_hours": "long",
-
-    "API interfaces": [
-        {
-            "name": "api.openai.com/gpt-4.1/API1",
-            "url": "https://api.openai.com/v1/chat/completions",
-            "model": "gpt-4.1",
-            "API": "API1",
-            "key_name": "openai",
-            "description": 7,
-            "is_mock": "no"
-        }
-    ]
+    "session_timeout_hours": "long"
 }

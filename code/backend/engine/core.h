@@ -60,6 +60,21 @@ namespace AIAssistant
         ConfigParser::EngineConfig const& GetConfig() const;
         ConfigParser::EngineConfig& GetMutableConfig() { return m_EngineConfig; }
         ConfigParser::EngineConfig::InterfaceType const& GetInterfaceType() const;
+
+        // AI provider availability.  A configured interface is "usable" when it
+        // is keyless (loopback providers — ollama / llama.cpp / vLLM — need no
+        // credential) OR its key_name has a stored credential.  These are the
+        // correct "is AI available?" signals at the run gate, dashboard banner,
+        // and status snapshot — a credential-count check would wrongly report a
+        // keyless local LLM as no-provider and block local-LLM-only setups.
+        // IsAiProviderAvailable resolves an ai_call's required provider: an
+        // empty name → the default interface must be usable; a name matching an
+        // interface → that interface must be usable; otherwise the name is
+        // treated as a legacy key name and must have a stored credential.
+        [[nodiscard]] bool IsAiInterfaceUsable(ConfigParser::EngineConfig::ApiInterface const& iface) const;
+        [[nodiscard]] bool HasUsableAiInterface() const;
+        [[nodiscard]] bool IsAiProviderAvailable(std::string const& providerName) const;
+
         void SetConfigFilePath(std::filesystem::path const& path) { m_ConfigFilePath = path; }
         std::filesystem::path const& GetConfigFilePath() const { return m_ConfigFilePath; }
         ThreadPool& GetThreadPool();

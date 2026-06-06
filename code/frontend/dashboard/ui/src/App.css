@@ -787,6 +787,53 @@ body {
   z-index: 10000;
 }
 
+/* Generic modal (shared-ui ProvidersSettingsView key add/edit form).  These
+   classes originate in the editor's styles.css; the dashboard renders the same
+   shared view, so they're mirrored here (with the same backdrop blur as
+   .mpd-overlay) — without them the key edit/create form rendered unstyled in
+   the dashboard. */
+.modalOverlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.75);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+}
+
+.modalContent {
+  background: #1e1e1e;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  min-width: 360px;
+  max-width: 480px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+}
+
+.modalHeader {
+  padding: 16px 20px;
+  font-size: 16px;
+  font-weight: 700;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.modalBody {
+  padding: 20px;
+}
+
+.modalFooter {
+  padding: 12px 20px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
 .mpd-dialog {
   background: #1e1e1e;
   border: 1px solid rgba(255, 255, 255, 0.12);

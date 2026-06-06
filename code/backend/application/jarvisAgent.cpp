@@ -462,7 +462,9 @@ namespace AIAssistant
                                 snap.keysStatus = "no_keys_file";
                                 break;
                         }
-                        snap.hasProviders = keyManager.HasProviders();
+                        // Usable = keyless loopback interface OR keyed interface
+                        // with its credential present (not mere credential count).
+                        snap.hasProviders = Core::g_Core->HasUsableAiInterface();
 
                         auto const& breaker = Core::g_Core->GetCloudCircuitBreaker();
                         auto health = breaker.GetHealthSummary();
