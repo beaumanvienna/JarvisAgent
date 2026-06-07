@@ -8,11 +8,21 @@ a higher-level harness.
 ## Running
 
 All tests assume a running Studio build on the default port (8443, self-signed
-TLS — scripts pass `verify=False`).  Most tests require an MCP admin key:
+TLS — scripts pass `verify=False`).  Most tests require an MCP admin key, and
+any test that provisions an AI interface also needs the keystore master
+password (the create/delete routes are re-auth-gated):
 
 ```
 export J9T_TOKEN=mcp_...                 # or pass --token on the CLI
+export JARVIS_MASTER_PASSWORD=...        # re-auth gate on AI-interface CRUD
 ```
+
+Interface provisioning goes through `_provisioning.py` (`create_interface` /
+`delete_interface`), which merges the master password into the request body;
+it defaults to `$JARVIS_MASTER_PASSWORD`, so the helper-module tests pick it up
+automatically.  Several offline tests also assert on `/api/debug/signals`,
+which is compiled out of Release — run those against a debug build
+(`./jarvisagent.sh --debug`).
 
 ### Offline / no live AI
 

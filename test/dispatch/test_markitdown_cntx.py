@@ -35,6 +35,9 @@ except ImportError:
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _provisioning  # noqa: E402
+
 TEST_INTERFACE_NAME = "markitdown_test_dispatch"
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 FIXTURE_FIXTURE = os.path.join(REPO_ROOT, "test", "dispatch", "fixtures", "api1", "golden_success.json")
@@ -101,19 +104,13 @@ def create_test_interface(base_url: str, headers: dict, fixture_path: str) -> bo
         "is_mock": True,
         "fixture_path": fixture_path,
     }
-    r = requests.post(
-        f"{base_url}/api/settings/ai-interfaces",
-        json=body, headers=headers, verify=False, timeout=10,
-    )
+    r = _provisioning.create_interface(base_url, headers, body)
     return r.status_code in (200, 201)
 
 
 def delete_test_interface(base_url: str, headers: dict) -> None:
     try:
-        requests.delete(
-            f"{base_url}/api/settings/ai-interfaces/{TEST_INTERFACE_NAME}",
-            headers=headers, verify=False, timeout=10,
-        )
+        _provisioning.delete_interface(base_url, headers, TEST_INTERFACE_NAME)
     except Exception:
         pass
 

@@ -31,6 +31,9 @@ except ImportError:
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _provisioning  # noqa: E402
+
 MOCK_INTERFACE_NAME = "hermetic_mock_dispatch"
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 FIXTURE_PATH_DEFAULT = os.path.join(REPO_ROOT, "test", "dispatch", "fixtures", "api1", "golden_success.json")
@@ -80,10 +83,7 @@ def create_mock_interface(base_url: str, headers: dict, fixture_path: str) -> bo
         "is_mock": True,
         "fixture_path": fixture_path,
     }
-    r = requests.post(
-        f"{base_url}/api/settings/ai-interfaces",
-        json=body, headers=headers, verify=False, timeout=10,
-    )
+    r = _provisioning.create_interface(base_url, headers, body)
     if r.status_code not in (200, 201):
         print(f"FAIL: create mock interface returned {r.status_code}: {r.text[:200]}")
         return False
@@ -92,10 +92,7 @@ def create_mock_interface(base_url: str, headers: dict, fixture_path: str) -> bo
 
 def delete_mock_interface(base_url: str, headers: dict) -> None:
     try:
-        requests.delete(
-            f"{base_url}/api/settings/ai-interfaces/{MOCK_INTERFACE_NAME}",
-            headers=headers, verify=False, timeout=10,
-        )
+        _provisioning.delete_interface(base_url, headers, MOCK_INTERFACE_NAME)
     except Exception:
         pass
 

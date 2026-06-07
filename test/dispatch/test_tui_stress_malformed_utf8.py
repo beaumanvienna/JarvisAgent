@@ -40,6 +40,9 @@ except ImportError:
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _provisioning  # noqa: E402
+
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 LOG_FILE = REPO_ROOT / "log" / "log.txt"
 
@@ -106,15 +109,13 @@ def provision(base_url, headers, name, api_type, fixture_abs):
         "fixture_path": fixture_abs,
         "rate_limit": {"max_retries_429": 0, "max_retries_transient": 0},
     }
-    r = requests.post(f"{base_url}/api/settings/ai-interfaces",
-                      json=body, headers=headers, verify=False, timeout=10)
+    r = _provisioning.create_interface(base_url, headers, body)
     return r.status_code in (200, 201, 409)
 
 
 def delete_iface(base_url, headers, name):
     try:
-        requests.delete(f"{base_url}/api/settings/ai-interfaces/{name}",
-                        headers=headers, verify=False, timeout=10)
+        _provisioning.delete_interface(base_url, headers, name)
     except Exception:
         pass
 

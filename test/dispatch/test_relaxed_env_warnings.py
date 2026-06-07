@@ -31,6 +31,9 @@ except ImportError:
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _provisioning  # noqa: E402
+
 TEST_INTERFACE_NAME = "relaxed_env_test_dispatch"
 FIXTURE_PATH_DEFAULT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "fixtures", "api1", "golden_success.json")
@@ -71,29 +74,22 @@ def build_jcwf(case_name: str, include_stng: bool, include_task: bool,
 
 
 def create_test_interface(base_url: str, headers: dict, fixture_path: str) -> bool:
-    r = requests.post(
-        f"{base_url}/api/settings/ai-interfaces",
-        json={
-            "name": TEST_INTERFACE_NAME,
-            "description": "Relaxed-env MockTransport interface",
-            "url": "https://localhost/_mock_/never_called",
-            "model": "mock-stub",
-            "api_type": "API1",
-            "key_name": "",
-            "is_mock": True,
-            "fixture_path": fixture_path,
-        },
-        headers=headers, verify=False, timeout=10,
-    )
+    r = _provisioning.create_interface(base_url, headers, {
+        "name": TEST_INTERFACE_NAME,
+        "description": "Relaxed-env MockTransport interface",
+        "url": "https://localhost/_mock_/never_called",
+        "model": "mock-stub",
+        "api_type": "API1",
+        "key_name": "",
+        "is_mock": True,
+        "fixture_path": fixture_path,
+    })
     return r.status_code in (200, 201)
 
 
 def delete_test_interface(base_url: str, headers: dict) -> None:
     try:
-        requests.delete(
-            f"{base_url}/api/settings/ai-interfaces/{TEST_INTERFACE_NAME}",
-            headers=headers, verify=False, timeout=10,
-        )
+        _provisioning.delete_interface(base_url, headers, TEST_INTERFACE_NAME)
     except Exception:
         pass
 

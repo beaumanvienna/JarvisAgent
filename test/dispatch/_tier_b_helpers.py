@@ -20,6 +20,8 @@ import urllib.parse
 
 import requests
 
+import _provisioning
+
 
 def mock_endpoint_url(base_url: str, **params) -> str:
     """Compose `https://localhost:8443/api/debug/mock-ai-response?...` with
@@ -80,8 +82,7 @@ def provision_interface(base_url: str, headers: dict, *, name: str,
     }
     if rate_limit:
         body["rate_limit"] = rate_limit
-    r = requests.post(f"{base_url}/api/settings/ai-interfaces",
-                      json=body, headers=headers, verify=False, timeout=10)
+    r = _provisioning.create_interface(base_url, headers, body)
     if r.status_code in (200, 201):
         return True
     if r.status_code == 409:
@@ -92,8 +93,7 @@ def provision_interface(base_url: str, headers: dict, *, name: str,
 
 def cleanup_interface(base_url: str, headers: dict, name: str) -> None:
     try:
-        requests.delete(f"{base_url}/api/settings/ai-interfaces/{name}",
-                        headers=headers, verify=False, timeout=10)
+        _provisioning.delete_interface(base_url, headers, name)
     except Exception:
         pass
 

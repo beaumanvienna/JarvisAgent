@@ -36,6 +36,8 @@ from pathlib import Path
 
 import requests
 
+import _provisioning
+
 
 REPO_ROOT = Path("/home/beaumanvienna/dev/jarvisAgent")
 
@@ -219,8 +221,7 @@ def provision_mock_interface(base_url: str, headers: dict, *,
         "is_mock": True,
         "fixture_path": str(abs_path),
     }
-    r = requests.post(f"{base_url}/api/settings/ai-interfaces",
-                      json=body, headers=headers, verify=False, timeout=10)
+    r = _provisioning.create_interface(base_url, headers, body)
     if r.status_code in (200, 201):
         return True
     if r.status_code == 409:
@@ -236,7 +237,6 @@ provision_test_interface = provision_mock_interface
 
 def cleanup_test_interface(base_url: str, headers: dict, name: str) -> None:
     try:
-        requests.delete(f"{base_url}/api/settings/ai-interfaces/{name}",
-                        headers=headers, verify=False, timeout=10)
+        _provisioning.delete_interface(base_url, headers, name)
     except Exception:
         pass

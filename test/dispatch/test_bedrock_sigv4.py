@@ -39,6 +39,9 @@ except ImportError:
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _provisioning  # noqa: E402
+
 BASE = os.environ.get("J9T_BASE_URL", "https://localhost:8443")
 TOKEN = os.environ.get("J9T_TOKEN")
 HEADERS = {"Authorization": f"Bearer {TOKEN}"} if TOKEN else {}
@@ -102,15 +105,13 @@ def create_interface():
         "fixture_path": FIXTURE_PATH,
         "rate_limit": {"max_retries_429": 0, "max_retries_transient": 0},
     }
-    r = requests.post(f"{BASE}/api/settings/ai-interfaces", json=body, headers=HEADERS,
-                      verify=False, timeout=10)
+    r = _provisioning.create_interface(BASE, HEADERS, body)
     return r.status_code in (200, 201, 409), r
 
 
 def delete_interface():
     try:
-        requests.delete(f"{BASE}/api/settings/ai-interfaces/{INTERFACE_NAME}",
-                        headers=HEADERS, verify=False, timeout=10)
+        _provisioning.delete_interface(BASE, HEADERS, INTERFACE_NAME)
     except Exception:
         pass
 

@@ -42,6 +42,8 @@ except ImportError:
     print("ERROR: requests package missing (pip install requests)")
     sys.exit(1)
 
+import _provisioning
+
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -88,8 +90,7 @@ def create_mock_interface(base_url, headers, name, api_type, fixture_path):
             "max_retries_transient": 0,
         },
     }
-    r = requests.post(f"{base_url}/api/settings/ai-interfaces",
-                      json=body, headers=headers, verify=False, timeout=10)
+    r = _provisioning.create_interface(base_url, headers, body)
     if r.status_code in (200, 201, 409):
         return True
     print(f"FAIL [{name}]: create_mock_interface returned {r.status_code}: {r.text[:200]}")
@@ -98,8 +99,7 @@ def create_mock_interface(base_url, headers, name, api_type, fixture_path):
 
 def delete_mock_interface(base_url, headers, name):
     try:
-        requests.delete(f"{base_url}/api/settings/ai-interfaces/{name}",
-                        headers=headers, verify=False, timeout=10)
+        _provisioning.delete_interface(base_url, headers, name)
     except Exception:
         pass
 
