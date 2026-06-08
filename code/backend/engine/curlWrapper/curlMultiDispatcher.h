@@ -122,7 +122,10 @@ namespace AIAssistant
             {
                 std::string m_QuotaKey;
                 int m_CurrentConcurrencyCap{0};
+                int m_HardCap{0};                       // AIMD ceiling (current_cap < hard_cap = ramping/recovering)
                 int m_StreakSinceLast429{0};
+                int64_t m_Last429AtMs{0};               // wall-clock of last 429; 0 = never throttled
+                int m_CapRecoveryEtaSec{0};             // seconds until idle recovery lifts cap to the ceiling
                 int64_t m_RemainingRequests{-1};
                 int64_t m_RemainingTokens{-1};
                 long m_ReqResetInSec{-1};

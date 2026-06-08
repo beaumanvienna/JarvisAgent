@@ -98,11 +98,11 @@ cp -r "$REPO_ROOT/scripts" "$STAGING/opt/jarvisagent/scripts"
 find "$STAGING/opt/jarvisagent/scripts" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 chmod +x "$STAGING/opt/jarvisagent/scripts/"*.sh
 
-# Example workflows (curated list — no subdirs, no build artifacts)
-for jcwf in aiCarMaintenancePipeline aiZipDemo \
-            make-example portfolioDividendAnalysis; do
+# Example workflows (curated set — single source: packaging/curated-workflows.txt)
+while IFS= read -r jcwf; do
+    case "$jcwf" in ''|\#*) continue;; esac
     cp "$REPO_ROOT/example/workflows/${jcwf}.jcwf" "$STAGING/opt/jarvisagent/workflows/" 2>/dev/null || true
-done
+done < "$REPO_ROOT/packaging/curated-workflows.txt"
 # (Input files are bundled inside each .jcwf zip — no loose files to copy)
 
 # Example config
@@ -162,12 +162,12 @@ if command -v rpmbuild &>/dev/null; then
     cp -r "$REPO_ROOT/scripts" "$SRCDIR/scripts"
     find "$SRCDIR/scripts" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 
-    # Example workflows (input files are bundled inside each .jcwf zip)
+    # Example workflows (curated set — single source: packaging/curated-workflows.txt)
     mkdir -p "$SRCDIR/example/workflows"
-    for jcwf in aiCarMaintenancePipeline aiZipDemo \
-                make-example portfolioDividendAnalysis; do
+    while IFS= read -r jcwf; do
+        case "$jcwf" in ''|\#*) continue;; esac
         cp "$REPO_ROOT/example/workflows/${jcwf}.jcwf" "$SRCDIR/example/workflows/" 2>/dev/null || true
-    done
+    done < "$REPO_ROOT/packaging/curated-workflows.txt"
 
     # Config + docs
     cp "$REPO_ROOT/packaging/config.json.example" "$SRCDIR/config.json"

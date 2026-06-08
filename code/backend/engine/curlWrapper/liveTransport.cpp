@@ -26,6 +26,7 @@
 
 #include "core.h"
 #include "curlWrapper/authSigner.h"
+#include "curlWrapper/loopbackGuard.h"
 #include "engine.h"
 
 namespace AIAssistant
@@ -231,12 +232,41 @@ namespace AIAssistant
             curl_easy_cleanup(easy);
             return nullptr;
         }
+        // Header-injection guard: refuse any header carrying a CR or LF before
+        // it reaches curl_slist_append.  publicHeaders are signer-produced
+        // (constants + computed hex/base64/date/Host), so a control char here
+        // means a parsing/derivation bug or a host that smuggled a newline —
+        // fail the request closed rather than splice an attacker-chosen header.
+        auto const hasCrlf = [](std::string_view s) noexcept
+        {
+            return s.find('\r') != std::string_view::npos || s.find('\n') != std::string_view::npos;
+        };
         for (auto const& h : publicHeaders)
         {
+            if (hasCrlf(h))
+            {
+                errorKind = SetupError::MalformedHeader;
+                errorMessage = "request header contains CR/LF";
+                LOG_CORE_ERROR("LiveTransport: [security] ai_dispatch_header_crlf_rejected url='{}' cancelKey='{}' "
+                               "quotaKey='{}'",
+                               req.m_Url, req.m_QueryData.m_CancelKey, req.m_QueryData.m_QuotaKey);
+                curl_easy_cleanup(easy);
+                return nullptr;
+            }
             req.m_Headers = curl_slist_append(req.m_Headers, h.c_str());
         }
         if (!secretHeader.IsEmpty())
         {
+            if (hasCrlf(secretHeader.Get()))
+            {
+                errorKind = SetupError::MalformedHeader;
+                errorMessage = "auth header contains CR/LF";
+                LOG_CORE_ERROR("LiveTransport: [security] ai_dispatch_header_crlf_rejected (auth) url='{}' "
+                               "cancelKey='{}' quotaKey='{}'",
+                               req.m_Url, req.m_QueryData.m_CancelKey, req.m_QueryData.m_QuotaKey);
+                curl_easy_cleanup(easy);
+                return nullptr;
+            }
             req.m_Headers = curl_slist_append(req.m_Headers, secretHeader.CStr());
         }
         req.m_Headers = curl_slist_append(req.m_Headers, "Content-Type: application/json");
@@ -245,6 +275,12 @@ namespace AIAssistant
         curl_easy_setopt(easy, CURLOPT_HTTP_VERSION,     CURL_HTTP_VERSION_2TLS);
 
         curl_easy_setopt(easy, CURLOPT_URL,              req.m_Url.c_str());
+
+        // DNS-rebinding closure: for plain http:// (loopback-only by policy)
+        // re-check the address libcurl actually resolved to at connect time and
+        // abort any non-loopback peer.  No-op for https://.
+        InstallLoopbackGuardForPlaintextHttp(easy, req.m_Url);
+
         curl_easy_setopt(easy, CURLOPT_HTTPHEADER,       req.m_Headers);
         curl_easy_setopt(easy, CURLOPT_POSTFIELDS,       req.m_PostData.c_str());
         curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION,    MultiWriteCallback);
@@ -275,13 +311,21 @@ namespace AIAssistant
         // j9t server's own debug mock endpoint (https://localhost:8443/...).
         // The j9t HTTPS cert is self-signed; the system CA bundle doesn't
         // trust it, so curl returns CURLE_SSL_PEER_CERTIFICATE.  Disable
-        // verification for localhost ONLY, in debug builds ONLY — production
-        // paths and non-localhost URLs still verify.
+        // verification for localhost ONLY, in debug builds ONLY.
+        //
+        // This whole block is compiled out of Release (premake defines DEBUG
+        // only for the Debug configuration; Release defines NDEBUG), so it can
+        // NOT reach a shipped binary.  Every exercise is logged at SECURITY
+        // WARN so a debug build that disables TLS verification is never silent
+        // and is greppable in log/log.txt.
         std::string const host = ExtractHostFromUrl(req.m_Url);
         if (host == "localhost" || host == "127.0.0.1" || host == "::1")
         {
             curl_easy_setopt(easy, CURLOPT_SSL_VERIFYPEER, 0L);
             curl_easy_setopt(easy, CURLOPT_SSL_VERIFYHOST, 0L);
+            LOG_SECURITY_WARN("[security] debug_localhost_tls_verification_disabled host='{}' url='{}' "
+                              "(DEBUG build only — never reaches Release)",
+                              host, req.m_Url);
         }
 #endif
 
@@ -345,9 +389,10 @@ namespace AIAssistant
         int code = QueryErrorCode::CurlNotInitialized;
         switch (setupErrorKind)
         {
-            case SetupError::CurlInit:    code = QueryErrorCode::CurlNotInitialized; break;
-            case SetupError::AuthSigner:  code = QueryErrorCode::NoApiKey;           break;
-            case SetupError::None:        // unreachable when easy == nullptr
+            case SetupError::CurlInit:        code = QueryErrorCode::CurlNotInitialized; break;
+            case SetupError::AuthSigner:      code = QueryErrorCode::NoApiKey;           break;
+            case SetupError::MalformedHeader: code = QueryErrorCode::InvalidQueryData;   break;
+            case SetupError::None:            // unreachable when easy == nullptr
                 break;
         }
 

@@ -81,9 +81,9 @@ modules:
       - find /app/share/jarvisagent/scripts -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
       - chmod +x /app/share/jarvisagent/scripts/*.sh
 
-      # Example workflows (curated list — no subdirs, no build artifacts)
+      # Example workflows (curated set — single source: packaging/curated-workflows.txt)
       - mkdir -p /app/share/jarvisagent/example-workflows
-      - for jcwf in aiCarMaintenancePipeline aiZipDemo make-example portfolioDividendAnalysis; do cp example/workflows/${jcwf}.jcwf /app/share/jarvisagent/example-workflows/ 2>/dev/null || true; done
+      - grep -E '^[a-zA-Z]' packaging/curated-workflows.txt | while read -r jcwf; do cp example/workflows/${jcwf}.jcwf /app/share/jarvisagent/example-workflows/ 2>/dev/null || true; done
       # Loose input files are now bundled inside the .jcwf zip containers.
 
       # Example config

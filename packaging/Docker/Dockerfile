@@ -150,26 +150,16 @@ COPY --from=editor-builder /ui/dist /opt/jarvisagent/workflow-editor/ui/dist
 # Scripts
 COPY scripts /opt/jarvisagent/scripts
 
-# Curated example workflows for first-run seeding.
-# All input files are bundled inside each .jcwf zip — no loose files to copy.
+# Curated example workflows for first-run seeding — the SAME set every package
+# ships.  Dockerfile COPY can't read a file, so these rows are kept in sync by
+# hand with the single source of truth at packaging/curated-workflows.txt.
+# (All input files are bundled inside each .jcwf zip — no loose files to copy.)
 RUN mkdir -p /opt/jarvisagent/.image-defaults/workflows
 COPY example/workflows/aiCarMaintenancePipeline.jcwf \
      example/workflows/aiZipDemo.jcwf \
      example/workflows/make-example.jcwf \
-     example/workflows/make-example-subwf.jcwf \
      example/workflows/portfolioDividendAnalysis.jcwf \
      example/workflows/vehicleTroubleshootingGuide.jcwf \
-     example/workflows/bookSummaryPipeline.jcwf \
-     example/workflows/hamburg-tourist-day-planner.jcwf \
-     example/workflows/exampleMakefile4.jcwf \
-     example/workflows/exampleMakefile5.jcwf \
-     example/workflows/goKartComplianceCheck.jcwf \
-     example/workflows/s3UploadDownloadDemo.jcwf \
-     example/workflows/postgresDemo.jcwf \
-     example/workflows/emailDemo.jcwf \
-     example/workflows/gitHubIssueDemo.jcwf \
-     example/workflows/azureBlobDemo.jcwf \
-     example/workflows/gcsDemo.jcwf \
      /opt/jarvisagent/.image-defaults/workflows/
 
 # Default config for first-run seeding.

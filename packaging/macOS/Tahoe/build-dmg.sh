@@ -90,12 +90,12 @@ cp -r "$REPO_ROOT/scripts" "$SHARE/scripts"
 find "$SHARE/scripts" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 chmod +x "$SHARE/scripts/"*.sh
 
-# Example workflows (curated list — no subdirs, no build artifacts)
+# Example workflows (curated set — single source: packaging/curated-workflows.txt)
 mkdir -p "$SHARE/example-workflows"
-for jcwf in aiCarMaintenancePipeline aiZipDemo \
-            make-example portfolioDividendAnalysis; do
+while IFS= read -r jcwf; do
+    case "$jcwf" in ''|\#*) continue;; esac
     cp "$REPO_ROOT/example/workflows/${jcwf}.jcwf" "$SHARE/example-workflows/" 2>/dev/null || true
-done
+done < "$REPO_ROOT/packaging/curated-workflows.txt"
 # (Input files are bundled inside each .jcwf zip — no loose files to copy)
 
 # Example config

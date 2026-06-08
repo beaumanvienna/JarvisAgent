@@ -17,7 +17,13 @@ body {
   justify-content: space-between;
   align-items: center;
   padding: 12px 20px;
-  background: rgba(255, 255, 255, 0.03);
+  /* Pin the header (LEDs + run counters) so the summary stays visible when a
+     long active-run list scrolls the page.  Opaque base layered under the
+     translucent tint so scrolled content doesn't bleed through. */
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: linear-gradient(rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.03)), #0b0f14;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
 
@@ -114,6 +120,24 @@ body {
 .btn-run:disabled {
   opacity: 0.35;
   cursor: not-allowed;
+}
+
+.btn-cancel {
+  border-color: rgba(239, 68, 68, 0.45);
+  color: #fca5a5;
+}
+
+.btn-cancel:hover {
+  background: rgba(239, 68, 68, 0.12);
+}
+
+.btn-star {
+  border-color: rgba(234, 179, 8, 0.4);
+  color: #fde68a;
+}
+
+.btn-star:hover {
+  background: rgba(234, 179, 8, 0.1);
 }
 
 /* ---- Main content ---- */

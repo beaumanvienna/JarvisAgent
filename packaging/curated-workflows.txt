@@ -1,0 +1,15 @@
+# Curated example workflows — single source of truth for every package.
+#
+# One workflow stem per line (no .jcwf extension), resolved against
+# example/workflows/<stem>.jcwf.  Every packaging script reads THIS file
+# instead of hand-copying the list, so the bundled set can't drift between
+# platforms.  Lines starting with '#' and blank lines are ignored.
+#
+# Shell readers:   while read -r w; do [ -z "$w" ] && continue; case "$w" in \#*) continue;; esac; ...; done < packaging/curated-workflows.txt
+# (Docker's static COPY can't read this file, so its Dockerfile mirrors the same
+#  set by hand — keep the two in sync when this list changes.)
+aiCarMaintenancePipeline
+aiZipDemo
+make-example
+portfolioDividendAnalysis
+vehicleTroubleshootingGuide

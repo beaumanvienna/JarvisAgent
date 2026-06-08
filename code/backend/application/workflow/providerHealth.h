@@ -61,6 +61,13 @@ namespace AIAssistant
         int m_MaxCap{-1};                   // controller's hardCap (config rate_limit.max_concurrency)
         int m_FloorCap{1};                  // AIMD floor (always 1 today)
 
+        // Wall-clock (Unix ms) of the most recent actual 429 for this interface's
+        // controller; 0 == never throttled.  The honest "is this provider rate-
+        // limiting us right now" signal — distinct from `m_CurrentCap < m_MaxCap`,
+        // which is just AIMD ramping below the ceiling.  The dashboard's amber
+        // "throttled" LED keys on this, not on the cap.
+        int64_t m_Last429AtMs{0};
+
         // Per-interface last-error state from AiRequestPool.  m_LastErrorAt
         // defaults to time_point{} (epoch); a UI consumer should check
         // `m_ConsecutiveErrors > 0` or compare against epoch rather than

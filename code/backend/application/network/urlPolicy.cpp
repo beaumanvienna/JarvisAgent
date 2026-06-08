@@ -52,6 +52,20 @@ namespace AIAssistant::UrlPolicy
         // 8 KB getaddrinfo input cap typical on POSIX.
         constexpr std::size_t kMaxUrlBytes = 2048;
 
+        // Cap a host string before it is embedded in an error / log detail.
+        // The host derives from an externally-supplied URL (up to kMaxUrlBytes);
+        // echoing it unbounded would let a hostile interface URL bloat log
+        // lines and error responses.  256 is well above any real hostname.
+        std::string CapForLog(std::string const& host)
+        {
+            constexpr std::size_t kMaxHostLogBytes = 256;
+            if (host.size() <= kMaxHostLogBytes)
+            {
+                return host;
+            }
+            return host.substr(0, kMaxHostLogBytes) + "…(truncated)";
+        }
+
         // IPv4 loopback = 127.0.0.0/8.
         bool IsIp4Loopback(std::uint32_t ip4HostOrder) noexcept
         {
@@ -245,6 +259,9 @@ namespace AIAssistant::UrlPolicy
                 UrlPolicyErrorCode::MalformedUrl,
                 "url has empty host"));
         }
+        // Bounded copy for any error/log detail below (the raw `host` is still
+        // used verbatim for getaddrinfo).
+        std::string const hostForLog = CapForLog(host);
 
         // DNS resolve + per-address loopback check.  Allowlist posture: every
         // resolved address MUST be loopback or the URL is rejected.  Closes
@@ -266,7 +283,7 @@ namespace AIAssistant::UrlPolicy
             if (results != nullptr) { ::freeaddrinfo(results); }
             return std::unexpected(UrlPolicyError::Make(
                 UrlPolicyErrorCode::UnresolvedHost,
-                std::string("DNS resolution failed for host '") + host + "': " + gaiMessage));
+                std::string("DNS resolution failed for host '") + hostForLog + "': " + gaiMessage));
         }
 
         for (struct addrinfo* it = results; it != nullptr; it = it->ai_next)
@@ -282,7 +299,7 @@ namespace AIAssistant::UrlPolicy
                     ::freeaddrinfo(results);
                     return std::unexpected(UrlPolicyError::Make(
                         UrlPolicyErrorCode::NonLoopbackHttp,
-                        std::string("plain http:// host '") + host +
+                        std::string("plain http:// host '") + hostForLog +
                         "' resolves to non-loopback address " + buf +
                         " — http:// is loopback-only"));
                 }
@@ -297,7 +314,7 @@ namespace AIAssistant::UrlPolicy
                     ::freeaddrinfo(results);
                     return std::unexpected(UrlPolicyError::Make(
                         UrlPolicyErrorCode::NonLoopbackHttp,
-                        std::string("plain http:// host '") + host +
+                        std::string("plain http:// host '") + hostForLog +
                         "' resolves to non-loopback IPv6 " + buf +
                         " — http:// is loopback-only"));
                 }
@@ -311,7 +328,7 @@ namespace AIAssistant::UrlPolicy
                 ::freeaddrinfo(results);
                 return std::unexpected(UrlPolicyError::Make(
                     UrlPolicyErrorCode::NonLoopbackHttp,
-                    std::string("plain http:// host '") + host +
+                    std::string("plain http:// host '") + hostForLog +
                     "' resolved to unsupported address family"));
             }
         }

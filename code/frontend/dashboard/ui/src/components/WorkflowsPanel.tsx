@@ -6,7 +6,7 @@ import type {
   ProviderAlertEntry,
   ProviderErrorCategory,
 } from "../types";
-import { reloadWorkflows, runWorkflow } from "../api";
+import { cancelRun, reloadWorkflows, runWorkflow } from "../api";
 
 interface Props {
   workflows: WorkflowEntry[];
@@ -144,6 +144,15 @@ export default function WorkflowsPanel({
   const handleRun = async (id: string) => {
     try {
       await runWorkflow(id);
+      onRefresh();
+    } catch {
+      // silent
+    }
+  };
+
+  const handleCancel = async (runId: string) => {
+    try {
+      await cancelRun(runId);
       onRefresh();
     } catch {
       // silent
@@ -325,14 +334,27 @@ export default function WorkflowsPanel({
                   </td>
                   <td>
                     {canRunWorkflows && wf.manual_start && (
-                      <button
-                        className="btn btn-small btn-run"
-                        onClick={() => handleRun(wf.id)}
-                        disabled={isRunning || missingKeys}
-                        title={missingKeys ? "AI provider keys not configured" : undefined}
-                      >
-                        Run
-                      </button>
+                      activeRun && isRunning ? (
+                        // While a run is in flight, the same control cancels it
+                        // (wired to POST /api/workflow-runs/<runId>/cancel) so an
+                        // inadvertently-started JCWF can be stopped from here.
+                        <button
+                          className="btn btn-small btn-cancel"
+                          onClick={() => handleCancel(activeRun.runId)}
+                          title="Cancel the active run"
+                        >
+                          Cancel
+                        </button>
+                      ) : (
+                        <button
+                          className="btn btn-small btn-run"
+                          onClick={() => handleRun(wf.id)}
+                          disabled={isRunning || missingKeys}
+                          title={missingKeys ? "AI provider keys not configured" : undefined}
+                        >
+                          Run
+                        </button>
+                      )
                     )}
                   </td>
                 </tr>

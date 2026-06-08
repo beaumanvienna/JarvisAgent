@@ -9,10 +9,12 @@ The two scope-specific live files (`code/backend/application/workflow/doc/todo.m
 
 **See also:**
 - `doc/misc/hand-off.md` — session hand-off log; read latest entry first when picking up.
-- `doc/misc/pre-1_0_follow-ups.md` — 14-sitting closeout plan for everything below except the five "Pre-1.0" non-engineering items.
-- `doc/misc/cybersec-hardening-dev-plan.md` — §18 plan (4-domain split, 4 sessions combined with §19).
-- `doc/misc/cpp-safety-hardening-dev-plan.md` — §19 plan (Rust-emulating C++ defaults).
 - `doc/misc/AI call performance optimization.md` — §5g design reference (refactor complete).
+
+**Completed plans (historical — kept for the record, not open work):**
+- ~~`doc/misc/pre-1_0_follow-ups.md`~~ — DONE: Sittings 1–15 closed (2026-05-18 → 2026-05-24), Sitting 13 cancelled; only the Sitting-16 incidental-findings basket was ever a catch-all.
+- ~~`doc/misc/cybersec-hardening-dev-plan.md` (§18)~~ — DONE: S1–S5, 2026-04-28 → 2026-05-12, ~93% of CRITs closed.
+- ~~`doc/misc/cpp-safety-hardening-dev-plan.md` (§19)~~ — DONE: executed alongside §18; SanitizeUtf8 gap closed via Foundation Sitting 3.
 
 ---
 
@@ -32,25 +34,25 @@ Drive a real conversation through the assistant chat surface: multi-turn tool-us
 
 ### Security findings — address at keystore-refactor close-out
 Surfaced by the cyber-sec audit once the recently-added files entered its scope; none are in the refactor's own new code (the two MEDIUMs there — `ApiInterfaceManager` interface-count cap + `EncryptedJsonStore` read TOCTOU — are already fixed).  CRITICAL first.
-- **[CRITICAL] `jcwfContainer` zip extraction** — (1) path traversal via symlink race (TOCTOU between the validation and extraction passes) in `Extract`; (2) `ReadFile` does not validate `internalPath`, allowing arbitrary zip-entry access.  Confine every entry under the destination root (reject `..` / absolute / symlink-escape), re-check on the actual extracted fd, and bound `mz_zip_reader_extract_file_to_heap`.
-- **[HIGH] `urlPolicy::ValidateAiInterfaceUrl` DNS rebinding** — validation resolves loopback but libcurl re-resolves at connect.  For plain `http://`, allow only literal `127.0.0.1` / `[::1]` (no DNS), or pin the validated address into the dispatch via `CURLOPT_RESOLVE` / socket-open re-check.
-- **[HIGH] `liveTransport` DEBUG TLS bypass** — the `#ifdef DEBUG` localhost `SSL_VERIFYPEER/HOST=0` block: confirm it cannot reach a shipped binary; gate behind an explicit runtime test-only flag with a per-exercise WARN, or drop it for a per-test CA bundle.
-- **[HIGH] host/header values echoed unbounded** — cap the host string in `urlPolicy` error/log details (~256 chars) and verify `liveTransport` `publicHeaders` values can't carry CR/LF.
+- ~~**[CRITICAL] `jcwfContainer` zip extraction**~~ — done: write-time half of the Zip-Slip defence (`EnsureSafeDirs` refuses a symlink ancestor; `AtomicWriteFile` tmp+rename replaces a symlink destination rather than following it; post-write canonical containment net), zip-bomb caps (per-entry / total uncompressed, entry count), encrypted-entry reject, empty-canonical-root fail-closed; `ReadFile` validates `internalPath` + bounds the entry size before `extract_to_heap`.  E2e: `test/security/test_jcwf_zip_slip.py` (16/16).
+- ~~**[HIGH] `urlPolicy::ValidateAiInterfaceUrl` DNS rebinding**~~ — done: connect-time `CURLOPT_OPENSOCKETFUNCTION` loopback re-check (`loopbackGuard.{h,cpp}` — inverse of ConnectorHttp's `OpensocketStrictCallback`) installed on every plain-`http://` AI dispatch (async `LiveTransport` + sync `CurlWrapper::Query`), aborting any non-loopback resolved peer; counter `ai_dispatch_nonloopback_http_rejections` in debug_signals.
+- ~~**[HIGH] `liveTransport` DEBUG TLS bypass**~~ — done: confirmed compile-isolated (premake defines `DEBUG` for Debug only / `NDEBUG` for Release → cannot reach a shipped binary); added a per-exercise `LOG_SECURITY_WARN` so a debug build that disables localhost TLS verification is never silent.
+- ~~**[HIGH] host/header values echoed unbounded**~~ — done: `urlPolicy` caps the host in error/log details at 256 chars (`CapForLog`); `liveTransport` rejects any `publicHeaders`/auth header carrying CR/LF at the slist-append boundary (fail-closed, ERROR + cancelKey).
 
 ### Whole-system threat & hazard analysis (not file-by-file)
 The per-compilation-unit cyber-sec audit (`jarvisCppCyberSecAudit`) reviews each `.h`/`.cpp` in isolation, so it cannot surface emergent / architectural / data-at-rest issues — it never flagged that `connections.json` held plaintext endpoint URLs + credential references on disk, because no single file's review sees the aggregate at-rest exposure (the cyber-sec write-up also treated it as benign runtime data).  Add a **system-level pass**: a data-flow + trust-boundary + data-at-rest inventory (STRIDE-style) enumerating every sensitive datum, where it lives at rest and in what form, and which trust boundaries it crosses.  Likely a new audit JCWF mode fed `doc/architecture.md` + the connection/keystore inventory rather than per-file source.  Acceptance: such a pass would have flagged `connections.json` (and any future plaintext secret store) up front.
 
-### [DOC GAP, pre-1.0] User manual has no "Cloud Connections" section
-Found dogfooding as a new user (2026-06-06): `doc/jarvisagent.md` has an `AI SETUP` section but **no parallel `CLOUD CONNECTIONS` section** — a new user has nowhere in the manual to learn how to add a cloud connection (Connections tab, connector types, the OAuth consent flow, master-password re-auth on create).  The only real walkthrough (Google Sheets) lives in `example/workflows/sheetsQuizGrader.md` (per-workflow, undiscoverable), and `doc/cloud-integration.md` (dev/architecture-oriented) isn't linked from the manual or its `SEE ALSO`.  Fix: add a `CLOUD CONNECTIONS` section to the manual (dashboard Connections tab + OAuth-PKCE flow at a user level, master-password re-auth), and add `cloud-integration.md` + the per-connector example workflows to `SEE ALSO`.
+### ~~[DOC GAP, pre-1.0] User manual has no "Cloud Connections" section~~
+DONE: added a `CLOUD CONNECTIONS` section to `doc/jarvisagent.md` (after AI SETUP) — supported-connector table, "Adding a connection" (Settings → Connections tab, master-password re-auth), the OAuth-PKCE consent flow for Google Sheets/OneDrive, and a "using a connection in a workflow" pointer to the per-connector example workflows; added `cloud-integration.md` to Contents + SEE ALSO.  Also fixed the now-stale AI-SETUP ollama example (dropped `key_name` — keyless loopback is correct; j9t rejects credentialed plain-http).
 
 ### Dashboard polish
-- **Anchor the title bar; scroll only the workflows list** — the top "N JCWFs in flight" summary scrolls away on a long active-run list.  Make the header sticky and confine the overflow scroll to the workflows-list container.
-- **"Throttled" LED is sticky — never clears** — once on it stays on.  Likely driven off a cumulative counter (`dispatcher_total_throttled`) or a one-way flag; drive it from a recent-window / decaying signal so it clears after throttling stops.  Investigate the LED's source signal first.
-- **Run button → Cancel button while running** — when a workflow's Run button is pressed it currently greys out/disables; instead turn it into a **Cancel** button so an inadvertently-started JCWF can be cancelled from the same control (wire to the existing cancel-run path).
-- **GitHub "Star" link** — add a direct link/button in the dash to star the repo on GitHub (one-click from j9t).
+- ~~**Anchor the title bar; scroll only the workflows list**~~ — done: `.status-bar` is `position: sticky` (opaque base layered under the tint) so the LED/run-counter summary stays pinned while a long list scrolls.
+- ~~**"Throttled" LED is sticky — never clears**~~ — done, two parts. (1) Root cause was a mislabel: the LED's amber condition was `current_cap < max_cap`, which fires whenever the AIMD cap sits below the configured ceiling — i.e. for any healthy interface that hasn't ramped to max, with zero actual 429s. Flipped the dashboard amber condition to key on **`last_429_at_ms`** (a real 429 within the last 60 s), surfaced per-interface on `/api/providers/health` + `dispatcher_controllers[]`. A never-throttled interface now shows green; a real throttle shows amber clearing ~60 s after the last 429. (2) Independently gave `RateLimitController` **time-based recovery** (RFC 5681 idle restart) so a 429-reduced cap recovers on elapsed wall-clock instead of freezing below the ceiling — fixes the next-burst penalty + lets `cap_recovery_eta_sec` count down. Throttle state is monitorable on the debug port (`hard_cap`, `last_429_at_ms`, `cap_recovery_eta_sec`).
+- ~~**Run button → Cancel button while running**~~ — done: while a workflow has an active run, its Run button becomes a red Cancel button wired to `POST /api/workflow-runs/<runId>/cancel`; reverts to Run when the run ends.
+- ~~**GitHub "Star" link**~~ — done: ★ Star link in the status bar (opens the repo in a new tab).
 
-### Curated example-workflow list — single source of truth + standardize to 5
-The bundled-workflow list is hand-copied into ~11 build scripts and has drifted into 5 different sets; deb (`build-deb.sh` 4 vs `debian/rules` 6) and RPM (`build-rpm.sh` 4 vs `jarvisagent.spec` 5) even contradict themselves.  Standardize **every** target (deb both paths, RPM both paths, Arch, AppImage, Flatpak, macOS DMG + Homebrew, Windows) to the same 5: `aiCarMaintenancePipeline aiZipDemo make-example portfolioDividendAnalysis vehicleTroubleshootingGuide` (core4 + vehicleTroubleshootingGuide).  Drive it from one shared source the build scripts read, not N hand-copies.  Docker currently ships a 17-set — align or document why it differs.  (Done 2026-06-06: un-pinned the OpenAI `global.json::defaults.ai.provider` on all shipped examples except `bookSummaryPipeline`, kept as the one real/copyright-bound example.)
+### ~~Curated example-workflow list — single source of truth + standardize to 5~~
+DONE: created `packaging/curated-workflows.txt` (the canonical 5: `aiCarMaintenancePipeline aiZipDemo make-example portfolioDividendAnalysis vehicleTroubleshootingGuide`); all 10 scriptable packagers now READ it instead of hand-copying (4 `build-*.sh`, Arch `PKGBUILD`, RPM `jarvisagent.spec`, `debian/rules`, Flatpak yml, Homebrew `.rb`, Windows `.ps1`) — drift (4/5/6/17 different sets) eliminated.  **Every target ships the same 5, Docker included** (its static `COPY` can't read the file, so the Dockerfile mirrors the 5 by hand with a sync note).  Read patterns + shell/ruby/yaml syntax verified on the dev box; the actual RPM/DMG/Flatpak/Windows/Arch builds run in the packaging retest.  (Earlier 2026-06-06: un-pinned OpenAI `global.json` provider on shipped examples except `bookSummaryPipeline`.)
 
 ### Packaging — final pre-beta retest (all targets)
 One full install→serve pass of every package on a clean checkout shortly before the beta announce (not per-change); confirm the served UIs load in each.  Linux dev-box targets (AppImage / Deb / Flatpak / Docker amd64) already pass, and `apt install` from the PPA round-trips (0.8.8); still to run on their own hardware: macOS DMG + arm64 Docker (miniMac), RPM (Rocky), Arch (Manjaro), Windows.
@@ -66,17 +68,9 @@ Demo / promotion video covering workflow creation in the editor, running workflo
 
 ---
 
-## Pre-1.0 follow-ups (planned)
+## Pre-1.0 follow-ups — ~~DONE~~
 
-The §5i, cloud-integration tail, and loose-follow-ups entries previously here have been consolidated into a 14-sitting dev plan: **`doc/misc/pre-1_0_follow-ups.md`**.
-
-- 21 actionable items across 14 sittings, ~11–14 working days estimated
-- Ordered safety → cleanup → verification → tooling
-- §5i.3 (bootstrap admin user collides with role) closed at intake — `mcpKeyManager.cpp:402-403` already renders `boss / admin`, no collision
-- Cloud `email_watch` entry reframed: IMAP UID check already wired; remaining gap is watermark persistence across restart (Sitting 12)
-- Editor master-password entry reframed: dialog already in editor; remaining gap is MCP login parity (Sitting 5)
-- Four KeyManager hardening items from a prior hand-off's carry-over list (audit MEDIUM/HIGH findings, never propagated here) folded in as Sitting 14
-- `RedactingFormatter::format` per-line allocation was a Loose follow-up; deferred to the plan's Post-1.0 tail (pure perf, profile-gated)
+The §5i, cloud-integration tail, and loose-follow-ups entries were consolidated into **`doc/misc/pre-1_0_follow-ups.md`** and **executed** (Sittings 1–15 closed 2026-05-18 → 2026-05-24; Sitting 13 cancelled; only the Sitting-16 incidental-findings basket was a catch-all).  `RedactingFormatter::format` per-line allocation was the one item deliberately deferred to a Post-1.0 perf tail (profile-gated).
 
 ---
 

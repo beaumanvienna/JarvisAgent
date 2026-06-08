@@ -33,6 +33,12 @@ export async function reloadWorkflows(): Promise<void> {
   await authFetch(`${BASE}/api/workflows/reload`, { method: "POST" });
 }
 
+export async function cancelRun(runId: string): Promise<void> {
+  await authFetch(`${BASE}/api/workflow-runs/${encodeURIComponent(runId)}/cancel`, {
+    method: "POST",
+  });
+}
+
 export async function fetchLastRuns(): Promise<LastRunsResponse> {
   const res = await authFetch(`${BASE}/api/workflow-runs/last`);
   return res.json();

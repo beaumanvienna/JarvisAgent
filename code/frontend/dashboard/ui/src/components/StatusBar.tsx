@@ -37,6 +37,13 @@ const RED_CATEGORIES = new Set<ProviderErrorCategory>([
   "ModelNotFound",
 ]);
 
+// Window after an actual 429 during which the interface is shown amber
+// ("throttled").  Matches the controller's idle-recovery window — the cap has
+// recovered to the ceiling by the time this lapses.  An interface is throttled
+// ONLY if its controller saw a real 429 within this window; a cap merely below
+// the ceiling (last_429_at_ms == 0) is healthy AIMD ramping, not throttling.
+const THROTTLE_RECENT_MS = 60_000;
+
 // Per-interface pin tracking — client-side safety net.  The backend's
 // cap_pinned_at_floor_since_ms (Sitting-8 close-out) is preferred when
 // non-zero; the client tracker only kicks in for the edge case where the
@@ -108,8 +115,10 @@ function aiHealthSeverity(
     if (pinAt !== undefined && nowMs - pinAt > 30_000) {
       return "red";
     }
-    // Amber: cap below ceiling but not pinned (AIMD throttling — normal recovery).
-    if (h.current_cap > 0 && h.max_cap > 0 && h.current_cap < h.max_cap) {
+    // Amber: an ACTUAL 429 within the recent window — the provider is rate-
+    // limiting us.  Keyed on the real throttle signal, NOT on cap < max_cap
+    // (which is just AIMD ramping below the ceiling and not throttling at all).
+    if (h.last_429_at_ms > 0 && nowMs - h.last_429_at_ms < THROTTLE_RECENT_MS) {
       anyAmber = true;
     }
   }
@@ -136,7 +145,10 @@ function aiHealthLabel(
     return `AI: ${redCount} unavailable`;
   }
   if (severity === "amber") {
-    const throttledCount = health.filter((h) => h.current_cap > 0 && h.max_cap > 0 && h.current_cap < h.max_cap).length;
+    const nowMs = Date.now();
+    const throttledCount = health.filter(
+      (h) => h.last_429_at_ms > 0 && nowMs - h.last_429_at_ms < THROTTLE_RECENT_MS,
+    ).length;
     return `AI: ${throttledCount} throttled`;
   }
   return "AI: healthy";
@@ -446,6 +458,15 @@ export default function StatusBar({
             Workflow Editor
           </a>
         )}
+        <a
+          href="https://github.com/beaumanvienna/JarvisAgent"
+          className="btn btn-star"
+          target="_blank"
+          rel="noopener noreferrer"
+          title="Star JarvisAgent on GitHub"
+        >
+          ★ Star
+        </a>
         <button className="btn btn-quit" onClick={onQuit}>
           Quit
         </button>

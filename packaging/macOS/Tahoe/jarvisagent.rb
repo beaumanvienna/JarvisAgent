@@ -43,12 +43,12 @@ class Jarvisagent < Formula
     prefix.install "scripts"
     rm_rf Dir[prefix/"scripts/**/__pycache__"]
 
-    # Example workflows (curated list — no subdirs, no build artifacts)
+    # Example workflows (curated set — single source: packaging/curated-workflows.txt)
     (prefix/"workflows").mkpath
-    %w[
-      aiCarMaintenancePipeline aiZipDemo
-      make-example portfolioDividendAnalysis
-    ].each { |w| (prefix/"workflows").install "example/workflows/#{w}.jcwf" }
+    File.readlines("packaging/curated-workflows.txt").map(&:strip).each do |w|
+      next if w.empty? || w.start_with?("#")
+      (prefix/"workflows").install "example/workflows/#{w}.jcwf"
+    end
     # (Input files are bundled inside each .jcwf zip — no loose files to install)
 
     # Example config

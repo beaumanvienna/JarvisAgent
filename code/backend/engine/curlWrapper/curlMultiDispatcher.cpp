@@ -265,7 +265,16 @@ namespace AIAssistant
                 DebugSnapshot::ControllerEntry e;
                 e.m_QuotaKey               = quotaKey;
                 e.m_CurrentConcurrencyCap  = controller.CurrentConcurrencyCap();
+                e.m_HardCap                = controller.HardCap();
                 e.m_StreakSinceLast429     = controller.StreakSinceLast429();
+                e.m_CapRecoveryEtaSec      = controller.CapRecoveryEtaSeconds();
+                {
+                    auto const last429 = controller.Last429At();
+                    e.m_Last429AtMs = (last429.time_since_epoch().count() == 0)
+                        ? 0
+                        : std::chrono::duration_cast<std::chrono::milliseconds>(
+                              last429.time_since_epoch()).count();
+                }
                 auto const& obs            = controller.LastObservation();
                 e.m_RemainingRequests      = obs.m_RemainingRequests;
                 int64_t mergedTok = -1;

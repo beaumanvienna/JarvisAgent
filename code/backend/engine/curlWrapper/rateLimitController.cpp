@@ -28,8 +28,50 @@ namespace AIAssistant
 {
     RateLimitController::RateLimitController(int initialConcurrencyProbe, int hardCap)
         : m_HardCap(std::max(1, hardCap)),
-          m_CurrentConcurrencyCap(std::clamp(initialConcurrencyProbe, 1, std::max(1, hardCap)))
+          m_CurrentConcurrencyCap(std::clamp(initialConcurrencyProbe, 1, std::max(1, hardCap))),
+          m_LastActivityAt(std::chrono::steady_clock::now()),
+          m_CapAtIdleStart(m_CurrentConcurrencyCap)
     {
+    }
+
+    void RateLimitController::ApplyTimeRecovery(std::chrono::steady_clock::time_point now) const
+    {
+        if (m_CurrentConcurrencyCap >= m_HardCap)
+        {
+            return;   // already at the ceiling — nothing to recover
+        }
+        auto const elapsed = now - m_LastActivityAt;
+        if (elapsed < kRecoveryInterval)
+        {
+            return;   // too recent (or actively under load) — pure AIMD
+        }
+        // Pure function of the cap as of the last Observe + elapsed idle time.
+        // The baseline (m_LastActivityAt / m_CapAtIdleStart) is NOT touched here,
+        // so repeated reads can't push the idle-restart deadline forward.
+        int const recovered =
+            (elapsed >= kIdleRestartWindow)
+                ? m_HardCap                                              // RFC 5681 idle restart
+                : std::min(m_HardCap, m_CapAtIdleStart + static_cast<int>(elapsed / kRecoveryInterval));
+        if (recovered > m_CurrentConcurrencyCap)
+        {
+            m_CurrentConcurrencyCap = recovered;
+        }
+    }
+
+    int RateLimitController::CapRecoveryEtaSeconds() const
+    {
+        auto const now = std::chrono::steady_clock::now();
+        ApplyTimeRecovery(now);
+        if (m_CurrentConcurrencyCap >= m_HardCap)
+        {
+            return 0;   // already recovered
+        }
+        auto remaining = kIdleRestartWindow - (now - m_LastActivityAt);
+        if (remaining < std::chrono::seconds(0))
+        {
+            remaining = std::chrono::seconds(0);
+        }
+        return static_cast<int>(std::chrono::duration_cast<std::chrono::seconds>(remaining).count());
     }
 
     RateLimitController::Decision RateLimitController::ShouldAdmit(int currentInflight,
@@ -39,6 +81,11 @@ namespace AIAssistant
         decision.m_Admit = true;
 
         auto const now = std::chrono::steady_clock::now();
+
+        // Lift the cap for any wall-clock elapsed since the last activity before
+        // the admission test — a burst resuming after an idle gap should see a
+        // recovered cap, not the stale reduction from a previous run.
+        ApplyTimeRecovery(now);
 
         // Hard cap (HTTP/2 stream cap or config-driven max_concurrency).  Keeps
         // us under any infrastructural ceiling regardless of AIMD growth.
@@ -141,6 +188,12 @@ namespace AIAssistant
         if (observation.m_ConsumedOutputTokens >= 0)
             m_LastObservation.m_ConsumedOutputTokens = observation.m_ConsumedOutputTokens;
 
+        // Recover for any idle gap since the last observation before applying
+        // this one — a 429 after a long quiet period should halve the *recovered*
+        // cap, not a stale reduction.
+        auto const now = std::chrono::steady_clock::now();
+        ApplyTimeRecovery(now);
+
         // AIMD update.  Multiplicative decrease on 429, additive increase
         // on streak of clean completions.  Cap floor = 1; ceiling = m_HardCap
         // (HTTP/2 stream cap or config max_concurrency).
@@ -148,6 +201,7 @@ namespace AIAssistant
         {
             m_CurrentConcurrencyCap = std::max(1, m_CurrentConcurrencyCap / 2);
             m_StreakSinceLast429 = 0;
+            m_Last429At = std::chrono::system_clock::now();   // honest "throttled" signal
         }
         else
         {
@@ -159,5 +213,11 @@ namespace AIAssistant
                     ++m_CurrentConcurrencyCap;
             }
         }
+
+        // Re-baseline recovery from this observation.  Under load Observe runs
+        // every request so elapsed stays < kRecoveryInterval (pure AIMD, no time
+        // term); once traffic stops, idle recovery climbs from this cap value.
+        m_LastActivityAt = now;
+        m_CapAtIdleStart = m_CurrentConcurrencyCap;
     }
 } // namespace AIAssistant

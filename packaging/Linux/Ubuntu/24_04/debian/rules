@@ -37,11 +37,9 @@ override_dh_auto_install:
 	find $(INSTDIR)/scripts -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 	chmod +x $(INSTDIR)/scripts/*.sh
 
-	# Example workflows
+	# Example workflows (curated set — single source: packaging/curated-workflows.txt)
 	install -dm755 $(INSTDIR)/workflows
-	for jcwf in aiCarMaintenancePipeline aiZipDemo exampleMakefile4 \
-	            make-example portfolioDividendAnalysis \
-	            vehicleTroubleshootingGuide; do \
+	grep -E '^[a-zA-Z]' packaging/curated-workflows.txt | while IFS= read -r jcwf; do \
 	    cp example/workflows/$${jcwf}.jcwf $(INSTDIR)/workflows/ 2>/dev/null || true; \
 	done
 	# Loose input files are now bundled inside the .jcwf zip containers.

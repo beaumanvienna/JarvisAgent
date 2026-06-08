@@ -68,13 +68,12 @@ cp -r scripts %{_instdir}/scripts
 find %{_instdir}/scripts -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 chmod +x %{_instdir}/scripts/*.sh
 
-# Example workflows (curated list — no subdirs, no build artifacts)
+# Example workflows (curated set — single source: packaging/curated-workflows.txt)
 install -dm755 %{_instdir}/workflows
-for jcwf in aiCarMaintenancePipeline aiZipDemo \
-            make-example portfolioDividendAnalysis \
-            vehicleTroubleshootingGuide; do
+while IFS= read -r jcwf; do
+    case "$jcwf" in ''|\#*) continue;; esac
     install -m644 "example/workflows/${jcwf}.jcwf" %{_instdir}/workflows/
-done
+done < "packaging/curated-workflows.txt"
 # (Input files are bundled inside each .jcwf zip — no loose files to install)
 
 # Example config

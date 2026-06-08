@@ -12,6 +12,7 @@
 [Configuration](#configuration) ·
 [Environment](#environment) ·
 [AI Setup](#ai-setup) ·
+[Cloud Connections](#cloud-connections) ·
 [Workflows](#workflows) ·
 [Workflow Editor](#workflow-editor) ·
 [Dashboard](#dashboard) ·
@@ -498,12 +499,56 @@ The OpenAI Responses API (GPT-5+) uses API2.
   "name": "ollama/llama3.1/API1",
   "url": "http://localhost:11434/v1/chat/completions",
   "model": "llama3.1",
-  "API": "API1",
-  "key_name": "ollama"
+  "API": "API1"
 }
 ```
 
-Register an `ollama` provider in the KeyManager with any non-empty string as the API key — Ollama itself ignores the bearer, but the j9t dispatcher requires one.
+Leave `key_name` empty — a local LLM on `http://localhost` needs no credential, and j9t **rejects** a plain-`http://` interface that carries a `key_name` (a bearer token must never travel over unencrypted transport). Keyless loopback dispatch (ollama / llama.cpp / vLLM at `http://localhost`/`127.0.0.1`) is fully supported; plain `http://` is accepted only for loopback addresses.
+
+## CLOUD CONNECTIONS
+
+Workflows can read from and write to external services — spreadsheets, issue trackers, object storage, databases, chat, email. Each integration is a named **connection** you configure once, then reference from `cloud` tasks in your workflows. Connection configs (endpoint URLs + which stored credential to use) are encrypted at rest in `connections.json.enc`, alongside the AI keys.
+
+### Supported connectors
+
+| Connector | Type | Authentication |
+|---|---|---|
+| Google Sheets | `google_sheets` | OAuth 2.0 (browser consent) |
+| OneDrive | `onedrive` | OAuth 2.0 (browser consent) |
+| Jira | `jira` | API token (Bearer) |
+| GitHub | `github` | Personal access token (Bearer) |
+| Slack | `slack` | Bot token (Bearer) |
+| Polarion | `polarion` | Personal access token (Bearer) |
+| Redmine | `redmine` | API key |
+| Amazon S3 | `s3` | Access key + secret (SigV4) |
+| Azure Blob | `azure_blob` | Shared key |
+| Google Cloud Storage | `gcs` | Service account |
+| Snowflake | `snowflake` | Key-pair / token |
+| PostgreSQL | `postgres` | Connection parameters (`sslmode`-gated) |
+| Email (IMAP/SMTP) | `email` | Username + password |
+| Generic HTTP | `http` | Bearer / none |
+
+### Adding a connection
+
+1. In the **dashboard**, open **Settings** (gear icon) and select the **Connections** tab.
+2. Click **Add connection**, choose the connector type, give it a name, and fill in the endpoint URL and the credential it should use (an entry in the KeyManager — e.g. a Jira API token or an S3 access key). For token/key connectors, add the credential under the **AI Keys** tab first, then reference it by name here.
+3. Click **Save**. Because connection configs are encrypted at rest, you are prompted for the **master password** to confirm — the same re-authentication that guards AI-key and routing changes. Create, update, and delete all require this confirmation.
+4. Use **Test** to verify connectivity before running a workflow against the connection.
+
+### OAuth connectors (Google Sheets, OneDrive)
+
+These use OAuth 2.0 with the PKCE flow — you never paste a long-lived secret; you grant access in your browser instead:
+
+1. Add the connection (above), supplying the OAuth **client ID** (and client secret where the provider requires one) from your Google Cloud / Azure app registration.
+2. Click **Connect** / **Authorize**. j9t opens the provider's consent screen in your browser.
+3. Approve the requested scopes. The provider redirects back to j9t, which exchanges the authorization code for access + refresh tokens and stores them encrypted in the key store.
+4. j9t refreshes the access token automatically in the background; you only re-consent if you revoke access or the refresh token expires.
+
+A full worked example — read a Google Sheet, grade each row with a local LLM, write the grades back — is in `example/workflows/sheetsQuizGrader.md`.
+
+### Using a connection in a workflow
+
+A `cloud` task names the connection plus an operation (read / write / query / upload / download, depending on the connector). For the task syntax and one runnable demo per connector, see the per-connector example workflows (`sheetsQuizGrader`, `oneDriveUploadDownloadDemo`, `jiraIssueDemo`, `gitHubIssueDemo`, `slackQAndABot`, `s3UploadDownloadDemo`, `azureBlobDemo`, `gcsDemo`, `snowflakeQueryDemo`, `postgresDemo`, `emailDemo`, `redmineTriageBot`) and `doc/cloud-integration.md`.
 
 ## WORKFLOWS
 
@@ -640,6 +685,7 @@ For the complete security model, threat analysis, and operator responsibilities,
 - **Project README** — [README.md](https://github.com/beaumanvienna/JarvisAgent/blob/main/README.md)
 - **Packaging and installation** — [packaging/packaging.md](https://github.com/beaumanvienna/JarvisAgent/blob/main/packaging/packaging.md)
 - **JC Workflow Specification** — [doc/JC_Workflow_Specification.md](https://github.com/beaumanvienna/JarvisAgent/blob/main/doc/JC_Workflow_Specification.md)
+- **Cloud integration (connectors, OAuth, task syntax)** — [doc/cloud-integration.md](https://github.com/beaumanvienna/JarvisAgent/blob/main/doc/cloud-integration.md)
 - **REST API reference** — [doc/api-endpoints.md](https://github.com/beaumanvienna/JarvisAgent/blob/main/doc/api-endpoints.md)
 - **Cyber security model** — [doc/cyber security.md](https://github.com/beaumanvienna/JarvisAgent/blob/main/doc/cyber%20security.md)
 - **Key management internals** — [code/backend/engine/keys.md](https://github.com/beaumanvienna/JarvisAgent/blob/main/engine/keys.md)

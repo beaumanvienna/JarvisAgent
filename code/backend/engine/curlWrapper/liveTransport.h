@@ -64,8 +64,9 @@ namespace AIAssistant
         enum class SetupError
         {
             None,
-            CurlInit,    // curl_easy_init() returned NULL
-            AuthSigner,  // IAuthSigner::Apply rejected the request
+            CurlInit,        // curl_easy_init() returned NULL
+            AuthSigner,      // IAuthSigner::Apply rejected the request
+            MalformedHeader, // a request header carried a CR/LF (injection guard)
         };
 
         // All data kept alive for the duration of one in-flight easy handle.

@@ -1999,7 +1999,8 @@ namespace AIAssistant
             auto const ctrlIt = controllerByKey.find(snap.m_QuotaKey);
             if (ctrlIt != controllerByKey.end())
             {
-                snap.m_CurrentCap = ctrlIt->second.m_CurrentConcurrencyCap;
+                snap.m_CurrentCap   = ctrlIt->second.m_CurrentConcurrencyCap;
+                snap.m_Last429AtMs  = ctrlIt->second.m_Last429AtMs;
             }
 
             result.push_back(std::move(snap));

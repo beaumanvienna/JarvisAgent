@@ -101,12 +101,10 @@ Copy-Item -Recurse "$RepoRoot\scripts" "$StageDir\scripts"
 Get-ChildItem -Path "$StageDir\scripts" -Recurse -Directory -Filter "__pycache__" |
     Remove-Item -Recurse -Force
 
-# Example workflows (curated list — no subdirs, no build artifacts)
+# Example workflows (curated set — single source: packaging/curated-workflows.txt)
 New-Item -ItemType Directory -Force -Path "$StageDir\workflows" | Out-Null
-$jcwfFiles = @(
-    "aiCarMaintenancePipeline", "aiZipDemo",
-    "make-example", "portfolioDividendAnalysis"
-)
+$jcwfFiles = Get-Content "$RepoRoot\packaging\curated-workflows.txt" |
+    Where-Object { $_ -match '^[A-Za-z]' }
 foreach ($jcwf in $jcwfFiles) {
     $src = "$RepoRoot\example\workflows\$jcwf.jcwf"
     if (Test-Path $src) { Copy-Item $src "$StageDir\workflows\" }

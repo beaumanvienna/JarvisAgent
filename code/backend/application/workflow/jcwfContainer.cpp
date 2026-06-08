@@ -24,9 +24,9 @@
 #include "jcwfContainer.h"
 
 #include <algorithm>
-#include <fstream>
 #include <string_view>
 
+#include "auxiliary/file.h"
 #include "engine.h"
 #include "miniz.h"
 
@@ -34,6 +34,13 @@ namespace AIAssistant
 {
     namespace
     {
+        // Zip-bomb guards.  A .jcwf holds DAG/metadata JSON (the largest entry
+        // across every shipped container is under 1 MiB); these caps sit far
+        // above real usage but bound the heap a hostile archive can force us to
+        // allocate — a tiny zip can otherwise decompress to gigabytes.
+        constexpr mz_uint64 kMaxEntryUncompressedBytes = 128ull * 1024 * 1024; // 128 MiB / entry
+        constexpr mz_uint64 kMaxTotalUncompressedBytes = 512ull * 1024 * 1024; // 512 MiB / archive
+        constexpr mz_uint   kMaxEntryCount             = 8192;
         // The high 16 bits of the central-directory `external file attributes`
         // word hold the Unix mode bits when the zip was authored on Unix.  The
         // S_IFMT field occupies the top 4 of those 16 (so bits 28..31 of the
@@ -103,6 +110,45 @@ namespace AIAssistant
                 return "resolves outside target directory";
             return {};
         }
+
+        // Create `dirToEnsure` and every directory component between `rootReal`
+        // (an existing, canonical, real directory) and it — one component at a
+        // time — rejecting any existing component that is a symlink.  This is
+        // the write-time half of the Zip-Slip defence: the upfront validation
+        // pass proves the *archive* is benign, but a concurrent process can
+        // plant a symlink into the extraction tree between validation and the
+        // write (the symlink-race TOCTOU).  Walking + refusing a symlink
+        // ancestor here means no write can be redirected out of the tree
+        // through an ancestor link.  Returns empty on success, a short reason
+        // otherwise.
+        std::string EnsureSafeDirs(std::filesystem::path const& rootReal,
+                                   std::filesystem::path const& dirToEnsure)
+        {
+            std::filesystem::path const rel = dirToEnsure.lexically_relative(rootReal);
+            std::filesystem::path current = rootReal;
+            for (auto const& comp : rel)
+            {
+                if (comp.empty() || comp == ".")
+                    continue;
+                if (comp == "..")
+                    return "directory path escapes target root";
+                current /= comp;
+
+                std::error_code ec;
+                std::filesystem::file_status const st = std::filesystem::symlink_status(current, ec);
+                if (std::filesystem::is_symlink(st))
+                    return "ancestor '" + comp.string() + "' is a symlink";
+                if (std::filesystem::exists(st))
+                {
+                    if (!std::filesystem::is_directory(st))
+                        return "ancestor '" + comp.string() + "' exists and is not a directory";
+                    continue; // real directory — descend into it
+                }
+                if (!std::filesystem::create_directory(current, ec) && ec)
+                    return "failed to create directory component '" + comp.string() + "': " + ec.message();
+            }
+            return {};
+        }
     } // namespace
 
     bool JcwfContainer::Extract(std::filesystem::path const& jcwfPath, std::filesystem::path const& targetDir,
@@ -128,13 +174,35 @@ namespace AIAssistant
         std::filesystem::path const absTargetDir = std::filesystem::absolute(targetDir, canonEc);
         std::filesystem::path const canonicalTargetDir =
             std::filesystem::weakly_canonical(absTargetDir, canonEc);
+        // An empty canonical root makes the std::mismatch containment check
+        // below trivially pass (every path "starts with" the empty prefix), so
+        // a resolution failure here must fail-closed, not silently disarm the
+        // Zip-Slip defence.
+        if (canonEc || canonicalTargetDir.empty())
+        {
+            mz_zip_reader_end(&zip);
+            errorMessage = "Failed to resolve target directory for " + containerName;
+            LOG_APP_ERROR("[jcwf] Extract: target dir resolution failed container='{}' path='{}' ec={}",
+                          containerName, targetDir.string(), canonEc.message());
+            return false;
+        }
 
         mz_uint const numFiles = mz_zip_reader_get_num_files(&zip);
+
+        if (numFiles > kMaxEntryCount)
+        {
+            mz_zip_reader_end(&zip);
+            errorMessage = "Too many entries (" + std::to_string(numFiles) + ") in " + containerName;
+            LOG_APP_ERROR("[jcwf] Extract: rejected over-count container='{}' entries={} cap={}",
+                          containerName, numFiles, kMaxEntryCount);
+            return false;
+        }
 
         // ---- Validation pass: NO disk I/O.  Every entry is checked before
         // any byte is written.  A single hostile entry aborts the whole
         // extraction (fail-closed); partial-state on disk is the wrong
         // failure mode for a Zip-Slip defence.
+        mz_uint64 totalUncompressed = 0;
         for (mz_uint i = 0; i < numFiles; ++i)
         {
             mz_zip_archive_file_stat stat;
@@ -147,6 +215,38 @@ namespace AIAssistant
             }
 
             std::string_view const name(stat.m_filename);
+
+            if (stat.m_is_encrypted)
+            {
+                mz_zip_reader_end(&zip);
+                errorMessage = "Rejected encrypted entry '" + std::string(name) + "' in " + containerName;
+                LOG_APP_ERROR("[jcwf] Extract: rejected encrypted entry container='{}' entry='{}'",
+                              containerName, std::string(name));
+                return false;
+            }
+
+            if (!stat.m_is_directory)
+            {
+                if (stat.m_uncomp_size > kMaxEntryUncompressedBytes)
+                {
+                    mz_zip_reader_end(&zip);
+                    errorMessage = "Entry '" + std::string(name) + "' exceeds size cap in " + containerName;
+                    LOG_APP_ERROR("[jcwf] Extract: rejected oversized entry container='{}' entry='{}' "
+                                  "uncomp={} cap={}",
+                                  containerName, std::string(name), stat.m_uncomp_size,
+                                  kMaxEntryUncompressedBytes);
+                    return false;
+                }
+                totalUncompressed += stat.m_uncomp_size;
+                if (totalUncompressed > kMaxTotalUncompressedBytes)
+                {
+                    mz_zip_reader_end(&zip);
+                    errorMessage = "Total uncompressed size exceeds cap in " + containerName;
+                    LOG_APP_ERROR("[jcwf] Extract: rejected over-total container='{}' total={} cap={}",
+                                  containerName, totalUncompressed, kMaxTotalUncompressedBytes);
+                    return false;
+                }
+            }
 
             if (std::string const reason = ValidateEntryName(name); !reason.empty())
             {
@@ -179,7 +279,15 @@ namespace AIAssistant
             }
         }
 
-        // ---- Extraction pass: every entry has been validated above.
+        // ---- Extraction pass: every entry has been validated above; what
+        // remains are the write-time, filesystem-side checks the validation
+        // pass structurally cannot make (it does no I/O).  A symlink planted
+        // into the extraction tree by a concurrent process *after* validation
+        // is defended here: EnsureSafeDirs refuses to descend through a symlink
+        // ancestor, the write goes through AtomicWriteFile (tmp-file + rename,
+        // which replaces a symlink at the destination rather than following
+        // it), and a post-write canonical re-check fails the whole extraction
+        // closed if anything still resolved out of the tree.
         std::error_code ec;
         std::filesystem::create_directories(targetDir, ec);
         if (ec)
@@ -192,32 +300,106 @@ namespace AIAssistant
             return false;
         }
 
+        // Resolve the *real* (existing) root now that it's on disk, so the
+        // per-component walk and containment net compare against the resolved
+        // directory rather than the pre-creation weakly_canonical form.
+        std::filesystem::path const realTargetDir = std::filesystem::canonical(targetDir, ec);
+        if (ec || realTargetDir.empty())
+        {
+            mz_zip_reader_end(&zip);
+            errorMessage = "Failed to resolve extraction directory for " + containerName;
+            LOG_APP_ERROR("[jcwf] Extract: canonical(targetDir) failed container='{}' path='{}' ec={}",
+                          containerName, targetDir.string(), ec.message());
+            return false;
+        }
+
         for (mz_uint i = 0; i < numFiles; ++i)
         {
-            char filename[MZ_ZIP_MAX_ARCHIVE_FILENAME_SIZE];
-            mz_zip_reader_get_filename(&zip, i, filename, sizeof(filename));
-
-            std::filesystem::path const destPath = targetDir / filename;
-
-            if (mz_zip_reader_is_file_a_directory(&zip, i))
+            mz_zip_archive_file_stat stat;
+            if (!mz_zip_reader_file_stat(&zip, i, &stat))
             {
-                std::filesystem::create_directories(destPath, ec);
+                mz_zip_reader_end(&zip);
+                errorMessage = "Failed to stat entry #" + std::to_string(i) + " in " + containerName;
+                LOG_APP_ERROR("[jcwf] Extract: stat failed (write pass) container='{}' index={}", containerName, i);
+                return false;
+            }
+
+            std::string const entryName(stat.m_filename);
+            std::filesystem::path const destPath = realTargetDir / std::filesystem::path(entryName);
+
+            if (stat.m_is_directory)
+            {
+                if (std::string const reason = EnsureSafeDirs(realTargetDir, destPath); !reason.empty())
+                {
+                    mz_zip_reader_end(&zip);
+                    errorMessage = "Failed to create dir entry '" + entryName + "' in " + containerName + ": " + reason;
+                    LOG_APP_ERROR("[jcwf] Extract: unsafe dir entry container='{}' entry='{}' reason='{}'",
+                                  containerName, entryName, reason);
+                    return false;
+                }
                 continue;
             }
 
-            // Ensure parent directory exists.
-            std::filesystem::path const parentDir = destPath.parent_path();
-            if (!parentDir.empty())
-            {
-                std::filesystem::create_directories(parentDir, ec);
-            }
-
-            if (!mz_zip_reader_extract_to_file(&zip, i, destPath.string().c_str(), 0))
+            // Create the parent chain safely (rejects a symlink ancestor).
+            if (std::string const reason = EnsureSafeDirs(realTargetDir, destPath.parent_path()); !reason.empty())
             {
                 mz_zip_reader_end(&zip);
-                errorMessage = "Failed to extract '" + std::string(filename) + "' from " + containerName;
-                LOG_APP_ERROR("[jcwf] Extract: failed to write container='{}' entry='{}'",
-                              containerName, std::string(filename));
+                errorMessage = "Failed to create parent of '" + entryName + "' in " + containerName + ": " + reason;
+                LOG_APP_ERROR("[jcwf] Extract: unsafe parent container='{}' entry='{}' reason='{}'",
+                              containerName, entryName, reason);
+                return false;
+            }
+
+            // Refuse to write onto a symlink at the destination itself.
+            if (std::filesystem::is_symlink(std::filesystem::symlink_status(destPath, ec)))
+            {
+                mz_zip_reader_end(&zip);
+                errorMessage = "Rejected symlink destination for '" + entryName + "' in " + containerName;
+                LOG_APP_ERROR("[jcwf] Extract: destination is a symlink container='{}' entry='{}'",
+                              containerName, entryName);
+                return false;
+            }
+
+            // Decompress into a bounded heap buffer (size cap proven above),
+            // then write via the atomic helper.  extract_to_heap is safe to
+            // call by index without re-running the name lookup.
+            size_t size = 0;
+            void* data = mz_zip_reader_extract_to_heap(&zip, i, &size, 0);
+            if (data == nullptr)
+            {
+                mz_zip_reader_end(&zip);
+                errorMessage = "Failed to extract '" + entryName + "' from " + containerName;
+                LOG_APP_ERROR("[jcwf] Extract: heap extract failed container='{}' entry='{}'",
+                              containerName, entryName);
+                return false;
+            }
+
+            std::string writeError;
+            bool const wrote = EngineCore::AtomicWriteFile(
+                destPath, std::string_view(static_cast<char const*>(data), size), writeError);
+            mz_free(data);
+            if (!wrote)
+            {
+                mz_zip_reader_end(&zip);
+                errorMessage = "Failed to write '" + entryName + "' from " + containerName + ": " + writeError;
+                LOG_APP_ERROR("[jcwf] Extract: failed to write container='{}' entry='{}': {}",
+                              containerName, entryName, writeError);
+                return false;
+            }
+
+            // Final safety net: the freshly-written file must still resolve
+            // under the real root.  If a symlink slipped in despite the checks
+            // above, remove the escaped output (fs::remove on a symlink unlinks
+            // the link, not its target) and fail the whole extraction closed.
+            if (std::string const reason = ValidateContainment(destPath, realTargetDir); !reason.empty())
+            {
+                std::error_code rmEc;
+                std::filesystem::remove(destPath, rmEc);
+                mz_zip_reader_end(&zip);
+                errorMessage = "Post-write containment check failed for '" + entryName + "' in " + containerName +
+                               ": " + reason;
+                LOG_APP_ERROR("[jcwf] Extract: post-write escape container='{}' entry='{}' reason='{}'",
+                              containerName, entryName, reason);
                 return false;
             }
         }
@@ -300,6 +482,17 @@ namespace AIAssistant
     bool JcwfContainer::ReadFile(std::filesystem::path const& jcwfPath, std::string const& internalPath,
                                  std::string& outContent, std::string& errorMessage)
     {
+        // Validate the requested entry name with the same gate the extraction
+        // path uses — a NUL / absolute / '..' name has no legitimate meaning
+        // for a zip-internal lookup and is rejected before it reaches miniz.
+        if (std::string const reason = ValidateEntryName(internalPath); !reason.empty())
+        {
+            errorMessage = "Rejected entry '" + internalPath + "': " + reason;
+            LOG_APP_ERROR("[jcwf] ReadFile: rejected entry name entry='{}' container='{}' reason='{}'",
+                          internalPath, jcwfPath.string(), reason);
+            return false;
+        }
+
         mz_zip_archive zip{};
         if (!mz_zip_reader_init_file(&zip, jcwfPath.string().c_str(), 0))
         {
@@ -308,14 +501,42 @@ namespace AIAssistant
             return false;
         }
 
-        size_t size = 0;
-        void* data = mz_zip_reader_extract_file_to_heap(&zip, internalPath.c_str(), &size, 0);
-
-        if (data == nullptr)
+        int const index = mz_zip_reader_locate_file(&zip, internalPath.c_str(), nullptr, 0);
+        if (index < 0)
         {
             mz_zip_reader_end(&zip);
             errorMessage = "File '" + internalPath + "' not found in " + jcwfPath.filename().string();
             LOG_APP_ERROR("[jcwf] ReadFile: entry not found entry='{}' container='{}'",
+                          internalPath, jcwfPath.string());
+            return false;
+        }
+
+        // Bound the heap allocation before decompressing — a zip bomb can
+        // declare a multi-gigabyte uncompressed size from a few KB on disk.
+        mz_zip_archive_file_stat stat;
+        if (!mz_zip_reader_file_stat(&zip, static_cast<mz_uint>(index), &stat))
+        {
+            mz_zip_reader_end(&zip);
+            errorMessage = "Failed to stat '" + internalPath + "' in " + jcwfPath.filename().string();
+            LOG_APP_ERROR("[jcwf] ReadFile: stat failed entry='{}' container='{}'", internalPath, jcwfPath.string());
+            return false;
+        }
+        if (stat.m_uncomp_size > kMaxEntryUncompressedBytes)
+        {
+            mz_zip_reader_end(&zip);
+            errorMessage = "Entry '" + internalPath + "' exceeds size cap in " + jcwfPath.filename().string();
+            LOG_APP_ERROR("[jcwf] ReadFile: rejected oversized entry entry='{}' container='{}' uncomp={} cap={}",
+                          internalPath, jcwfPath.string(), stat.m_uncomp_size, kMaxEntryUncompressedBytes);
+            return false;
+        }
+
+        size_t size = 0;
+        void* data = mz_zip_reader_extract_to_heap(&zip, static_cast<mz_uint>(index), &size, 0);
+        if (data == nullptr)
+        {
+            mz_zip_reader_end(&zip);
+            errorMessage = "Failed to read '" + internalPath + "' from " + jcwfPath.filename().string();
+            LOG_APP_ERROR("[jcwf] ReadFile: heap extract failed entry='{}' container='{}'",
                           internalPath, jcwfPath.string());
             return false;
         }

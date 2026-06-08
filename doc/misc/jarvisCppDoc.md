@@ -1,6 +1,6 @@
 # jarvisCppDocu — header → cpp pairing review
 
-Walked `code/backend/engine/` and `code/backend/application/` — found 153 headers and 131 cpp files (excluding the two generated headers under `code/backend/application/json/`).
+Walked `code/backend/engine/` and `code/backend/application/` — found 154 headers and 132 cpp files (excluding the two generated headers under `code/backend/application/json/`).
 Pairing rule: a header pairs with the .cpp of the same stem in the same directory.  Additional files in a row's second column are bundled into the same ai_call so the auditor sees the base class or critical helper alongside the primary file (without bundling, an audit of `azureBlobConnector.cpp` would not see the `ICloudConnector` contract it implements; an audit of `pythonTaskExecutor.cpp` would not see the `ConfineUnderProjectRoot` security gate it depends on).
 
 | Header (.h) | Paired cpp (same dir, same stem) |
@@ -130,6 +130,7 @@ Pairing rule: a header pairs with the .cpp of the same stem in the same director
 | `engine/curlWrapper/curlWrapper.h` | `engine/curlWrapper/curlWrapper.cpp` |
 | `engine/curlWrapper/interfaceTransport.h` |  |
 | `engine/curlWrapper/liveTransport.h` | `engine/curlWrapper/liveTransport.cpp`, `engine/curlWrapper/interfaceTransport.h` |
+| `engine/curlWrapper/loopbackGuard.h` | `engine/curlWrapper/loopbackGuard.cpp` |
 | `engine/curlWrapper/mockTransport.h` | `engine/curlWrapper/mockTransport.cpp`, `engine/curlWrapper/interfaceTransport.h` |
 | `engine/curlWrapper/rateLimitController.h` | `engine/curlWrapper/rateLimitController.cpp` |
 | `engine/curlWrapper/rateLimitObservation.h` |  |

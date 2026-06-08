@@ -102,6 +102,7 @@ export interface ProviderHealth {
   current_cap: number;                    // -1 when no controller exists yet
   max_cap: number;                        // -1 when no controller exists yet
   floor_cap: number;
+  last_429_at_ms: number;                 // wall-clock of last actual 429; 0 = never throttled
   last_error_at_ms: number;               // 0 = never errored
   last_error_code: string;
   last_error_type: string;

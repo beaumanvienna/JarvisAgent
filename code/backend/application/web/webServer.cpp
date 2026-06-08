@@ -83,6 +83,7 @@
 #include "keys/oauthTokenManager.h"
 #include "curlWrapper/curlWrapper.h"
 #include "curlWrapper/curlMultiDispatcher.h"
+#include "curlWrapper/loopbackGuard.h"
 #include "curlWrapper/mockTransport.h"
 #include "curlWrapper/rateLimitController.h"
 #include "curlWrapper/rateLimitObservation.h"
@@ -4803,6 +4804,9 @@ namespace AIAssistant
             item["current_cap"]         = static_cast<int64_t>(snap.m_CurrentCap);
             item["max_cap"]             = static_cast<int64_t>(snap.m_MaxCap);
             item["floor_cap"]           = static_cast<int64_t>(snap.m_FloorCap);
+            // Honest throttle signal: wall-clock ms of the last actual 429 (0 = never).
+            // The amber "throttled" LED keys on this, not on current_cap < max_cap.
+            item["last_429_at_ms"]      = static_cast<int64_t>(snap.m_Last429AtMs);
             // Timestamps as Unix milliseconds (matches the rest of the WS
             // schema — easier for the dashboard's JS Date constructor than
             // ISO 8601 strings).  Zero = epoch = "never errored".
@@ -8986,6 +8990,11 @@ namespace AIAssistant
             static_cast<int64_t>(UrlPolicy::GetUrlPolicyRejectionCount());
         signals["credentialed_plaintext_http_rejections"] =
             static_cast<int64_t>(UrlPolicy::GetCredentialedPlaintextHttpRejectionCount());
+        // Connect-time loopback re-check aborts on plain-http AI dispatch — a
+        // hostname that resolved to loopback at config time but rebinds to a
+        // routable IP at dispatch (DNS rebinding) trips this.
+        signals["ai_dispatch_nonloopback_http_rejections"] =
+            static_cast<int64_t>(GetLoopbackGuardRejectionCount());
 
         // ---- Workflow runs ----
         size_t activeRuns = 0;
@@ -9078,7 +9087,15 @@ namespace AIAssistant
                     crow::json::wvalue controller;
                     controller["quota_key"]                     = c.m_QuotaKey;
                     controller["current_concurrency_cap"]       = c.m_CurrentConcurrencyCap;
+                    controller["hard_cap"]                      = c.m_HardCap;
                     controller["streak_since_last_429"]         = c.m_StreakSinceLast429;
+                    // Honest throttle observability: last_429_at_ms is the wall-clock
+                    // of the most recent actual 429 (0 = never throttled — a cap below
+                    // hard_cap with last_429_at_ms=0 is just AIMD ramping, NOT throttled).
+                    // cap_recovery_eta_sec counts down to when idle recovery restores
+                    // the cap to hard_cap.
+                    controller["last_429_at_ms"]                = static_cast<int64_t>(c.m_Last429AtMs);
+                    controller["cap_recovery_eta_sec"]          = c.m_CapRecoveryEtaSec;
                     controller["remaining_requests"]            = static_cast<int64_t>(c.m_RemainingRequests);
                     controller["remaining_tokens"]              = static_cast<int64_t>(c.m_RemainingTokens);
                     controller["req_reset_in_sec"]              = static_cast<int64_t>(c.m_ReqResetInSec);
@@ -9432,7 +9449,9 @@ namespace AIAssistant
         crow::json::wvalue body;
         body["ok"] = true;
         body["current_concurrency_cap"] = controller.CurrentConcurrencyCap();
+        body["hard_cap"]                = controller.HardCap();
         body["streak_since_last_429"]   = controller.StreakSinceLast429();
+        body["cap_recovery_eta_sec"]    = controller.CapRecoveryEtaSeconds();
 
         crow::json::wvalue lastObs;
         lastObs["is_empty"]                  = last.IsEmpty();

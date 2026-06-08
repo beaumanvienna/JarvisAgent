@@ -28,6 +28,7 @@
 #include "engine.h"
 #include "curlWrapper/authSigner.h"
 #include "curlWrapper/curlWrapper.h"
+#include "curlWrapper/loopbackGuard.h"
 #include "json/replyParser.h"
 
 namespace AIAssistant
@@ -393,6 +394,12 @@ namespace AIAssistant
         curl_easy_setopt(m_Curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2TLS);
 
         curl_easy_setopt(m_Curl, CURLOPT_URL, url.c_str());
+
+        // DNS-rebinding closure for the synchronous probe path (TestInterface):
+        // for plain http:// re-check the resolved peer at connect time and
+        // abort any non-loopback address.  No-op for https://.
+        InstallLoopbackGuardForPlaintextHttp(m_Curl, url);
+
         curl_easy_setopt(m_Curl, CURLOPT_HTTPHEADER, headers.Get());
         curl_easy_setopt(m_Curl, CURLOPT_POSTFIELDS, data.c_str());
         curl_easy_setopt(m_Curl, CURLOPT_WRITEFUNCTION, static_cast<CurlWriteCallback>(write_callback));
