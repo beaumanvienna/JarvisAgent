@@ -203,10 +203,14 @@ namespace AIAssistant
         }
 
         // ------------------------------------------------------------
-        // Build a command string from argv-style vector.
+        // Build a command string from an argv-style vector for /bin/sh -c
+        // (or PowerShell on Windows).
         //
-        // For now we assume arguments are already validated as "safe".
-        // We simply join them with spaces.
+        // Arguments are NOT assumed safe: every argument is single-quoted
+        // before joining (QuoteForPosixShell / QuoteForPowerShell), so the
+        // shell treats each as a literal regardless of contents.  This
+        // single-quoting is the load-bearing defense against injection
+        // through `args[]` — see JoinArgumentsForSystem below.
         // ------------------------------------------------------------
 #if defined(_WIN32)
         std::string QuoteForPowerShell(std::string const& value)

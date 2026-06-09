@@ -1,6 +1,8 @@
 # Cyber Security
 
-JarvisAgent ships as two editions with different security profiles. This document describes the safety measures in place, the remaining threats, and the responsibilities of operators and end users.
+JarvisAgent ships as two editions with different security profiles. This document describes the safety measures in place, the remaining threats, and the responsibilities of operators and end users — organised **by subsystem / control**.
+
+> **System-level threat model.** For the *by-element* analysis — the data-flow diagram, trust-boundary map, data-at-rest inventory, and the STRIDE walk with findings + accepted risks — see [`doc/threat-model.md`](threat-model.md). The two are complementary: this document is "here are our controls"; the threat model is "here is every threat we systematically considered and how each is covered."
 
 ---
 

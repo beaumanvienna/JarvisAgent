@@ -182,7 +182,8 @@ See `doc/JC_Workflow_Specification.md` for the full format definition.
 - `doc/api-endpoints.md` — REST API reference
 - `doc/architecture.md` — Detailed architecture overview, including the **Key Design Decisions** table (the "why" behind non-obvious choices)
 - `doc/jarvisagent.md` — User manual / `config.json` reference
-- `doc/cyber security.md` — Threat model, MCP key lifecycle, master-password handling
+- `doc/cyber security.md` — Per-subsystem security controls, MCP key lifecycle, master-password handling
+- `doc/threat-model.md` — System-level STRIDE threat model: data-flow diagram, trust boundaries, data-at-rest inventory, findings + accepted risks
 - `code/mcp/README.md` — MCP tool surface (run, configure, artifact retrieval)
 - `integration/README.md` — Webhook triggers, n8n integration, HMAC signing
 - `docker-compose.example.yml` — Optional dev mocks (`aoai-api-simulator` for Azure OpenAI testing, LocalStack Hobby tier for Bedrock testing) — both kept commented; uncomment to run

@@ -15,6 +15,48 @@ Keep entries self-contained — a fresh-context Claude should be able to read ju
 
 ---
 
+## 2026-06-08 → next session — STRIDE pass CLOSED (F1/F2/F3 resolved; one tiny source change)
+
+JC made the finding decisions and the **whole-system STRIDE pass is now closed** — the last big pre-1.0 *security* engineering item.  Almost entirely docs; one trivial source change.
+
+**Decisions taken:**
+- **F3 (real → fixed in source).**  `shellTaskExecutor.cpp` — replaced the stale header comment above the quoting helpers (it claimed args are "assumed safe… joined with spaces") with one that accurately describes the single-quoting `JoinArgumentsForSystem` performs.  Comment-only.
+- **F2 (non-finding).**  The cookie `Secure` flag was **already in shipped code** — both login `Set-Cookie` sites (`webServer.cpp`) do `if (m_TlsEnabled) cookie += "; Secure";` (committed 2026-04-18); the first-cut walk misread it.  No source fix needed; corrected the threat-model doc (it wrongly claimed the flag was missing).  **Bonus:** brought the **logout** clear-cookie (`webServer.cpp:9653`) into line — it now adds `Secure` conditionally too, so all three `Set-Cookie` sites are consistent.  (This is the *only* code/behaviour change this session — built clean, studio/Release.)
+- **F1 (webhook replay → ACCEPTED for 1.0 as AR-6).**  HMAC signs body only (no timestamp/nonce); attacker must first observe a valid signed request; per-IP loopback trust + idempotent-trigger assumption bound impact.  Recorded as **AR-6** with the fix path if reopened (fold `X-Webhook-Timestamp` into the HMAC + freshness window — a sender-contract change for n8n).
+
+**Doc state now consistent:** `doc/threat-model.md` (status banner, §3 webhook row → AR-6, §4 has **no open findings** + F2/F3 in "Closed" + AR-6 added), `doc/misc/stride-pass-dev-plan.md` (Status → **COMPLETE**), `todo.md` (STRIDE item struck → DONE pointer).  **No CRITICAL/HIGH; no open findings; six accepted risks (AR-1…AR-6).**
+
+**Uncommitted (working tree):** `shellTaskExecutor.cpp` + `webServer.cpp` (the two source edits), `doc/threat-model.md`, `doc/misc/stride-pass-dev-plan.md`, `doc/cyber security.md` (cross-ref from cont. 5), `todo.md`, this hand-off.  All for JC to commit.
+
+**Remaining pre-1.0 engineering gate:** only the **packaging retest** on JC's other hardware (macOS DMG / arm64 Docker / RPM-Rocky / Arch-Manjaro / Windows) — which JC deferred until AFTER editor + assistant dogfooding.  Everything else is JC's non-engineering items (dogfood editor/assistant, landing page, promo video).
+
+---
+
+## 2026-06-07 (cont. 5) → next session — whole-system STRIDE pass (scoped + first-cut walk done; findings await JC's decision)
+
+Everything through cont. 4 is **committed** (`9856528`).  This session ran the **whole-system STRIDE pass** — the last big pre-1.0 security item.  **Docs only — NO code changed** (the pass is analysis; any remediation needs JC's sign-off first, per his explicit instruction: "discuss findings before changing j9t").
+
+**Three-document structure (JC's framing — keep them distinct):**
+1. **`doc/misc/stride-pass-dev-plan.md`** (new) — *internal*: methodology + sittings.  Status line says "ANALYSIS COMPLETE (first cut)"; Sittings 1–3 struck.
+2. **`doc/threat-model.md`** (new) — *external-auditor-facing*: THE output.  Title "Threat Model & Vulnerability Analysis (STRIDE)" (rename if you want).  §1 methodology + STRIDE table, §2 the model (single-host trust assumption, actor table, 11 trust boundaries, ASCII DFD, verified data-at-rest inventory), §3 the full STRIDE walk (boundaries 1–11 + data stores), §4 findings + accepted risks.  Self-contained, polished — handable to an external auditor.
+3. **`doc/cyber security.md`** (modified) — gained a top cross-ref to the threat model.  Relationship: cyber security.md = "here are our controls (by subsystem)"; threat-model.md = "here is every threat we systematically considered (by element) and how each is covered."
+
+**Walk outcome — posture is strong: NO CRITICAL, NO HIGH.**  The outbound + execution boundaries (AI dispatch / cloud connectors / Python / shell — the densest in controls) came back clean (the §18 hardening + this session's 3 HIGHs cover them).  Notable confirmations: templates can't reach credentials (namespaces `inputs`/`outputs` only, zero KeyManager reach → nothing secret lands in `queue/`); shell `args[]` are single-quoted before `/bin/sh -c` (no injection via template/webhook-context); `.enc` stores are GCM-AAD tamper-evident; `config.json` is plaintext but non-secret (method correctly clears it); the cloud SSRF gate rejects internal IPs at connect.
+
+**Findings — await JC's decision (the resume point; nothing changed yet):**
+- **F1 (LOW–MED) — webhook replay.**  The webhook HMAC signs only the body (no timestamp/nonce), so a *captured* valid signed request can be re-sent and re-triggers the workflow.  Attacker must first observe a valid request (they don't have the secret).  Fix = fold an `X-Webhook-Timestamp` into the HMAC input + freshness window — a **sender-contract change** (n8n etc. must include it).  Reasonable to accept-for-1.0 (→ AR-6) unless webhooks drive mutating actions in anger.
+- **F2 (LOW) — session cookie lacks `Secure`.**  It's `HttpOnly; SameSite=Strict` but not `Secure` (must work on plain-http localhost).  Fix = set `Secure` **conditionally** when TLS is configured (`TlsCert`/`TlsKey` present) — clean ~1-line in the two `Set-Cookie` sites (`webServer.cpp:7849, 7900`).
+- **F3 (tidy-up) — stale comment** at `shellTaskExecutor.cpp:206-209` claims args aren't validated; they ARE single-quoted.  ~1-line comment fix.
+- **Recommendation:** F2 + F3 are cheap clean wins (do them); F1 accept-or-fix is JC's call.
+
+**Accepted risks recorded (confirm at resume):** AR-1 single-host `127.0.0.1` trust · AR-2 adhoc run visibility · AR-3 TLS key plaintext at rest · AR-4 shell `command` field is admin shell · AR-5 Python runs admin-deployed scripts.
+
+**Resume:** get JC's F1/F2/F3 decisions + AR confirmation → make ONLY the approved changes (likely F2 cookie-Secure-conditional + F3 comment; F1 if approved) → flip the dev-plan status to fully COMPLETE → the STRIDE pass closes.  After that the only remaining pre-1.0 engineering gate is the **packaging retest** — which JC deferred until AFTER editor + assistant dogfooding (note in `todo.md`; remind him when dogfooding closes).
+
+**Uncommitted:** `doc/threat-model.md` + `doc/misc/stride-pass-dev-plan.md` (new) + `doc/cyber security.md` + `todo.md` (cross-refs/notes).  No source files touched.
+
+---
+
 ## 2026-06-07 (cont. 4) → next session — throttled-LED semantic fix + jarvisCpp JCWF regen + stale-plan cleanup + 2 pre-1.0 items (working tree)
 
 Closed out the throttled-LED thread for real, then cleared two pre-1.0 engineering items and reconciled stale plan markings.  All in the working tree on top of cont. 1–3; studio Release + Debug + dashboard build clean.

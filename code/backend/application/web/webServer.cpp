@@ -9650,7 +9650,9 @@ namespace AIAssistant
         crow::json::wvalue body;
         body["ok"] = true;
         auto resp = MakeJsonResponse(200, body);
-        resp.add_header("Set-Cookie", "session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
+        std::string cookie = "session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0";
+        if (m_TlsEnabled) cookie += "; Secure";
+        resp.add_header("Set-Cookie", cookie);
         return resp;
     }
 
