@@ -15,6 +15,213 @@ Keep entries self-contained — a fresh-context Claude should be able to read ju
 
 ---
 
+## 2026-06-11 → next session — editor dogfooding Pass 1 CLOSED: F-42 root-caused + fixed, all findings addressed except F-34 (post-1.0)
+
+Cracked the F-42 blocker, then closed out the whole dogfooding tail to a committable state. All work is in the working tree, **uncommitted** (JC commits). Frontend `tsc` + `npm run build` clean throughout; **no backend rebuild needed** (the one C++ change, `workflowRegistry.cpp`, is from the prior stretch). Latest editor bundle: `index-DmSbdfUI.js` → browser hard-refresh only.
+
+### F-42 — was NOT a caret bug (the prior 3 attempts chased a symptom)
+Instrumented `FilePathInput` (per *instrument-before-guessing*) and the console settled it immediately: `onChange` fired with the **correct** value, then `updateSelectedTaskField` **threw** `Cannot read properties of undefined (reading 'file_inputs')` synchronously inside the handler → `setNodes` never committed → React reverted to the old value every keystroke (looked like "uneditable / caret jumps to end"). Root cause: the PROB-rename-propagation branch mapped over **every** node reading `n.data.task.file_inputs` with no type guard; `portfolioDividendAnalysis` has a CSV **filter** node (`n.data.task` `undefined`) → crash. The wd field was immune because its branch already guarded `n.type !== "task"`.
+- **Fix:** one-line node-type guard (now `isTaskNode(n)`).
+- **Cleanup:** stripped the now-disproven caret-save/restore machinery from `FilePathInput` (it was a prior misattributed F-42 attempt) — back to a plain controlled input. Re-added the **scroll-to-end** (F-18) feature it had lost, and extended it to the **`working_directory`** field (both now route through `FilePathInput`; one impl).
+- **Recurrence guard (the "learn from it" ask):** new `isTaskNode(n): n is EditorTaskNode` in `editor/types.ts` with a comment — the node arrays are typed/cast `EditorTaskNode[]` but at runtime hold filter/branch nodes, so TS won't catch a missing guard. New memory `reference_input_uneditable_onchange_throw` captures the broader debugging heuristic (uneditable field ⇒ onChange threw ⇒ instrument, don't chase the caret).
+
+### All remaining findings addressed this pass (F-14, F-33, F-40, F-41, F-32)
+- **F-14** — `validation.ts` info when a shell/python task has file I/O but empty `params.args` (auto-inject is inputs-first/outputs-last → breaks archive-first zip/tar).
+- **F-40** — `validation.ts` warning when a per_item `ai_call` PROB *path* lacks a `{{…}}` per-row template (60-way file collision). Verified it does **not** fire on the shipped `lookupDividend` (`PROB_{{pos.Symbol}}_{{pos.row_number_padded}}.txt`).
+- **F-33** — `validation.ts` info when two `ai_call` tasks share identical inline PROB content (wrong-PROB paste).
+- **F-41** — `reconcileTerminalParentStates` in `WorkflowEditorView.tsx`. Grounded against a **live** run (`portfolioDividendAnalysis-hand_1781231367243`): per_item children report as `<parentId>#N` with a bare `<parentId>` parent entry; on abort the backend freezes the parent non-terminal. The fn derives a non-terminal parent's state from its `#N` children (any failed→failed, else any cancelled→cancelled, else all success→success) on the **two terminal REST paths** (`fetchFinalRunState` + terminal poll) — deliberately NOT on the live WS stream (a mid-run parent legitimately shows `running`). Only touches a provably-wrong parent.
+- **F-32** — `StructuredOutputEditor` now leads with a **field builder** (name/type/required rows + per-string `enum` + an "allow extra fields" toggle writing `additionalProperties`); raw JSON-Schema textarea demoted to a collapsible advanced fallback that re-seeds the builder on parse.
+
+### The one non-fix — F-34, reclassified out-of-scope (by design)
+`output_retries` validates JSON *shape*, not downstream *renderability* (valid-shaped-but-unrenderable Mermaid passes every retry, detonates at the PDF stage). Initially framed as a deferred fix; **JC's call — it's not a j9t defect at all.** Structured output validating *shape* is the engine's job; *semantic/render* validity is a **workflow-design** responsibility composed from existing primitives: the render task already *is* the validator (exit code = is-the-Mermaid-good), and `expose_error_signal` + a branch node wire that failure into an error branch (re-ask `ai_call`, fall back, or fail with a custom message). Baking a Mermaid-specific gate into the dispatch core would hardcode one renderer's policy into the engine — the opposite of j9t's compose-from-primitives model. So the pass has **zero deferred findings** (all F-1…F-42 fixed; F-34 out-of-scope-by-design). Practical mitigations for a weak model: raise `output_retries`, stronger interface, Clean+re-run.
+
+### portfolioDividendAnalysis — restored `portfolio_totals.py` as a deterministic 3rd stage (honestly framed)
+Re-examined the May planner scrub: `export_dividends.py` was genuinely tainted (`DEFAULT_DB = /home/.../planner/...`, pulled JC's private DB) and stays deleted. **`portfolio_totals.py` was clean collateral** — no private refs — so JC kept it and had it integrated. Rebuilt it planner-free + wired it as stage 3:
+- **`lookupDividend`** now emits **structured JSON** (`output_schema` {symbol, dividend_yield_pct, …}, `output_retries:5`) → `PROB_<SYM>_<NN>.output.json`.
+- **`portfolioSummary`** CNTX glob → `PROB_*.output.json`.
+- **`verifyTotals`** (new python stage, `depends_on: portfolioSummary`) runs `scripts/portfolio_totals.py::stamp` — globs the per-item JSONs (symbol from the templated filename, yield from JSON), joins with `port62pos.csv` allocations, computes the **exact** allocation-weighted sum, prepends a totals block to the AI summary → `portfolio_report.md`.
+- **Verified live:** `portfolioDividendAnalysis_1781234612369`, 61/61 tasks green; independently recomputed the exact weighted yield matches the script.
+- **Honest-framing pivot (JC's steer):** the exact sum of the AI's per-item yields disagreed with the AI's own *holistic* estimate — exact arithmetic over AI-estimated inputs is precisely-wrong. So the stage is framed as **"exact weighted sum of the AI's per-position yields,"** NOT "verified/authoritative totals." The example's lesson is **"verify your inputs, not just your arithmetic"** — determinism buys consistency/auditability, not accuracy; an authoritative figure needs authoritative input data. Reframed in `portfolio_totals.py`, the canvas/global docs, and the `.md`. (Kept JC's real portfolio figure OUT of all tracked files per no-private-info-in-repo.)
+- **Engine wiring confirmed:** python tasks receive `context` (`_workflow_base_directory`, `_task_working_directory`, `_file_input_N`) + named `inputs` slots as kwargs — NOT arbitrary `params` keys (params only carry module/function).
+
+### Docs updated
+- `editor-dogfooding-plan.md`: Findings F-42/F-41/F-40/F-33/F-32/F-14 → **FIXED** (F-42's row rewritten to the real root cause, not the caret theory); progress table #5 ☑☑☑☑; Wrap-up marks **Pass 1 complete**.
+- `todo.md`: dogfooding Pass 1 struck; F-34 + the Editor UX review left as the two crisp remaining actions.
+- New memory `reference_input_uneditable_onchange_throw`.
+
+### Open items / next-session candidates
+1. **#5 final confirmation (optional).** #5 ran functionally green by hand last session; the editor is now fully unblocked so JC can do a clean re-run with a tidied PROB name + wd if he wants the cosmetic gap gone. **Reconcile first:** runtime-scratch `workflows/portfolioDividendAnalysis-hand.jcwf` may still carry the stray hand-patch (`ai_call_2` wd → `02_portfolioSummary`) from last session — re-save from the editor or revert so container + canvas agree. (This is runtime scratch, **not** a commit artifact — the committed `example/workflows/portfolioDividendAnalysis.jcwf` is the restored 2-task original.)
+2. **Editor UX review** — JC's standing steer; scoped in the plan's "Editor UX review" section (3 root-cause themes). Not started.
+3. **AI-assistant dogfooding pass** — the next dogfooding domain (`todo.md`).
+
+### Gotchas next-session-Claude should know
+- **`isTaskNode(n)` before `n.data.task` in any node-array loop.** The arrays are typed `EditorTaskNode[]` but hold filter/branch nodes (`n.data.task` `undefined`) — TS won't catch it; a missing guard throws inside the iteration. This was the entire F-42 bug.
+- **An editor field that won't accept edits is almost always a throw in its `onChange`**, not a caret/remount problem. Instrument the handler + watch the console before touching caret logic. (Memory `reference_input_uneditable_onchange_throw`.)
+- **The new validators are display-only** (info/warning) — they never reject a save or block a run, so they can't break a workflow; worst case is cosmetic noise. Verified no false-positive on the shipped per_item PROB.
+- **F-41 reconciliation runs only on terminal REST paths**, never the live WS snapshot — don't "simplify" it onto the WS path or it'll collapse an in-progress parent that's legitimately `running` mid-fan-out.
+
+---
+
+## 2026-06-10 (cont.) → next session — planner privacy remediation; #5 functionally green; editor F-38…F-42 (F-42 STILL OPEN — the blocker)
+
+Long second stretch. Three threads: (1) **scrubbed JC's private `planner` app out of the public repo**, (2) drove **#5 `portfolioDividendAnalysis-hand`** to a **functionally-green run by hand**, (3) found + fixed editor bugs **F-38…F-41** but **F-42 (inspector path fields are uneditable) is still open and is the live blocker.** All work is in the working tree, **uncommitted**. Frontend `tsc` + `npm run build` clean.
+
+### ⛔ TOP PRIORITY — F-42: queue-binding **path** fields are uneditable (NOT fixed)
+Editing the PROB **path** field (`FilePathInput` inside `QueueBindingEditor`) is broken: **Backspace / Delete / Ctrl-V do nothing; Home/End/click + typing a char work, but the caret snaps to the END after each keystroke** ("highlight first chars, press space → jumps to end"). So Backspace deletes from the end / paste lands at the end → looks like "keys don't work." This blocked JC from renaming `PROB_new_1.txt` → `PROB_summarize.txt` all session.
+- **Three fixes TRIED, none worked** (don't repeat blindly): (a) capture-phase `window` keydown guard that `stopPropagation`s Backspace/Delete/Ctrl-V/Ctrl-Z when an editable element is focused (still in `WorkflowEditorView.tsx`, after the undo/redo effect); (b) stripped the scroll-to-end logic out of `FilePathInput`; (c) caret-save/restore via `useLayoutEffect` + `setSelectionRange` in `FilePathInput`. JC hard-refreshed each (confirmed new bundle hashes) — **still broken.**
+- **Key diagnostic for tomorrow:** the **`working_directory` plain `<input>` edits FINE**; only the `QueueBindingEditor` path field jumps. Same `setNodes`-rebuilds-every-node update path, so the heavy re-render alone isn't it. Typing inserts (focus is NOT lost), so it's a re-render, not an obvious remount — yet caret-restore didn't help. **Next step: instrument** (per `feedback_instrument_before_guessing`) — log in `FilePathInput` whether `onChange` fires on Backspace and whether the component **remounts** (mount/unmount log), and diff what's structurally different about the `QueueBindingEditor` path field vs the wd input (the extra PROB-rename-propagation pass in `updateSelectedTaskField`, the inline/ref entry shape, the `entries.map` keying). Don't theorize further before the instrument run.
+
+### Planner privacy remediation (DONE)
+`scripts/export_dividends.py` (tracked, **hardcoded JC's private `planner` app path + home dir**) + `scripts/portfolio_totals.py` and the public `example/workflows/portfolioDividendAnalysis.{jcwf,md}` were built around JC's **strictly-private** sibling project — a privacy leak **and** a non-runnable public example (committed `c61e34c`, not this session). Per JC:
+- **Restored** `example/workflows/portfolioDividendAnalysis.{jcwf,md}` to the **pre-planner original** (`git checkout c61e34c~1 --`) — a self-contained **2-task** workflow (`lookupDividend` per_item → `portfolioSummary`), AI supplies dividend figures from its own knowledge. Verified 0 planner refs.
+- **Deleted** `scripts/export_dividends.py` + `scripts/portfolio_totals.py` (`git rm`).
+- **Scrubbed** the planner / home-path references from this hand-off (prior entries).
+- **`port62pos.csv`** confirmed allocations-only (`Symbol,Name,Percentage`) — no position sizes; JC OK to ship.
+- **Git history NOT scrubbed** — JC's explicit call ("that's fine").
+- Runtime `workflows/portfolioDividendAnalysis/` re-synced to the 2-task version + reloaded; stale `portfolioDividendAnalysis-hand` ghost evicted via `DELETE /api/workflows/<id>` (reload doesn't prune deleted-folder entries — only adds/updates).
+
+### #5 `portfolioDividendAnalysis-hand` — FUNCTIONALLY GREEN (cosmetic gap only)
+It **runs correctly**: per_item fan-out produced **60 distinct** `PROB_<SYM>_<NN>.output.txt`, and `portfolioSummary` aggregated them into a correct **executive summary** (3.08% total weighted yield, 60 positions, proper top-10 table). Verified by reading the output. The only deviations from the recipe are cosmetic and caused by **F-42**: both AI tasks currently share wd `01_lookupDividend`, and `portfolioSummary`'s PROB is still the default `PROB_new_1.txt` (JC couldn't rename it) → the summary lands at `queue/portfolioDividendAnalysis-hand/01_lookupDividend/PROB_new_1.output.txt` instead of a clean `02_…/PROB_summarize.output.txt`. **Mark #5 ☑ once F-42 lets JC tidy the PROB name + wd** (or accept as-is — it's correct).
+- ⚠️ **I directly patched the `.jcwf`** earlier (set `ai_call_2` wd → `02_portfolioSummary`) to try to get a clean run — so **`workflows/portfolioDividendAnalysis-hand.jcwf` may differ from JC's editor canvas** (he'd since set `02_summary` / shared wd). **Reconcile first thing**: either revert the patch or re-save from the editor so container + canvas agree. (JC's last in-editor state: `portfolioSummary` wd = `…/02_summary`.)
+
+### Editor findings logged (`editor-dogfooding-plan.md`)
+- **F-38 filter-builder rename drops the edit** — **FIXED** (`onFilterBuilderSave` matched the node by the *new* id; now captures the original id in `editingFilterOriginalIdRef` + re-points the fanout edge). `WorkflowEditorView.tsx`.
+- **F-39 filter→task edge deadlocks the run** — **FIXED** (`graphToJcwf` only builds `depends_on` from edges whose **source is a real task**; a `filter:`-node source serialised as `depends_on: ['filter:positions']` → "deadlock/cycle detected"). `graphToJcwf.ts`.
+- **F-40 per_item non-templated PROB *path* → 60-way file collision, no warning** — to fix (validator warning).
+- **F-41 per_item parent node stuck pulsating after a failed fan-out** — to fix (stale runtime state; refresh clears).
+- **F-42** (above) — **OPEN**.
+
+### §5 doc rewrite
+`editor-dogfooding-plan.md` §5 rewritten to the restored **2-task** design (literal STNG/CNTX/TASK/PROB content inline; PROB is **inline**, path templates the per-row filename, content templates the body; final output named explicitly: `02_portfolioSummary/PROB_summarize.output.txt`; all-or-nothing fan-out + stale-`PROB_new_1` notes). Progress table #5 still ☐ (green-by-hand pending F-42).
+
+### Working tree (uncommitted, for JC's commit)
+Frontend: `editor/{TaskNode,WorkflowEditorView,graphToJcwf,QueueBindingEditor,validation,types}.tsx/ts`, `App.tsx`, `api/workflows.ts`, **new** `editor/{StructuredOutputEditor,FilePathInput}.tsx`.
+Deleted: `scripts/export_dividends.py`, `scripts/portfolio_totals.py`.
+Restored: `example/workflows/portfolioDividendAnalysis.{jcwf,md}`.
+Docs: `doc/misc/{editor-dogfooding-plan,hand-off}.md`. C++ `workflowRegistry.cpp` (from the prior stretch, still uncommitted).
+New memory: `reference_structured_output_shape_not_renderability`.
+
+---
+
+## 2026-06-10 → next session — editor dogfooding: #4 vehicleTroubleshootingGuide-hand GREEN; 3 editor fixes (F-35/F-36/F-37); §4 rewritten as a from-scratch recipe
+
+Drove **#4 `vehicleTroubleshootingGuide-hand`** (3 parallel structured `ai_call` → Python dataflow combiner → shell PDF) to a **green run by hand** (`…_1781149505810`), fixing three editor issues and a plan-doc gap along the way. All work is **uncommitted** in the working tree; editor `tsc` + `npm run build` clean throughout. Frontend only — **no C++ touched** this session.
+
+**Editor fixes (all in `code/frontend/workflow-editor/ui/src/editor/`):**
+- **F-37 — port overlap (`TaskNode.tsx`).** A node with dataflow `inputs`/`outputs` but no `file_inputs`/`depends_on` rendered the full-size default `dep-target`/`dep-source` catch-all over its first inline `in:`/`out:` slot (unreachable + stole drops). Fix: gate the visible-vs-hidden catch-all on new `hasInlineLeftHandles` / `hasInlineRightHandles` (dep handles **or** dataflow slots).
+- **F-36 — dangling edge (`WorkflowEditorView.tsx`).** `onConnect` auto-populate appends a `file_inputs` port and retargets the edge onto it, but `slotsSignature` (drives `NodeInternalsUpdater`) keyed only on dataflow slot *names* — so the new `dephandle-N` was never re-measured and the edge dangled. Sibling of F-31. Fix: `slotsSignature` now also includes `file_inputs`/`depends_on`/`file_outputs` lengths.
+- **F-35 — `ai.provider`/`ai.model` dropdowns (`WorkflowEditorView.tsx`).** Were free-text; `provider` is matched against the configured interface **name** (`aiCallTaskExecutor.cpp:1208`), so a non-exact value (e.g. `openai`) silently fell through to the global API index. Now `<select>`s sourced from `/api/settings/ai-interfaces` (already-loaded `aiInterfaces`): provider = interface names, model = distinct interface models (empty = inherit); picking a provider auto-fills a blank model; an existing non-configured value is preserved as `… (not configured)`/`(custom)`.
+
+**Plan doc (`doc/misc/editor-dogfooding-plan.md`):** §4 **rewritten as a self-contained from-scratch recipe** (literal STNG/CNTX/TASK/PROB content + schema JSON + slot-wiring table inline — JC's steer: "build from the plan, never copy a shipped `.jcwf`"); progress table #4 ☑; Findings **F-32…F-37** logged; a local-LLM note added to §4.
+
+**Verified:** #4 green end-to-end — TOC reads 244/250/301 (all distinct), three rendered Mermaid flowcharts in `Vehicle Troubleshooting Guide.pdf` (159 KB). Took several rolls: qwen7b kept emitting invalid Mermaid (see gotcha).
+
+**Open items / next-session:**
+1. **#5 `portfolioDividendAnalysis`** (the boss level — CSV filter + per-item fan-out + `{{pos.*}}` templates) — JC chose this next. **§5 still needs the from-scratch treatment** (it says "STNG/TASK/CNTX inline (the pass-through-figures instructions)" without literal content — same gap §4 had; fill it from the shipped `workflows/portfolioDividendAnalysis/` canvas before/as building).
+2. **Editor UX review** — JC's standing steer (deferred twice now): synthesise F-5…F-37 → the three root-cause themes (data-carrying edges, artifact-file nodes, hide `../` traversals) → refactor proposal.
+3. **Open findings:** F-32 (no structured-output schema *builder* — raw JSON-Schema textarea), F-33 (duplicated `ai_call` has no identity → easy wrong-PROB paste), F-34 (retries validate shape, not renderability).
+
+**Gotchas next-session-Claude should know:**
+- **`defaults.ai.provider` = a configured interface NAME**, not a vendor label — matched against `iface.m_Name`; `ai.model` is an optional override (empty ⇒ the interface's own model). The new dropdowns enforce this.
+- **Structured-output validation guarantees JSON *shape*, not downstream *renderability*** — a valid-shaped `{title, mermaid}` with broken Mermaid passes every `output_retries` and detonates at the PDF stage. Small local models (qwen7b) need `output_retries ≈ 5` and still roll bad Mermaid; pick a stronger interface or Clean+re-run. See `reference_structured_output_shape_not_renderability` memory.
+- **All editor changes are uncommitted** — after a pull, re-run `npm run build` in `code/frontend/workflow-editor/ui`; JC commits.
+
+---
+
+## 2026-06-09 → next session — editor dogfooding: #2 aiZipDemo-hand & #3 aiCarMaintenancePipeline-hand BOTH GREEN; F-1…F-31 (one open: F-14)
+
+Big session. Closed the four **predicted** review gaps (F-1…F-4) up front, then drove **#2 `aiZipDemo-hand`** and **#3 `aiCarMaintenancePipeline-hand`** to **green runs by hand**, surfacing + fixing **F-5…F-31** along the way (per-finding detail in the plan's Findings log — not duplicated here). All work is in the working tree, **uncommitted**; editor `tsc` + `npm run build` clean throughout. **No C++ touched this session** — every fix is in `code/frontend/workflow-editor/ui/src/`. New files: `editor/StructuredOutputEditor.tsx`, `editor/FilePathInput.tsx`.
+
+**The F-1…F-4 inspector UI (built up front):** structured output (`StructuredOutputEditor` — JSON-Schema textarea + `output_retries`, "insert example schema"); internal `action` field; read-only depends_on chip list; collapsible "Dataflow slots" (declare named `inputs`/`outputs`).
+
+**The build-driven batch (F-5…F-31 — see plan Findings log).** The high-value clusters next-session-Claude should know about:
+- **Wired-input plumbing:** one shared `deriveUpstreamOutputPaths(source, target, wfId, handle)` helper now backs the edge-draw auto-populate, the F-21 input re-sync, and the F-20 dropdown — it resolves both wds against `workflows/<wfId>/` and takes a proper relative path (correct through `..`). Targets that read `file_inputs` = shell/python/**internal**/**ai_call** (`targetReadsFileInputs`).
+- **Queue-binding inline-vs-ref:** F-26 two-segment `inline | ref` toggle (leads with current state); F-25 — `graphToJcwf` auto-normalizes an inline entry with a ref-style path (`/` or `..`) + empty content into a ref on save (an inline-empty entry **wrote 0 bytes over the referenced file** — it truncated `message.txt`; re-staged).
+- **Dataflow ports/edges:** F-28 dataflow slot handles now render as inline rows (stack, don't overlap file ports); **F-31** `NodeInternalsUpdater` (inside `<ReactFlow>`) calls `updateNodeInternals` on slot-signature change so a just-added port is connectable **without a save+reload** (this was the root cause of the whole "can't connect dataflow" saga); F-29 `ConnectionMode.Loose` + `onConnect` direction-normalization; F-30 onConnect refuses duplicate dataflow edges + `graphToJcwf` dedupes & drops orphan `dataflow` entries on save.
+- **Other:** F-17 runtime failure reason on the node face; F-18 `FilePathInput` scroll-to-end (file_inputs/outputs + queue-binding); F-19 internal file_inputs/outputs editors; F-24 `api/workflows.ts::ensureOk` surfaces the backend error body; F-27 dedicated python `module`/`function` fields.
+
+**Verified — both green end-to-end:**
+- **#2** `aiZipDemo-hand`: 3 `ai_call` → 1 `zip_responses`; archive holds all three `.md`.
+- **#3** `aiCarMaintenancePipeline-hand`: **clean-slate run `…_1781072061071` completed** — `classifyQuestion`→`{"category":"engine"}` (schema validated), `buildManual`→engine `manual.txt`, `answerWithManual`→grounded answer, `zipAnswer`→`answer.zip`, `printZipInfo`→logged the zip's info via the `archive_path → filename` **dataflow** (single clean entry on disk). Progress table: #1 #2 #3 all ☑.
+
+**Open items / next-session:**
+0. **JC's steer — step back for an editor UX review FIRST (decide before grinding #4/#5).** 30+ findings on 3 *simple* workflows ⇒ the editor leaks filesystem mechanics that should be the model's job. Three root-cause themes JC named (detail + rationale in the plan's new **"Editor UX review"** section): (a) **edges should carry data, not just `depends_on`** — make output-port→input-port the data hand-off, not a copied path; (b) **artifact files as first-class canvas nodes** (e.g. `message.txt`) instead of hand-typed path strings; (c) **hide the `../../../` queue↔workflows traversals** — the UI should show friendly names and synthesise paths on save (`deriveUpstreamOutputPaths` already computes them right). Most of F-5/F-12/F-15/F-16/F-19…F-22/F-25/F-26 collapse into these. Synthesise the Findings log → themes → target model, then decide refactor-before-or-after #4/#5.
+1. **#4 `vehicleTroubleshootingGuide`** — three **parallel** structured `ai_call` (`{title, mermaid}` schema, output slot `outputJsonPath` each) → **Python combiner** `combineEngineTroubleshootingGuide.buildEngineTroubleshootingGuide` (input slots `code244JsonPath`/`code250JsonPath`/`code301JsonPath` = the function params; output slot `outputMdPath`) → shell PDF `mermaidMdToPdf.sh`. 3 dataflow edges — the real test of the F-28/29/30/31 dataflow hardening. **`mmdc`+`pandoc` confirmed on PATH** (PDF stage will run). Full recipe teed up in chat + plan §4.
+2. **#5 `portfolioDividendAnalysis`** — CSV filter + per-item fan-out + `{{pos.*}}` templates (plan §5).
+3. **F-14 still open** (only un-fixed finding) — validator info when a shell/python task has file I/O but empty `args` (auto-inject is inputs-first/outputs-last; breaks archive-first zip/tar).
+
+**Gotchas next-session-Claude should know:**
+- **JC's session rule:** after any editor edit, run `npm run build` and tell JC so he can hard-refresh; after C++ edits, rebuild the backend. (Editor changes only need a browser refresh.)
+- **Inline queue-binding entry with a ref-style path = data loss risk** — it writes its (often empty) content over the referenced file. F-25 auto-normalizes on save, but a stray run before saving can truncate a source file (it ate `message.txt` this session). For a PROB/CNTX pointing at an existing file, keep it a **ref**.
+- **Dataflow recipe that works:** declare output slot on the **producer**, input slot on the **consumer** (slot name = the python function's **parameter name**, e.g. `filename` for `get_file_info(filename)`); a shell task's single output slot auto-maps to its single `file_output` path (`workflowRuntimeManager.cpp:428`). Drag producer-output → consumer-input (now connects live, either direction).
+- **Dataflow slot keys are object keys** — colliding renames drop one; validator flags empty names, not collisions.
+
+---
+
+## 2026-06-08 (cont. 2) → next session — editor dogfooding: full fix batch (F-5…F-13) + UX-polish pass; aiZipDemo-hand still in progress
+
+Continued the **workflow-editor dogfooding** (the `(cont.)` entry below covers the morning's F-6/F-7/F-9 + copy/paste + `make-example-hand2`). This stretch worked on **#2 `aiZipDemo-hand`** (first AI workflow) and surfaced + fixed a large batch of findings, then did a **UX-polish pass**. Per-finding detail lives in **`doc/misc/editor-dogfooding-plan.md`** (Findings log F-1…F-13). All editor work is in the working tree, uncommitted.
+
+**What landed (fixes, on top of the morning's):**
+- **F-10** — `ai_call` now has `file_inputs`/`file_outputs` editors (was shell/python only); AI→shell auto-populate prefers the AI task's declared `file_outputs`.
+- **F-6 correction** — the AI→shell auto-populate now computes paths from the source/target **actual** working dirs (empty ⇒ bare filename). The earlier version wrongly assumed a `../queue/<wf>/NN_<id>` path for an unset-wd AI task, producing a bogus downstream input (`Missing required input file`).
+- **F-5** — empty `working_directory` is a Tier-D info now, not a blocking error.
+- **F-8** — inspector hint under `file_inputs`: order maps to `{{input[N]}}` arg position.
+- **F-11** — validator **warns** when two `ai_call` tasks share `working_directory`+PROB filename (same expected-output path → collision).
+- **F-12 (the load-breaker)** — **C++ `workflowRegistry.cpp`**: the root-canvas loader now prefers the canonical `<stem>.json` instead of "any non-`global.json` `.json`", so a stray runtime artifact (an AI `PROB_*.transcript.json`, whose root is a JSON **array**) written into the workflow folder can no longer be mis-parsed as the canvas and mark the workflow **Broken**. Companion: new AI nodes **auto-fill** `working_directory` = `../../queue/<wf>/<taskId>` so artifacts go to the queue area by default (no nag).
+- **F-13** — the shell-`args` file-ref dropdown emitted `${input[N]}` (which the backend never resolves); now emits `{{input[N]}}` / `{{output[N]}}`.
+
+**UX-polish pass** (JC's directive — "intuitive, fun, self-explanatory"): Tier-D info hints **hidden by default** (`App.tsx` `DEFAULT_SETTINGS.hideTierDWarnings = true`); long node-face validation text **truncated** to one line (`TaskNode.tsx`, full text in tooltip); friendly **empty-canvas welcome** hint; plus the F-12 AI-node self-configuration. Net: placing a node now shows no scary warnings and sensible defaults are pre-filled.
+
+**Builds:** studio/**debug** backend clean (`workflowRegistry.cpp` compiled + linked); editor frontend `dist` rebuilt. JC reloaded + unlocked the server, so the C++ loader fix is live.
+
+**What's verified / state of #2:**
+- `make-example-hand2` (morning) — green, unchanged.
+- **`aiZipDemo-hand` is NOT green yet — left mid-build.** The saga (all now fixed or worked-around): three AI tasks shared one PROB output path (all `PROB_new_1.txt`, no wd) → hung in `waiting_external` / file-activity-watchdog fail; a 1-AI+zip slice then failed because the shell input path didn't match where the AI actually wrote; then the workflow went **Broken** because the AI `transcript.json` polluted the `.jcwf`. **Root lesson: every `ai_call` needs a `../../queue/<wf>/<name>` working_directory** — now auto-filled on node creation. I cleaned `workflows/aiZipDemo-hand/` down to `global.json` + canvas and removed the stale `.jcwf`; JC is rebuilding it on the fixed editor.
+
+**Open items / next-session:**
+1. **Finish `aiZipDemo-hand` green** — with AI nodes self-configuring the queue wd, the rebuild should be smooth: 3 `ai_call`s (each auto-isolated), 1 shell `zip_responses` (`scripts/zipTool.sh`, args **`{{output[0]}} {{input[0]}} {{input[1]}} {{input[2]}}`** — archive first), each AI output dragged into the zip.
+2. Then **#3 `aiCarMaintenancePipeline`** (structured `output_schema` + `internal` task — Findings F-1/F-2 predict **no inspector UI** for `output_schema`/`output_retries`/internal `action`; confirming/fixing that is the next big item), **#4**, **#5**.
+3. Optional further UX polish (a positive "✓ ready" node state, more smart defaults) — JC to steer.
+
+**Gotchas next-session-Claude should know:**
+- **Every `ai_call` needs a `../../queue/<wf>/<name>` working_directory** — keeps runtime artifacts out of the packed `.jcwf` *and* isolates each task's output path (no PROB collision). New AI nodes auto-fill it; any hand-set or older node should follow the same pattern.
+- An `ai_call`'s expected-output path = `<working_directory>/<PROB-basename>.output.txt`; its declared `file_outputs` (e.g. `stl.output.md`) land in the same dir; downstream tasks read from there.
+- After a pull, **rebuild both**: `npm run build` in `code/frontend/workflow-editor/ui` **and** the C++ backend (the `workflowRegistry.cpp` change needs a fresh binary + server restart).
+- All the morning entry's gotchas still hold (Clean-before-run after re-pointing I/O; the `<id>Hand` suffix; dependency-edge vs `file_inputs` model).
+
+**Working tree (uncommitted, for JC):** C++ `code/backend/application/workflow/workflowRegistry.cpp`; frontend `code/frontend/workflow-editor/ui/src/{editor/WorkflowEditorView.tsx, editor/TaskNode.tsx, editor/validation.ts, App.tsx}`; docs `doc/misc/editor-dogfooding-plan.md` + this hand-off.
+
+---
+
+## 2026-06-08 (cont.) → next session — editor dogfooding kickoff: 5 editor fixes + first workflow rebuilt by hand
+
+Started the **workflow-editor dogfooding** pass (the pre-1.0 "dogfood editor" item).  Method: rebuild each curated example JCWF **by hand in the editor** (no AI gen, no JSON editing), run it, verify against the shipped original, log every friction point.  New plan + running findings log: **`doc/misc/editor-dogfooding-plan.md`** (progress table, F-1…F-9 findings, 5 per-workflow build guides ordered easy→hard).
+
+**What landed — 5 editor improvements (all in `code/frontend/workflow-editor/ui/src/editor/WorkflowEditorView.tsx`, working tree, `tsc --noEmit` clean):**
+- **F-7 (functional bug) — hand-drawn dependency edges weren't persisting.**  New edges from `onConnect` got a ReactFlow auto-id (`reactflow__edge-…`); `graphToJcwf` only serialises edges whose id starts with `dep:`, so `depends_on` was silently dropped on every from-scratch edge (loaded workflows were fine via `jcwfToGraph`).  Fix: `onConnect` now stamps a `dep:${source}->${target}:${idx}` id.
+- **F-6 (UX) — shell→shell edges didn't auto-fill `file_inputs`.**  Auto-populate previously only ran for `ai_call → shell/python`.  Extended to shell/python sources (derives the input path from the source's `file_outputs`, relative path computed from the two working dirs); the AI and script paths now share one merge block.
+- **F-9 (UX/functional) — edge didn't snap to the port holding its file.**  When dropped before any port existed (binds to the hidden catch-all → dangling line) or onto an already-occupied port (different file).  Fix: `onConnect` retargets the just-added edge to the `dephandle-N` that holds its own file, creating a new port when the dropped one is occupied; redundant same-file re-drops are dropped.
+- **Copy/paste (feature) — Ctrl/Cmd+C / Ctrl/Cmd+V** of selected task node(s).  Deep-clones the task, fresh unique id, `+48,+48` offset, strips `depends_on` (a paste starts unwired), guards against hijacking native text copy/paste in input fields.
+- **Multi-selection tracking** — added `selectedNodeIds` state populated from `onSelectionChange` (the editor previously tracked only the *first* selected node), so box-select → copy grabs the whole set.
+
+**What's verified:**
+- **`make-example-hand2`** built entirely by hand → **Clean + Run → green**, produces a working `myapp` (`x()=1 y()=2 sum=3`, identical to shipped `make-example`).  On disk the canvas has correct `file_inputs` **and** persisted `depends_on` on `make_static_lib` / `make_executable` — closing the loop on F-6/F-7/F-9 for a from-scratch build.  (An earlier `make-example-hand` was completed pre-fixes to first surface the findings.)
+- Each fix was `tsc`-typechecked; JC rebuilt the editor (`npm run build`) and hard-refreshed between fixes.
+
+**Open items / next-session candidates:**
+- **Dogfooding #2–#5 remain** — aiZipDemo (next: first `ai_call` + queue-binding editor), aiCarMaintenancePipeline (structured `output_schema` + `internal` task — F-1/F-2 expect *no* inspector UI for those; confirming that is the high-value find), vehicleTroubleshootingGuide, portfolioDividendAnalysis (CSV filter + per-item fan-out).  See the plan's progress table.
+- **Findings still open (not fixed):** F-5 (`working_directory` validation asymmetry — `""` is a blocking error but `undefined` is a Tier-D info; cosmetic) and F-8 (`file_inputs` order = shell arg order, no guard).  Both UX-level, deferred.
+- After dogfooding closes: the **packaging retest** on JC's other hardware is the last pre-1.0 *engineering* gate.
+
+**Gotchas next-session-Claude should know:**
+- **Editor source is uncommitted** (the 5 fixes) — after any pull, re-run `npm run build` in `code/frontend/workflow-editor/ui` or the running editor won't have them.  JC commits.
+- **Clean before a definitive run** after re-pointing a task's inputs/outputs in the editor (esp. via paste): a stale intermediate (`make-example-hand2` had a `lib1.o` containing `y()` from a mid-edit state) survives because Makefile-style freshness sees output-mtime ≥ source-mtime and skips the recompile.  This bit the first `make-example-hand2` run (link `undefined reference to x()`); Clean+Run fixed it.  Not a tool bug — faithful freshness.
+- **Hand-build under a `<id>Hand` / `<id>-hand` suffix** so the shipped `example/workflows/*.jcwf` answer-keys stay pristine to diff against, and the runtime `workflows/<id>/` folders the test suite uses aren't clobbered.  Copy each workflow's data files into the new folder (scripts + Python modules are shared in `scripts/`, no copy needed).
+- Editor edge model, for reference: a **dependency edge** = ordering (`depends_on`); **file_inputs/outputs** = the actual filenames — independent for shell/python, bridged automatically only for AI→shell and (now) shell→shell.
+
+---
+
 ## 2026-06-08 → next session — STRIDE pass CLOSED (F1/F2/F3 resolved; one tiny source change)
 
 JC made the finding decisions and the **whole-system STRIDE pass is now closed** — the last big pre-1.0 *security* engineering item.  Almost entirely docs; one trivial source change.
@@ -441,22 +648,18 @@ Follow-on the same day as the Sitting-16 closeout, after JC questioned a CLAUDE.
 
 1. **Encrypted-only keystore (cyber-sec-doc alignment).**  Surfaced while writing the #11 KeyManager-cap test: the Studio-only plaintext `keys.json` loader (`KeyManager::LoadPlaintext` + dead `SavePlaintext` + the `engine.cpp` `#ifdef J9T_STUDIO` block) AND the `OPENAI_API_KEY` env-var credential fallback (`LoadFromEnvironment`) both violated the "same cyber-sec across editions / no unsecured keys" posture in `doc/cyber security.md` (lines 9/95/105).  **Both purged** — `keys.json.enc` (runtime-unlocked) is now the *sole* credential source in every edition.  #11 test reworked to drive the caps on the **encrypted** path (`test_keymanager_caps.py` crafts a real `keys.json.enc` via the `JKEY` AES-256-GCM wire format — see gotcha).  New auto-memory `feedback_flag_cybersec_doc_violations` (TOP-TIER): cyber-sec-doc drift is a violation to remove, never normalize.
 2. **No-legacy doc sweep.**  Per `feedback_no_legacy`, removed "backward compatibility / Legacy / originally" framing from the official docs that described *removed* paths (keys.md, jarvisagent.{md,1,html}, cyber security.md) and reworded the same framing on *live* features (cloud-integration inline params, JCWF `environment` / per_item fan-out, api-endpoints offset-polling) to current-state descriptions — JC's call was keep-the-feature, drop-the-legacy-wording.  `doc/jarvisagent.1` + `.html` regenerated via `pandoc … -V pagetitle=jarvisagent` (the `.1` is hand-maintained, so it got a targeted edit, not a regen).
-3. **portfolioDividendAnalysis grounded on real data + bulletproof total.**  The run was failing on a 30 s timeout (`global.json defaults.timeout_ms: 30000`, removed → size-aware budget) AND producing ~2-yr-stale/hallucinated dividend figures (per the workflow's own §12).  Implemented §12.3: **Stage-0 `exportPlannerData`** (`scripts/export_dividends.py`) joins `port62pos.csv` with the sibling `planner` app's `tickers` table → `port62pos_enriched.csv` (live yield/per-share/price/AsOf); the per-item `ai_call` now **copies the authoritative numbers verbatim** (depends_on Stage-0).  Added **Stage-3 `stampPortfolioTotals`** (`scripts/portfolio_totals.py`): recomputes the exact allocation-weighted yield from the enriched CSV and prepends a "Verified Portfolio Totals" block to the AI summary → `portfolio_report.md`.  The `.jcwf` (now 4 tasks) + its `.md` were rewritten to the 4-stage design and the `.md`'s §12 "KNOWN ISSUE" pointers removed.
-
 ### What's verified
 
 - All **4 binary configs** rebuilt from scratch (`premake5 clean` → engine D/R → studio D/R) **warning-free** — fixed the lone non-vendor warning (`triggerEngine.cpp:1316` simdjson `[-Wunused-result]`: consumed the `[[nodiscard]]` via an `if (… != SUCCESS)` since GCC ignores `(void)` for `warn_unused_result`).  React (dashboard + editor) + `mcp/dist` rebuilt (premake clean wipes them).
 - Live test sweep green on the merged tree: `test_auth_mcp` 103 (incl new heartbeat case), `test_negative_paths` 55, `test_email_watch_persistence` 19 (incl S6 prune), `test_keymanager_caps` 4, `test_s3_roundtrip` 6, url-policy 27, slug 14, malformed-configs 56, SigV4 KAT, heap-scan 9/0/1.
 - **#13 live OAuth** confirmed by JC (Google Sheets consent → `StoreTokens`, 0 plaintext tokens in logs/keystore).
-- **portfolioDividendAnalysis** ran green on Claude Sonnet (api_index 9): accurate figures (BA $0.00 suspended, AVGO $2.60, MMM $3.12), `AsOf` populated, and the Stage-3 header stamps the exact **3.77%** while the AI's own summation drifted to 3.04–3.46% across runs.
 
 ### Gotchas next-session-Claude should know
 
 - **`test_keymanager_caps.py` couples to the `keys.json.enc` wire format** (`engine/keys/keyEncryption.h`: 33-byte `JKEY` header + PBKDF2-HMAC-SHA256 600k + AES-256-GCM, header as AAD).  If that format bumps to V3, regenerate the T2 fixture.
 - **Python task scripts hot-reload** — `pythonEngine.cpp:846` evicts the module from `sys.modules` before each import, so editing a `scripts/*.py` does NOT need a j9t restart (verified; my earlier "restart needed" claim was wrong, JC caught it).
-- **j9t CSV filter does not strip trailing `\r`** — a CRLF CSV leaves the last column bound as `Header\r`, breaking `{{pos.LastColumn}}`.  Python task scripts that write CSVs the filter reads must use `csv.writer(…, lineterminator="\n")` (bit `export_dividends.py`'s `AsOf` column).
-- **portfolioDividendAnalysis depends on the external `planner` app** (`~/dev/planner/backend/planner.db`, `PLANNER_DB`-overridable).  It's JC's sibling project; the workflow is a demo of real-data-grounding, not a self-contained example.
-- **LLMs drift summing dozens of figures** — Sonnet's portfolio grand total varied 3.04–3.46% across runs vs the exact 3.77%.  The reusable pattern (documented in the workflow `.md` §8.4): deterministic Python bookends own the facts + load-bearing arithmetic; the model owns language + per-item formatting.
+- **j9t CSV filter does not strip trailing `\r`** — a CRLF CSV leaves the last column bound as `Header\r`, breaking `{{pos.LastColumn}}`.  Python task scripts that write CSVs the filter reads must use `csv.writer(…, lineterminator="\n")`.
+- **LLMs drift summing dozens of figures** — a many-row grand total varies run-to-run.  Reusable pattern: deterministic Python bookends own the facts + load-bearing arithmetic; the model owns language + per-item formatting.
 
 ### Open items
 

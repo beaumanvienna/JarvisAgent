@@ -1,6 +1,7 @@
 import React, { useCallback, useState } from "react";
 import type { JcwfQueueBinding, JcwfQueueFileEntry } from "../jcwf/types";
 import TemplateTextarea from "./TemplateTextarea";
+import FilePathInput from "./FilePathInput";
 
 type FileCategory = "stng_files" | "task_files" | "cntx_files" | "prob_files";
 
@@ -149,11 +150,11 @@ export default function QueueBindingEditor({ queueBinding, onChange, templateVar
               return (
                 <div key={entryKey} className="qbEntry">
                   <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
-                    <input
+                    <FilePathInput
                       className="input"
                       style={{ fontSize: 12, padding: "4px 8px", flex: 1 }}
                       value={path}
-                      onChange={(e) => updateEntryPath(key, idx, e.target.value)}
+                      onChange={(v) => updateEntryPath(key, idx, v)}
                       placeholder="file path"
                     />
                     <button
@@ -172,13 +173,28 @@ export default function QueueBindingEditor({ queueBinding, onChange, templateVar
                       disabled={idx === entries.length - 1}
                       onClick={() => moveEntry(key, idx, 1)}
                     >▼</button>
-                    <button
-                      className="btn"
-                      type="button"
-                      style={{ padding: "2px 6px", fontSize: 10 }}
-                      title={inline ? "Switch to path reference" : "Add inline content"}
-                      onClick={() => toggleInline(key, idx)}
-                    >{inline ? "ref" : "inline"}</button>
+                    <div style={{ display: "inline-flex", flexShrink: 0, borderRadius: 4, overflow: "hidden", border: "1px solid rgba(255,255,255,0.18)" }}>
+                      <button
+                        type="button"
+                        title="Inline: this content is written into the queue folder under this filename"
+                        onClick={() => { if (!inline) toggleInline(key, idx); }}
+                        style={{
+                          padding: "2px 6px", fontSize: 10, border: "none", cursor: inline ? "default" : "pointer",
+                          background: inline ? "rgba(100,180,255,0.40)" : "transparent",
+                          color: inline ? "#fff" : "rgba(255,255,255,0.55)",
+                        }}
+                      >inline</button>
+                      <button
+                        type="button"
+                        title="Ref: a path to an existing file the runtime reads"
+                        onClick={() => { if (inline) toggleInline(key, idx); }}
+                        style={{
+                          padding: "2px 6px", fontSize: 10, border: "none", cursor: !inline ? "default" : "pointer",
+                          background: !inline ? "rgba(100,180,255,0.40)" : "transparent",
+                          color: !inline ? "#fff" : "rgba(255,255,255,0.55)",
+                        }}
+                      >ref</button>
+                    </div>
                     <button
                       className="btn"
                       type="button"

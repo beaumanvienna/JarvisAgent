@@ -737,27 +737,39 @@ bool WorkflowRegistry::LoadContainer(std::filesystem::path const& jcwfContainerP
         }
     }
 
-    // Find the root canvas JSON (any .json that is NOT global.json).
+    // Find the root canvas JSON. Prefer the canonical "<stem>.json" the editor always
+    // writes (see the save path above), so a stray runtime artifact dropped into the
+    // workflow folder (e.g. a PROB_*.transcript.json whose root is a JSON array) can't be
+    // mis-picked as the canvas and break the whole workflow on load. Fall back to any
+    // non-global .json only when the canonical canvas is absent.
     std::filesystem::path rootCanvasPath;
     std::error_code ec;
 
-    for (auto const& entry : std::filesystem::directory_iterator(extractedDir, ec))
+    std::filesystem::path const preferredCanvasPath = extractedDir / (stem + ".json");
+    if (std::filesystem::is_regular_file(preferredCanvasPath, ec))
     {
-        if (!entry.is_regular_file())
+        rootCanvasPath = preferredCanvasPath;
+    }
+    else
+    {
+        for (auto const& entry : std::filesystem::directory_iterator(extractedDir, ec))
         {
-            continue;
-        }
-        if (entry.path().extension().string() != ".json")
-        {
-            continue;
-        }
-        if (entry.path().filename().string() == "global.json")
-        {
-            continue;
-        }
+            if (!entry.is_regular_file())
+            {
+                continue;
+            }
+            if (entry.path().extension().string() != ".json")
+            {
+                continue;
+            }
+            if (entry.path().filename().string() == "global.json")
+            {
+                continue;
+            }
 
-        rootCanvasPath = entry.path();
-        break;
+            rootCanvasPath = entry.path();
+            break;
+        }
     }
 
     if (rootCanvasPath.empty())

@@ -17,7 +17,10 @@ export type EditorSettings = {
 };
 
 const DEFAULT_SETTINGS: EditorSettings = {
-  hideTierDWarnings: false,
+  // Default the lowest-severity "info" hints (e.g. "working_directory is not set") off the
+  // node face, so a freshly-placed node feels inviting rather than nagging. Re-enable via
+  // Settings → General for verbose validation.
+  hideTierDWarnings: true,
 };
 
 function loadSettings(): EditorSettings {

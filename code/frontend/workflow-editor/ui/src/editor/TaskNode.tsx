@@ -47,9 +47,19 @@ export default function TaskNode(props: NodeProps<EditorTaskNodeData>): JSX.Elem
   const capturedStderr = props.data.capturedStderr ?? "";
   const hasOutput = capturedStdout.length > 0 || capturedStderr.length > 0;
 
-  const firstError = errors.length > 0 ? errors[0] : null;
-  const firstWarning = warnings.length > 0 ? warnings[0] : null;
-  const firstInfo = infos.length > 0 ? infos[0] : null;
+  // Keep the node face tidy — show a short, single-line summary; the full text lives in
+  // the hover tooltip and the inspector. A wall of text on the node is noisy and unfriendly.
+  const truncate = (s: string, n = 64): string => (s.length > n ? s.slice(0, n - 1) + "…" : s);
+  const firstError = errors.length > 0 ? truncate(errors[0]) : null;
+  const firstWarning = warnings.length > 0 ? truncate(warnings[0]) : null;
+  const firstInfo = infos.length > 0 ? truncate(infos[0]) : null;
+
+  // Surface the runtime failure reason on the node face when a task fails — so "why is it F?"
+  // is answerable at a glance, not only by opening the inspector. Full text in the tooltip.
+  const runtimeErrorFull = runtimeState === "failed" && typeof props.data.runtimeError === "string" && props.data.runtimeError.length > 0
+    ? props.data.runtimeError
+    : null;
+  const runtimeErrorShort = runtimeErrorFull ? truncate(runtimeErrorFull) : null;
 
   const runtimeBadge = runtimeBadgeLabel(runtimeState, props.data.isRunPaused);
 
@@ -67,6 +77,9 @@ export default function TaskNode(props: NodeProps<EditorTaskNodeData>): JSX.Elem
 
   const fileOutputs: string[] = Array.isArray(props.data.task.file_outputs) ? props.data.task.file_outputs as string[] : [];
   const hasFileOutputs = fileOutputs.length > 0;
+  // The right-side dataflow output slots (out:<name>) render as their own inline handles; when any
+  // exist the full-size default dep-source catch-all must be hidden so it doesn't overlap them.
+  const hasInlineRightHandles = hasFileOutputs || outputNames.length > 0;
 
   const fileOutputEntries = fileOutputs.map((filePath, idx) => {
     const color = FILE_OUTPUT_COLORS[idx % FILE_OUTPUT_COLORS.length];
@@ -78,6 +91,10 @@ export default function TaskNode(props: NodeProps<EditorTaskNodeData>): JSX.Elem
 
   const handleCount = Math.max(fileInputs.length, depIds.length);
   const hasDepHandles = handleCount > 0;
+  // The left-side dataflow input slots (in:<name>) render as their own inline handles; when any
+  // exist the full-size default dep-target catch-all must be hidden so it doesn't overlap (and
+  // steal drops from) the first inline slot — the "1st input on top of the dep port" bug.
+  const hasInlineLeftHandles = hasDepHandles || inputNames.length > 0;
 
   const handleEntries = Array.from({ length: handleCount }, (_, idx) => {
     const color = FILE_INPUT_COLORS[idx % FILE_INPUT_COLORS.length];
@@ -187,24 +204,13 @@ export default function TaskNode(props: NodeProps<EditorTaskNodeData>): JSX.Elem
           )}
         </div>
       )}
-      {!hasDepHandles && (
+      {!hasInlineLeftHandles && (
         <Handle type="target" position={Position.Left} id="dep-target" />
       )}
-      {hasDepHandles && (
+      {hasInlineLeftHandles && (
         <Handle type="target" position={Position.Left} id="dep-target"
           className="hiddenHandle" />
       )}
-      {inputNames.map((name, idx) => (
-        <Handle
-          key={`in:${name}`}
-          type="target"
-          position={Position.Left}
-          id={`in:${name}`}
-          style={{ top: `${50 + (idx + 1) * 16}%` }}
-          className="dataflowHandle dataflowHandleInput"
-          title={`input: ${name}`}
-        />
-      ))}
       <div className="taskNodeBody">
         <div className="taskNodeTitle">
           {isSubWorkflow && <span className="taskNodeSubWorkflowIcon">{"\u29C9"}</span>}
@@ -246,9 +252,27 @@ export default function TaskNode(props: NodeProps<EditorTaskNodeData>): JSX.Elem
             ))}
           </div>
         )}
-        {firstError ? <div className="taskNodeErrorText">{firstError}{errorCount > 1 ? ` (+${errorCount - 1})` : ""}</div> : null}
-        {!firstError && firstWarning ? <div className="taskNodeWarningText">{firstWarning}{warningCount > 1 ? ` (+${warningCount - 1})` : ""}</div> : null}
-        {!firstError && !firstWarning && firstInfo ? <div className="taskNodeInfoText">{firstInfo}{infoCount > 1 ? ` (+${infoCount - 1})` : ""}</div> : null}
+        {inputNames.length > 0 && (
+          <div className="taskNodeFileInputs">
+            {inputNames.map((name, idx) => (
+              <div key={`dfin-${idx}`} className="taskNodeDepLabel taskNodeHandleRow">
+                <Handle
+                  type="target"
+                  position={Position.Left}
+                  id={`in:${name}`}
+                  className="taskNodeInlineHandle"
+                  style={{ background: "rgba(100,210,180,0.95)", borderColor: "rgba(100,210,180,0.95)", width: 10, height: 10, borderWidth: 2 }}
+                  title={`dataflow input: ${name}`}
+                />
+                <span style={{ color: "rgba(100,210,180,0.95)" }}>in: {name}</span>
+              </div>
+            ))}
+          </div>
+        )}
+        {runtimeErrorShort ? <div className="taskNodeErrorText" title={runtimeErrorFull ?? undefined}>{"⚠ "}{runtimeErrorShort}</div> : null}
+        {!runtimeErrorShort && firstError ? <div className="taskNodeErrorText">{firstError}{errorCount > 1 ? ` (+${errorCount - 1})` : ""}</div> : null}
+        {!runtimeErrorShort && !firstError && firstWarning ? <div className="taskNodeWarningText">{firstWarning}{warningCount > 1 ? ` (+${warningCount - 1})` : ""}</div> : null}
+        {!runtimeErrorShort && !firstError && !firstWarning && firstInfo ? <div className="taskNodeInfoText">{firstInfo}{infoCount > 1 ? ` (+${infoCount - 1})` : ""}</div> : null}
         {hasFileOutputs && (
           <div className="taskNodeFileOutputs">
             {fileOutputEntries.map((entry, idx) => (
@@ -274,17 +298,28 @@ export default function TaskNode(props: NodeProps<EditorTaskNodeData>): JSX.Elem
             ))}
           </div>
         )}
-        {(inputNames.length > 0 || outputNames.length > 0) && (
-          <div className="taskNodePorts">
-            {inputNames.length > 0 && <div className="taskNodePortList"><span className="taskNodePortLabel">in:</span> {inputNames.join(", ")}</div>}
-            {outputNames.length > 0 && <div className="taskNodePortList"><span className="taskNodePortLabel">out:</span> {outputNames.join(", ")}</div>}
+        {outputNames.length > 0 && (
+          <div className="taskNodeFileOutputs">
+            {outputNames.map((name, idx) => (
+              <div key={`dfout-${idx}`} className="taskNodeOutputLabel taskNodeHandleRow">
+                <span style={{ color: "rgba(100,210,180,0.95)" }}>out: {name}</span>
+                <Handle
+                  type="source"
+                  position={Position.Right}
+                  id={`out:${name}`}
+                  className="taskNodeInlineHandle taskNodeInlineHandleRight"
+                  style={{ background: "rgba(100,210,180,0.95)", borderColor: "rgba(100,210,180,0.95)", width: 10, height: 10, borderWidth: 2 }}
+                  title={`dataflow output: ${name}`}
+                />
+              </div>
+            ))}
           </div>
         )}
       </div>
-      {!hasFileOutputs && (
+      {!hasInlineRightHandles && (
         <Handle type="source" position={Position.Right} id="dep-source" />
       )}
-      {hasFileOutputs && (
+      {hasInlineRightHandles && (
         <Handle type="source" position={Position.Right} id="dep-source"
           className="hiddenHandle" />
       )}
@@ -297,17 +332,6 @@ export default function TaskNode(props: NodeProps<EditorTaskNodeData>): JSX.Elem
           style={{ top: "85%", background: "rgba(255,120,120,0.9)", borderColor: "rgba(255,120,120,0.9)" }}
         />
       )}
-      {outputNames.map((name, idx) => (
-        <Handle
-          key={`out:${name}`}
-          type="source"
-          position={Position.Right}
-          id={`out:${name}`}
-          style={{ top: `${50 + (idx + 1) * 16}%` }}
-          className="dataflowHandle dataflowHandleOutput"
-          title={`output: ${name}`}
-        />
-      ))}
     </div>
   );
 }

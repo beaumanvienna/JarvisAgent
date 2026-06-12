@@ -195,8 +195,13 @@ export function graphToJcwf(graph: EditorGraph, workflowId: string): Ok | CycleE
       continue;
     }
 
+    // depends_on entries must reference real TASKS on both ends. A dep edge dragged from a
+    // filter node (id `filter:<id>`) or a branch node onto a task would otherwise serialise as
+    // `depends_on: ['filter:<id>']` — a dependency on a non-task that never completes, which the
+    // runtime reports as a deadlock/cycle. The filter→per_item binding lives in task.filter, not here.
     const targetTask = tasks[edge.target];
-    if (targetTask)
+    const sourceTask = tasks[edge.source];
+    if (targetTask && sourceTask)
     {
       let list = depsByTask.get(edge.target);
       if (!list)
@@ -252,6 +257,46 @@ export function graphToJcwf(graph: EditorGraph, workflowId: string): Ok | CycleE
     }
   }
 
+  // Normalize queue-binding entries: an inline entry (object) whose `path` looks like a file
+  // *reference* (contains "/" or "..") and carries no content is really a ref — an inline entry
+  // writes its content to that path inside the queue folder, so a traversal path there makes the
+  // runtime resolve the expected reply at the wrong place (the file-activity watchdog then expires).
+  // Re-write it as a ref string so it reads the existing file instead (F-25).
+  const allQueueCategories: Array<"stng_files" | "task_files" | "cntx_files" | "prob_files"> =
+    ["stng_files", "task_files", "cntx_files", "prob_files"];
+  for (const taskId of Object.keys(tasks))
+  {
+    const task = tasks[taskId];
+    if (task.type !== "ai_call") continue;
+    const qb = (task.queue_binding ?? {}) as Record<string, unknown>;
+    let changed = false;
+    for (const cat of allQueueCategories)
+    {
+      const entries = qb[cat] as Array<unknown> | undefined;
+      if (!Array.isArray(entries)) continue;
+      const normalized = entries.map((entry) => {
+        if (entry && typeof entry === "object" && "path" in entry)
+        {
+          const obj = entry as { path?: unknown; content?: unknown };
+          const path = typeof obj.path === "string" ? obj.path : "";
+          const content = typeof obj.content === "string" ? obj.content : "";
+          const looksLikeRef = path.includes("/") || path.includes("..");
+          if (looksLikeRef && content.trim().length === 0)
+          {
+            changed = true;
+            return path; // collapse inline-empty-with-ref-path → ref string
+          }
+        }
+        return entry;
+      });
+      if (changed) qb[cat] = normalized;
+    }
+    if (changed)
+    {
+      task.queue_binding = qb as JcwfTask["queue_binding"];
+    }
+  }
+
   const orderedTasks: Record<string, JcwfTask> = {};
   for (const taskId of Object.keys(tasks).sort((a, b) => a.localeCompare(b)))
   {
@@ -265,6 +310,21 @@ export function graphToJcwf(graph: EditorGraph, workflowId: string): Ok | CycleE
     editor_layout[node.id] = { x: Math.round(node.position.x), y: Math.round(node.position.y) };
   }
 
+  // Clean dataflow edges: dedupe identical entries, and drop orphans whose referenced output/input
+  // slot no longer exists on the producer/consumer — e.g. after a slot is renamed, stale edges with
+  // the old name linger, and repeated drags pile up duplicates (both hit during dogfooding).
+  const seenDataflow = new Set<string>();
+  const cleanedDataflow = dataflow.filter((df) => {
+    const key = `${df.from_task}.${df.from_output}->${df.to_task}.${df.to_input}`;
+    if (seenDataflow.has(key)) return false;
+    seenDataflow.add(key);
+    const fromOutputs = tasks[df.from_task]?.outputs as Record<string, unknown> | undefined;
+    const toInputs = tasks[df.to_task]?.inputs as Record<string, unknown> | undefined;
+    const fromOk = !!fromOutputs && Object.prototype.hasOwnProperty.call(fromOutputs, df.from_output);
+    const toOk = !!toInputs && Object.prototype.hasOwnProperty.call(toInputs, df.to_input);
+    return fromOk && toOk;
+  });
+
   const needsV11 = filters.length > 0 || control_nodes.length > 0 || controlflow.length > 0;
 
   const jcwf: JcwfFile = {
@@ -272,7 +332,7 @@ export function graphToJcwf(graph: EditorGraph, workflowId: string): Ok | CycleE
     id: workflowId,
     tasks: orderedTasks,
     ...(filters.length > 0 ? { filters } : {}),
-    ...(dataflow.length > 0 ? { dataflow } : {}),
+    ...(cleanedDataflow.length > 0 ? { dataflow: cleanedDataflow } : {}),
     ...(control_nodes.length > 0 ? { control_nodes } : {}),
     ...(controlflow.length > 0 ? { controlflow } : {}),
     editor_layout,
