@@ -201,6 +201,9 @@ Healthy values during an active workflow: drains keep up with pings (one drain p
 | GET | `/api/workflows/<id>` | Both | Get the raw JCWF JSON for a specific workflow. |
 | PUT | `/api/workflows/<id>` | Studio | Update (overwrite) a workflow's JCWF file. |
 | DELETE | `/api/workflows/<id>` | Studio | Delete a workflow's JCWF file from disk. |
+| GET | `/api/workflows/<id>/files` | Studio | List the data files in a workflow's folder (operator+). |
+| POST | `/api/workflows/<id>/files` | Studio | Upload a file into a workflow's folder, then repack the `.jcwf` (admin). |
+| GET | `/api/workflows/<id>/files/<path>` | Studio | Read one file's text content from the workflow folder (operator+). |
 | GET | `/api/workflows/<id>/versions` | Both | List version-history snapshots for a workflow (admin). |
 | GET | `/api/workflows/<id>/versions/<ts>` | Both | Read the raw bytes of a specific historical snapshot (admin). |
 | POST | `/api/workflows/<id>/versions/<ts>/restore` | Both | Restore a historical snapshot as the current workflow (admin). |
@@ -306,6 +309,21 @@ Installs a historical snapshot as the current workflow.  Auto-backs up the exist
 **Response (200):** `{ "ok": true, "workflowId": "exampleMakefile4", "restoredVersion": "20260421T050112" }`
 **Response (404):** Snapshot not found (same shape as version-GET).
 **Response (500):** Snapshot existed but the install failed (corrupt zip, path containment violation, etc.) — body carries `error: "restore_failed"` + `message`.
+
+### GET /api/workflows/\<id\>/files
+Lists the data files in a workflow's folder (`workflows/<id>/`), recursively; the internal version-history backups (`.history/`) are skipped.  Backs the editor's "+ file" picker of already-uploaded files and file-existence checks (artifact-file nodes themselves reconstruct from the persisted `editor_layout`, not from this list).  operator+.
+**Response (200):** `{ "ok": true, "workflowId": "...", "files": [ { "path": "port62pos.csv", "is_dir": false, "size_bytes": 1234, "modified_at": "2026-06-12T20:19:00Z" } ] }`
+**Response (404):** `{ "ok": false, "error": "workflow_not_found", ... }`
+
+### POST /api/workflows/\<id\>/files
+Uploads one file (`multipart/form-data`, field `file`) into the workflow folder, then repacks the `.jcwf`.  The destination is forced to the file's **basename** under `workflows/<id>/` (no sub-paths, no traversal); confined via `ConfineUnderProjectRoot` and verified to land inside the workflow folder before any write.  25 MB limit.  admin.
+**Response (201):** `{ "ok": true, "workflowId": "...", "path": "port62pos.csv", "size_bytes": 1234 }`
+**Errors:** `400 invalid_content_type` (not multipart) · `400 no_file` · `400 invalid_filename` / `path_rejected` · `404 workflow_not_found` · `413 file_too_large` · `500 write_failed` / `repack_failed`.
+
+### GET /api/workflows/\<id\>/files/\<path\>
+Reads one file's text content from the workflow folder — used by the editor's fan-out builder to parse a filter's source CSV header.  Confined under `workflows/<id>/` (traversal / symlink escape rejected), 10 MB cap, returned as `text/plain`.  operator+.
+**Response (200):** raw file text.
+**Errors:** `400 invalid_workflow_id` / `path_rejected` · `404 workflow_not_found` / `file_not_found` · `413 file_too_large` · `500 read_failed`.
 
 ---
 

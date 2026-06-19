@@ -36,10 +36,21 @@ export type EditorControlNodeData = {
   subtitle?: string;
 };
 
+// Artifact-file node (U3) — a pure editor overlay, NOT a JCWF task. It represents an input file that
+// lives in the workflow folder; wiring it into a task's input port is what produces that task's
+// file_inputs path. graphToJcwf emits no task for it (only an editor_layout position); jcwfToGraph
+// reconstructs it. `workflowRelPath` is the file's path relative to workflows/<id>/ and is the node's
+// stable identity (id = `file:<workflowRelPath>`).
+export type EditorFileNodeData = {
+  workflowRelPath: string;
+  title: string; // display basename
+};
+
 export type EditorTaskNode = Node<EditorTaskNodeData> & { type: "task" };
 export type EditorFilterNode = Node<EditorFilterNodeData> & { type: "filter" };
 export type EditorControlNode = Node<EditorControlNodeData> & { type: "branch" };
-export type EditorNode = EditorTaskNode | EditorFilterNode | EditorControlNode;
+export type EditorFileNode = Node<EditorFileNodeData> & { type: "file" };
+export type EditorNode = EditorTaskNode | EditorFilterNode | EditorControlNode | EditorFileNode;
 export type EditorTaskEdge = Edge;
 
 // Narrowing guard for node-array iterations. Node arrays are frequently typed/cast as
@@ -51,6 +62,13 @@ export type EditorTaskEdge = Edge;
 export function isTaskNode(n: EditorNode): n is EditorTaskNode
 {
   return n.type === "task";
+}
+
+// Sibling guard for the artifact-file overlay nodes (id `file:<relpath>`). Same discipline as
+// isTaskNode: the node arrays are typed broadly, so guard before reading `.data.workflowRelPath`.
+export function isFileNode(n: EditorNode): n is EditorFileNode
+{
+  return n.type === "file";
 }
 
 export type EditorGraph = {

@@ -184,6 +184,51 @@ export async function deleteWorkflow(workflowId: string): Promise<WorkflowDelete
   return (await response.json()) as WorkflowDeleteResponse;
 }
 
+// Artifact files in a workflow's folder (U3 / editor file nodes).
+export type WorkflowFileEntry = {
+  path: string;
+  is_dir: boolean;
+  size_bytes: number;
+  modified_at?: string;
+};
+
+export async function listWorkflowFiles(workflowId: string): Promise<WorkflowFileEntry[]>
+{
+  const response = await authFetch(`/api/workflows/${encodeURIComponent(workflowId)}/files`);
+  await ensureOk(response);
+  const body = (await response.json()) as { files?: WorkflowFileEntry[] };
+  return body.files ?? [];
+}
+
+/**
+ * POST /api/workflows/{id}/files — upload one file (multipart, field "file") into the workflow
+ * folder.  Let the browser set the multipart Content-Type + boundary (do NOT set it manually).
+ * Returns the stored basename + size.
+ */
+export async function uploadWorkflowFile(workflowId: string, file: File): Promise<{ path: string; size_bytes: number }>
+{
+  const form = new FormData();
+  form.append("file", file, file.name);
+  const response = await authFetch(`/api/workflows/${encodeURIComponent(workflowId)}/files`, {
+    method: "POST",
+    body: form,
+  });
+  await ensureOk(response);
+  return (await response.json()) as { path: string; size_bytes: number };
+}
+
+/**
+ * GET /api/workflows/{id}/files/{path} — read one file's text content from the workflow folder
+ * (e.g. a filter's source CSV, so the fan-out builder can parse its header). Returns the raw text.
+ */
+export async function getWorkflowFile(workflowId: string, relPath: string): Promise<string>
+{
+  const encodedPath = relPath.split("/").map(encodeURIComponent).join("/");
+  const response = await authFetch(`/api/workflows/${encodeURIComponent(workflowId)}/files/${encodedPath}`);
+  await ensureOk(response);
+  return await response.text();
+}
+
 export type CleanWorkflowResponse = {
   ok: boolean;
   workflowId: string;

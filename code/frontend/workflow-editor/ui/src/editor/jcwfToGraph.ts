@@ -1,7 +1,9 @@
 import type { CSSProperties } from "react";
-import type { EditorControlNode, EditorGraph, EditorFilterNode, EditorTaskEdge, EditorTaskNode, EditorNode } from "./types";
+import type { EditorControlNode, EditorGraph, EditorFileNode, EditorFilterNode, EditorTaskEdge, EditorTaskNode, EditorNode } from "./types";
 import type { JcwfControlNode, JcwfControlflowEdge, JcwfDataflowEntry, JcwfFile, JcwfFilter, JcwfTask } from "../jcwf/types";
 import { FILE_INPUT_COLORS } from "./constants";
+import { normalizePathSegments, resolveTaskDirSegments, deriveUpstreamOutputPaths } from "./pathSynthesis";
+import { readsFileInputs } from "./taskCapabilities";
 
 function displayTitle(task: JcwfTask): { title: string; subtitle?: string }
 {
@@ -19,7 +21,10 @@ function filterDisplayTitle(filter: JcwfFilter): { title: string; subtitle?: str
   };
 }
 
-export function jcwfToGraph(jcwf: JcwfFile): EditorGraph
+// `workflowId` is passed explicitly (the editor always knows it from the URL) rather than trusting
+// `jcwf.id` — some extracted canvases omit the id field, and the file-node inference (S3) needs the
+// real workflow id to resolve workflows/<id>/ paths. Falls back to jcwf.id for callers that don't pass it.
+export function jcwfToGraph(jcwf: JcwfFile, workflowId?: string): EditorGraph
 {
   const taskEntries = Object.entries(jcwf.tasks ?? {});
   const taskIdSet = new Set<string>(taskEntries.map(([taskId]) => taskId));
@@ -336,5 +341,118 @@ export function jcwfToGraph(jcwf: JcwfFile): EditorGraph
     });
   }
 
-  return { nodes, edges };
+  // Artifact-file nodes (U3 + S3 inference). Each file_inputs entry of a file-reading task is either an
+  // upstream task OUTPUT (already drawn as a dep edge — no file node) or an EXTERNAL file in the
+  // workflow folder (→ a file node + a file edge). They're told apart by pure path arithmetic: an
+  // entry equal to deriveUpstreamOutputPaths(dep, task) for some dep is an upstream output; anything
+  // else that resolves INSIDE workflows/<wfId>/ is an external file node. Entries that resolve outside
+  // the workflow folder (queue paths, outside-tree) stay plain stored file_inputs. Persisted
+  // editor_layout `file:` markers also resurface (incl. unwired nodes the user placed). This is the
+  // inverse of the U1 save-time derivation (fileNodeInputPath), so the round-trip is lossless.
+  const tasksById = Object.fromEntries(taskEntries) as Record<string, JcwfTask>;
+  const wfId = workflowId ?? (typeof jcwf.id === "string" ? jcwf.id : "");
+  const fileNodeRelPaths = new Set<string>();
+  const fileEdgesToAdd: EditorTaskEdge[] = [];
+
+  for (const [taskId, taskValue] of taskEntries)
+  {
+    const task = taskValue as JcwfTask;
+    if (!readsFileInputs(task.type)) continue;
+    const fileInputs = Array.isArray(task.file_inputs) ? task.file_inputs as string[] : [];
+    const consumerWd = (task.working_directory ?? "") as string;
+    const deps = Array.isArray(task.depends_on) ? task.depends_on.filter((d) => taskIdSet.has(d)) : [];
+
+    // Every output path reachable from this task's EXPLICIT deps — those file_inputs are dep-edge wired
+    // by the depends_on loop above.
+    const depOutputs = new Set<string>();
+    for (const depId of deps)
+    {
+      const depTask = tasksById[depId];
+      if (depTask) for (const p of deriveUpstreamOutputPaths(depTask, task, wfId, undefined)) depOutputs.add(p);
+    }
+
+    // Map each OTHER task's outputs (expressed relative to THIS consumer) → producer task id. A
+    // file_input matching one is an intermediate build artifact produced upstream — even when the
+    // workflow declares no depends_on and is wired purely by filename (a Makefile-style graph). Such an
+    // input is drawn as a task→task dependency edge (which serialises to depends_on on save), not a
+    // floating file node. First producer wins on a duplicate output name.
+    const outputToProducer = new Map<string, string>();
+    for (const [otherId, otherValue] of taskEntries)
+    {
+      if (otherId === taskId) continue;
+      const otherTask = otherValue as JcwfTask;
+      for (const p of deriveUpstreamOutputPaths(otherTask, task, wfId, undefined))
+      {
+        if (!outputToProducer.has(p)) outputToProducer.set(p, otherId);
+      }
+    }
+
+    fileInputs.forEach((fi, idx) => {
+      const trimmed = fi.trim();
+      if (trimmed.length === 0) return;
+      if (depOutputs.has(trimmed)) return; // upstream output via explicit dep — dep edge already drawn
+
+      // Implicit upstream output (no explicit depends_on): wire producer → consumer as a dependency edge
+      // so the intermediate shows as a connection between nodes instead of a free-floating file node.
+      const producerId = outputToProducer.get(trimmed);
+      if (producerId)
+      {
+        const producer = tasksById[producerId];
+        const prodOutputs = producer && Array.isArray(producer.file_outputs) ? producer.file_outputs as string[] : [];
+        const targetBase = trimmed.split("/").pop() ?? "";
+        const matchIdx = prodOutputs.findIndex((o) => (o.split("/").pop() ?? "") === targetBase);
+        const sourceHandle = prodOutputs.length <= 1 ? "fileoutput-0" : `fileoutput-${matchIdx >= 0 ? matchIdx : 0}`;
+        fileEdgesToAdd.push({
+          id: `dep:${producerId}->${taskId}:${idx}`,
+          source: producerId,
+          target: taskId,
+          sourceHandle,
+          targetHandle: `dephandle-${idx}`,
+          style: { stroke: FILE_INPUT_COLORS[idx % FILE_INPUT_COLORS.length], strokeWidth: 2 },
+        });
+        return; // intermediate artifact — no file node
+      }
+
+      // External input. Resolve through the same base-leaf-strip the runtime uses; only files INSIDE
+      // the workflow folder become nodes.
+      const fileAbs = normalizePathSegments(`${resolveTaskDirSegments(wfId, consumerWd).join("/")}/${trimmed}`);
+      const prefix = ["workflows", wfId];
+      if (!prefix.every((seg, i) => fileAbs[i] === seg)) return; // outside the workflow folder
+      const relPath = fileAbs.slice(prefix.length).join("/");
+      if (relPath.length === 0) return;
+      fileNodeRelPaths.add(relPath);
+      fileEdgesToAdd.push({
+        id: `file:${relPath}->${taskId}:${idx}`,
+        source: `file:${relPath}`,
+        target: taskId,
+        targetHandle: `dephandle-${idx}`,
+        style: { stroke: FILE_INPUT_COLORS[idx % FILE_INPUT_COLORS.length], strokeWidth: 2, strokeDasharray: "1 0" },
+      });
+    });
+  }
+
+  // Persisted markers — keep file nodes the user placed (incl. unwired ones) at their saved positions.
+  for (const k of Object.keys(savedLayout ?? {}))
+  {
+    if (k.startsWith("file:")) fileNodeRelPaths.add(k.slice("file:".length));
+  }
+
+  // Place inferred (marker-less) file nodes in a column to the left of the leftmost task / filter.
+  const fileColumnX = (sortedLevels.length > 0 ? (sortedLevels[0] * cellW) : 0) - cellW * 2;
+  let fileRow = 0;
+  const fileNodes: EditorFileNode[] = Array.from(fileNodeRelPaths).sort().map((relPath) => {
+    const fileNodeId = `file:${relPath}`;
+    const saved = savedLayout?.[fileNodeId];
+    const position = saved ? { x: saved.x, y: saved.y } : { x: fileColumnX, y: (fileRow++) * (BASE_NODE_HEIGHT + VERTICAL_GAP) };
+    return {
+      id: fileNodeId,
+      type: "file" as const,
+      position,
+      data: { workflowRelPath: relPath, title: relPath.split("/").pop() || relPath },
+    };
+  });
+
+  for (const e of fileEdgesToAdd) edges.push(e);
+
+  return { nodes: [...nodes, ...fileNodes], edges };
 }

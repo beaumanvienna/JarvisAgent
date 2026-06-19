@@ -435,20 +435,22 @@ namespace
             if (!fromTask.m_Outputs.empty() && (fromTask.m_Outputs.find(df.m_FromOutput) == fromTask.m_Outputs.end()))
             {
                 AddIssue(issues, WorkflowValidationSeverity::Error, "missing_from_output",
-                         "dataflow references unknown from_output: " + df.m_FromOutput, basePath + ".from_output");
+                         "dataflow references unknown from_output: " + df.m_FromOutput, basePath + ".from_output",
+                         df.m_FromTask);
             }
 
             if (!toTask.m_Inputs.empty() && (toTask.m_Inputs.find(df.m_ToInput) == toTask.m_Inputs.end()))
             {
                 AddIssue(issues, WorkflowValidationSeverity::Error, "missing_to_input",
-                         "dataflow references unknown to_input: " + df.m_ToInput, basePath + ".to_input");
+                         "dataflow references unknown to_input: " + df.m_ToInput, basePath + ".to_input", df.m_ToTask);
             }
 
             std::string const toKey = df.m_ToTask + "." + df.m_ToInput;
             if (toSlotKeys.find(toKey) != toSlotKeys.end())
             {
                 AddIssue(issues, WorkflowValidationSeverity::Warning, "duplicate_dataflow_binding",
-                         "Multiple dataflow entries bind the same destination input: " + toKey, basePath + ".to_input");
+                         "Multiple dataflow entries bind the same destination input: " + toKey, basePath + ".to_input",
+                         df.m_ToTask);
             }
             else
             {
@@ -468,7 +470,7 @@ namespace
                 if (!fromType.empty() && !toType.empty() && fromType != toType)
                 {
                     AddIssue(issues, WorkflowValidationSeverity::Warning, "dataflow_type_mismatch",
-                             "dataflow type mismatch: " + fromType + " -> " + toType, basePath);
+                             "dataflow type mismatch: " + fromType + " -> " + toType, basePath, df.m_ToTask);
                 }
             }
         }

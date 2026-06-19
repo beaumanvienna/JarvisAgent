@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import type { JcwfTask } from "../jcwf/types";
+import { inferSchemaFromExample } from "./inferSchemaFromExample";
 
 type Props = {
   task: JcwfTask;
@@ -110,6 +111,8 @@ export default function StructuredOutputEditor(props: Props): React.ReactElement
   const [allowExtra, setAllowExtra] = useState<boolean>(seed.allowExtra);
   const [schemaText, setSchemaText] = useState<string>(() => schemaToText(task.output_schema));
   const [parseError, setParseError] = useState<string | null>(null);
+  const [exampleText, setExampleText] = useState<string>("");
+  const [exampleError, setExampleError] = useState<string | null>(null);
 
   // Re-seed everything when a different task is selected (keyed on id); leave in-progress edits
   // untouched across same-task re-renders.
@@ -119,6 +122,8 @@ export default function StructuredOutputEditor(props: Props): React.ReactElement
     setAllowExtra(next.allowExtra);
     setSchemaText(schemaToText(task.output_schema));
     setParseError(null);
+    setExampleText("");
+    setExampleError(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [task.id]);
 
@@ -188,6 +193,19 @@ export default function StructuredOutputEditor(props: Props): React.ReactElement
     }
   };
 
+  // Infer a schema from a pasted example answer (area F). On success, route the schema through the
+  // existing commit path so the builder rows + raw textarea re-seed from it — no new plumbing.
+  const handleInferFromExample = () => {
+    const result = inferSchemaFromExample(exampleText);
+    if (!result.ok)
+    {
+      setExampleError(result.error);
+      return;
+    }
+    setExampleError(null);
+    handleSchemaChange(JSON.stringify(result.schema, null, 2));
+  };
+
   const retries = typeof task.output_retries === "number" ? task.output_retries : undefined;
   const hasSchema = task.output_schema !== undefined && task.output_schema !== null;
 
@@ -201,6 +219,36 @@ export default function StructuredOutputEditor(props: Props): React.ReactElement
         retry budget). A validated reply lands at <code>&lt;stem&gt;.output.json</code> instead of
         <code>.output.txt</code>.
       </div>
+
+      <details className="field" style={{ marginTop: 6 }}>
+        <summary style={{ cursor: "pointer", fontSize: 11, opacity: 0.85 }}>
+          Start from an example answer
+        </summary>
+        <div className="small" style={{ marginTop: 4, opacity: 0.7 }}>
+          Paste one example of what a good reply looks like — a JSON object — and the fields below are
+          filled in for you. Numbers become integer/number by the example; tune anything afterward.
+        </div>
+        <textarea
+          className="input"
+          style={{ fontFamily: "monospace", fontSize: 11, marginTop: 4 }}
+          rows={5}
+          value={exampleText}
+          placeholder={'{\n  "category": "engine",\n  "confidence": 0.9\n}'}
+          onChange={(e) => { setExampleText(e.target.value); setExampleError(null); }}
+        />
+        {exampleError && (
+          <div className="small" style={{ color: "#ff8a8a", marginTop: 2 }}>{exampleError}</div>
+        )}
+        <button
+          className="btn"
+          type="button"
+          style={{ padding: "3px 8px", fontSize: 11, marginTop: 4 }}
+          disabled={exampleText.trim().length === 0}
+          onClick={handleInferFromExample}
+        >
+          Infer fields from example
+        </button>
+      </details>
 
       <div className="field" style={{ marginTop: 6 }}>
         <div className="small" style={{ fontWeight: 600 }}>Fields</div>

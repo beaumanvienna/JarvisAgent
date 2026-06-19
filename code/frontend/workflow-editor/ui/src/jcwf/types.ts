@@ -54,11 +54,35 @@ export type JcwfTask = {
 
   params?: Record<string, unknown>;
 
+  // File ports — relative paths the task reads (file_inputs) / writes (file_outputs).
+  // file_inputs is derived from incoming data edges at save time for edge-wired tasks (see
+  // pathSynthesis / U1); an explicit array is still honoured for externals without a node yet.
+  file_inputs?: string[];
+  file_outputs?: string[];
+
+  // Dataflow named-value slots (distinct from file ports — pass a value to a script parameter).
+  // Keyed by slot name; each carries an optional type/required descriptor.
+  inputs?: Record<string, JcwfDataflowSlot>;
+  outputs?: Record<string, JcwfDataflowSlot>;
+
+  // ai_call queue-folder inputs (STNG / TASK / CNTX / PROB file assembly).
+  queue_binding?: JcwfQueueBinding;
+
+  // ai_call structured output — a JSON Schema (Draft-2020-12 subset) the reply is validated against,
+  // plus the re-ask budget on a shape mismatch. A validated reply lands at <stem>.output.json.
+  output_schema?: unknown;
+  output_retries?: number;
+
   // sub_workflow tasks: path to child .jcwf file (relative to parent workflow directory)
   workflow_file?: string;
 
   // editor must preserve extra fields for round-trips
   [key: string]: unknown;
+};
+
+export type JcwfDataflowSlot = {
+  type?: string;
+  required?: boolean;
 };
 
 export type JcwfControlNodeType = "branch";

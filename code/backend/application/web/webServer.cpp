@@ -1215,6 +1215,47 @@ namespace AIAssistant
                     return HandleWorkflowsListGet();
                 });
 
+        // Static sub-paths of /api/workflows/ must register BEFORE the /<string> param route:
+        // Crow's router picks the lowest (earliest-registered) rule index among all matches, NOT
+        // static-over-param, so "dependency-graph" would otherwise be captured as a workflow id by
+        // /<string>. Keep this block ahead of the param route.
+        CROW_ROUTE(m_Server, "/api/workflows/dependency-graph")
+            .methods("GET"_method)(
+                [this](crow::request const& req)
+                {
+                    auto err = CheckAuth(req, "viewer");
+                    if (!err.empty()) return MakeAuthErrorResponse(err);
+
+                    WorkflowRegistry const* registry = nullptr;
+                    {
+                        std::scoped_lock<std::mutex> const lock(m_Mutex);
+                        registry = m_WorkflowRegistry;
+                    }
+                    if (registry == nullptr)
+                    {
+                        return crow::response(503, "application/json",
+                                              R"({"ok":false,"error":"registry_unavailable"})");
+                    }
+
+                    auto const graph = registry->GetSubWorkflowDependencyGraph();
+                    crow::json::wvalue edgesArray(crow::json::wvalue::list{});
+                    size_t idx = 0;
+                    for (auto const& [parentId, children] : graph)
+                    {
+                        for (auto const& childId : children)
+                        {
+                            crow::json::wvalue edge;
+                            edge["parent"] = parentId;
+                            edge["child"] = childId;
+                            edgesArray[idx++] = std::move(edge);
+                        }
+                    }
+                    crow::json::wvalue body;
+                    body["ok"] = true;
+                    body["edges"] = std::move(edgesArray);
+                    return crow::response(200, "application/json", body.dump());
+                });
+
         CROW_ROUTE(m_Server, "/api/workflows/<string>")
             .methods("GET"_method)(
                 [this](crow::request const& req, std::string const& workflowId)
@@ -1371,44 +1412,7 @@ namespace AIAssistant
                     return HandleN8nStartPost(req);
                 });
 
-        // ---- Viewer+: sub-workflow tree + dependency graph (read-only registry queries) ----
-        CROW_ROUTE(m_Server, "/api/workflows/dependency-graph")
-            .methods("GET"_method)(
-                [this](crow::request const& req)
-                {
-                    auto err = CheckAuth(req, "viewer");
-                    if (!err.empty()) return MakeAuthErrorResponse(err);
-
-                    WorkflowRegistry const* registry = nullptr;
-                    {
-                        std::scoped_lock<std::mutex> const lock(m_Mutex);
-                        registry = m_WorkflowRegistry;
-                    }
-                    if (registry == nullptr)
-                    {
-                        return crow::response(503, "application/json",
-                                              R"({"ok":false,"error":"registry_unavailable"})");
-                    }
-
-                    auto const graph = registry->GetSubWorkflowDependencyGraph();
-                    crow::json::wvalue edgesArray(crow::json::wvalue::list{});
-                    size_t idx = 0;
-                    for (auto const& [parentId, children] : graph)
-                    {
-                        for (auto const& childId : children)
-                        {
-                            crow::json::wvalue edge;
-                            edge["parent"] = parentId;
-                            edge["child"] = childId;
-                            edgesArray[idx++] = std::move(edge);
-                        }
-                    }
-                    crow::json::wvalue body;
-                    body["ok"] = true;
-                    body["edges"] = std::move(edgesArray);
-                    return crow::response(200, "application/json", body.dump());
-                });
-
+        // ---- Viewer+: sub-workflow tree (read-only registry query) ----
         CROW_ROUTE(m_Server, "/api/workflows/<string>/tree")
             .methods("GET"_method)(
                 [this](crow::request const& req, std::string const& workflowId)

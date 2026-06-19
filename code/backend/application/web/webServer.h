@@ -487,6 +487,11 @@ namespace AIAssistant
         crow::response HandleScriptCheckGet(crow::request const& req);
         crow::response HandleScriptRegistryGet();
         crow::response HandleFileCheckGet(crow::request const& req);
+
+        // Workflow folder files: list + upload + read (artifact-file nodes / drag-drop / fan-out CSV header)
+        crow::response HandleWorkflowFilesListGet(std::string const& workflowId);
+        crow::response HandleWorkflowFileUploadPost(crow::request const& req, std::string const& workflowId);
+        crow::response HandleWorkflowFileGet(std::string const& workflowId, std::string const& relPath);
 #endif // J9T_STUDIO
 
     private:

@@ -20,18 +20,24 @@ import "reactflow/dist/style.css";
 import TaskNode from "./TaskNode";
 import FilterNode from "./FilterNode";
 import BranchNode from "./BranchNode";
+import FileNode from "./FileNode";
+import FilePickerDialog from "./FilePickerDialog";
 import WorkflowTreeView from "./WorkflowTreeView";
 import { FILE_INPUT_COLORS } from "./constants";
 import FilterBuilderDialog from "./FilterBuilderDialog";
 import SqlFilterBuilder from "./SqlFilterBuilder";
 import QueueBindingEditor from "./QueueBindingEditor";
+import FanoutBuilder from "./FanoutBuilder";
 import StructuredOutputEditor from "./StructuredOutputEditor";
 import FilePathInput from "./FilePathInput";
 import { jcwfToGraph } from "./jcwfToGraph";
 import { graphToJcwf } from "./graphToJcwf";
 import { validateGraph } from "./validation";
-import type { EditorControlNode, EditorControlNodeData, EditorFilterNode, EditorFilterNodeData, EditorGraph, EditorNode, EditorTaskEdge, EditorTaskNode, EditorTaskNodeData, RuntimeTaskState } from "./types";
-import { isTaskNode } from "./types";
+import { suggestOutputName } from "./suggestOutputName";
+import { deriveUpstreamOutputPaths, fileNodeInputPath, resolveTaskDirSegments } from "./pathSynthesis";
+import { acceptsWiredInput, readsFileInputs } from "./taskCapabilities";
+import { classifyEdge } from "./edgeClassify";
+import type { EditorControlNode, EditorControlNodeData, EditorFileNode, EditorFilterNode, EditorFilterNodeData, EditorGraph, EditorNode, EditorTaskEdge, EditorTaskNode, EditorTaskNodeData, RuntimeTaskState } from "./types";
 import type { JcwfControlNode, JcwfFile, JcwfFilter, JcwfFilterSource, JcwfQueueBinding, JcwfTask, JcwfTaskMode, JcwfTaskType, JcwfTrigger } from "../jcwf/types";
 import {
   cancelRun,
@@ -46,6 +52,7 @@ import {
   runWorkflow,
   saveWorkflow,
   stopRun,
+  uploadWorkflowFile,
   validateDraft,
   type WorkflowValidationFinding,
 } from "../api/workflows";
@@ -55,7 +62,7 @@ import { listAiInterfaces, type AiInterface } from "@shared/api/aiInterfaces";
 import AiPromptArea from "./AiPromptArea";
 import type { AiPromptAreaHandle } from "./AiPromptArea";
 
-const nodeTypes = { task: TaskNode, filter: FilterNode, branch: BranchNode };
+const nodeTypes = { task: TaskNode, filter: FilterNode, branch: BranchNode, file: FileNode };
 
 export type WorkflowPersistEvent = {
   kind: "save" | "create" | "saveAs";
@@ -271,87 +278,6 @@ function nodeTitleFromTask(task: JcwfTask): { title: string; subtitle?: string }
   };
 }
 
-// Lexically normalize a POSIX path into segments, resolving "." and ".." (keeping leading ".."
-// that climb above the start). No filesystem access.
-function normalizePathSegments(path: string): string[]
-{
-  const out: string[] = [];
-  for (const seg of path.split("/"))
-  {
-    if (seg === "" || seg === ".") continue;
-    if (seg === "..")
-    {
-      if (out.length > 0 && out[out.length - 1] !== "..") out.pop();
-      else out.push("..");
-    }
-    else out.push(seg);
-  }
-  return out;
-}
-
-// Relative POSIX path from a directory to a file, both given as normalized segment lists.
-function relativePathBetween(fromDir: string[], toPath: string[]): string
-{
-  let i = 0;
-  while (i < fromDir.length && i < toPath.length && fromDir[i] === toPath[i]) i++;
-  const ups = fromDir.length - i;
-  const parts = [...Array<string>(ups).fill(".."), ...toPath.slice(i)];
-  return parts.join("/");
-}
-
-// The file path(s) a downstream task reads for an upstream task's output(s). Both
-// working_directories are resolved against the workflow base (workflows/<wfId>/) and the
-// relative path between them is taken — correct even when a wd contains ".." (e.g. the
-// auto-filled ../../queue/<wf>/<task>), where a naive segment-count would skew. Shared by the
-// edge-draw auto-populate (onConnect), the F-21 input sync, and the inspector's wired-input
-// suggestions so the three never drift.
-//   - ai_call source: declared file_outputs (e.g. classification.output.json), else the
-//     disk-first PROB → .output.txt convention.
-//   - shell/python/internal source: file_outputs, narrowed to the dragged fileoutput-N if given.
-function deriveUpstreamOutputPaths(sourceTask: JcwfTask, targetTask: JcwfTask, wfId: string, sourceHandle?: string | null): string[]
-{
-  const base = `workflows/${wfId}`;
-  const sourceWd = (sourceTask.working_directory ?? "") as string;
-  const targetDirAbs = normalizePathSegments(`${base}/${(targetTask.working_directory ?? "") as string}`);
-
-  let outputNames: string[] = [];
-  if (sourceTask.type === "ai_call")
-  {
-    const aiFileOutputs = Array.isArray(sourceTask.file_outputs)
-      ? (sourceTask.file_outputs as string[]).filter((o) => o.trim().length > 0)
-      : [];
-    if (aiFileOutputs.length > 0)
-    {
-      outputNames = aiFileOutputs;
-    }
-    else
-    {
-      const qb = (sourceTask.queue_binding ?? {}) as Record<string, unknown>;
-      const probFiles = (qb.prob_files ?? []) as Array<{ path: string } | string>;
-      outputNames = probFiles.map((entry) => (typeof entry === "string" ? entry : entry.path).replace(/\.txt$/, ".output.txt"));
-    }
-  }
-  else if (sourceTask.type === "shell" || sourceTask.type === "python" || sourceTask.type === "internal")
-  {
-    const sourceOutputs = Array.isArray(sourceTask.file_outputs)
-      ? (sourceTask.file_outputs as string[]).filter((o) => o.trim().length > 0)
-      : [];
-    if (typeof sourceHandle === "string" && sourceHandle.startsWith("fileoutput-"))
-    {
-      const oi = parseInt(sourceHandle.slice(11), 10);
-      outputNames = (oi >= 0 && oi < sourceOutputs.length) ? [sourceOutputs[oi]] : sourceOutputs;
-    }
-    else
-    {
-      outputNames = sourceOutputs;
-    }
-  }
-
-  return outputNames
-    .filter((name) => name.trim().length > 0)
-    .map((name) => relativePathBetween(targetDirAbs, normalizePathSegments(`${base}/${sourceWd}/${name}`)));
-}
-
 function nextId(existing: Set<string>, base: string): string
 {
   if (!existing.has(base))
@@ -512,7 +438,6 @@ export default function WorkflowEditorView(props: {
 
   // Helper to push to undo stack
   const pushToUndoStack = useCallback((state: HistoryEntry) => {
-    console.log("[HISTORY] Pushing to undo stack:", state.nodes.length, "nodes, pos:", state.nodes[0]?.position);
     setUndoStack((prev) => [...prev, state].slice(-50));
     setRedoStack([]); // Clear redo stack on new action
   }, []);
@@ -620,17 +545,14 @@ export default function WorkflowEditorView(props: {
     if (pendingPrevStateRef.current !== null)
     {
       const stateToSave = pendingPrevStateRef.current;
-      console.log("[DRAG STOP] Pushing pre-drag state with", stateToSave.nodes.length, "nodes, pos:", stateToSave.nodes[0]?.position);
       pushToUndoStack(stateToSave);
       pendingPrevStateRef.current = null;
     }
   }, [setNodes, pushToUndoStack]);
 
   const undo = useCallback(() => {
-    console.log("[UNDO] Called. undoStack.length:", undoStack.length);
     if (undoStack.length === 0)
     {
-      console.log("[UNDO] Early return: undoStack empty");
       return;
     }
 
@@ -642,8 +564,6 @@ export default function WorkflowEditorView(props: {
       nodes: JSON.parse(nodesJsonRef.current || "[]"),
       edges: JSON.parse(edgesJsonRef.current || "[]"),
     };
-
-    console.log("[UNDO] Restoring:", entry.nodes.length, "nodes, pos:", entry.nodes[0]?.position);
 
     isUndoRedoRef.current = true;
     setUndoStack((prev) => prev.slice(0, -1)); // Pop
@@ -659,7 +579,6 @@ export default function WorkflowEditorView(props: {
   }, [undoStack, setNodes, setEdges]);
 
   const redo = useCallback(() => {
-    console.log("[REDO] Called. redoStack.length:", redoStack.length);
     if (redoStack.length === 0)
     {
       return;
@@ -673,8 +592,6 @@ export default function WorkflowEditorView(props: {
       nodes: JSON.parse(nodesJsonRef.current || "[]"),
       edges: JSON.parse(edgesJsonRef.current || "[]"),
     };
-
-    console.log("[REDO] Restoring:", entry.nodes.length, "nodes, pos:", entry.nodes[0]?.position);
 
     isUndoRedoRef.current = true;
     setRedoStack((prev) => prev.slice(0, -1)); // Pop
@@ -827,17 +744,14 @@ export default function WorkflowEditorView(props: {
     setClientErrors(clientErrorsList);
     setClientInfos(clientInfosList);
 
-    const parseTaskIdFromMessage = (message: string): string | null =>
-    {
-      const match = message.match(/Task '([^']+)'/);
-      return match && match.length >= 2 ? match[1] : null;
-    };
-
+    // The backend sets a structured taskId on every task-scoped finding; graph-level findings
+    // (cycles, sub-workflow depth, trigger/workflow-id issues) intentionally carry no taskId and
+    // surface in the issues list rather than decorating a node.
     const backendErrorsByTaskId = new Map<string, string[]>();
     const sourceErrors = backendFindings ? backendFindings.errors : backendErrors;
     for (const finding of sourceErrors)
     {
-      const taskId = finding.taskId ?? parseTaskIdFromMessage(finding.message);
+      const taskId = finding.taskId;
       if (!taskId)
       {
         continue;
@@ -852,7 +766,7 @@ export default function WorkflowEditorView(props: {
     const sourceWarnings = backendFindings ? backendFindings.warnings : backendWarnings;
     for (const finding of sourceWarnings)
     {
-      const taskId = finding.taskId ?? parseTaskIdFromMessage(finding.message);
+      const taskId = finding.taskId;
       if (!taskId)
       {
         continue;
@@ -867,7 +781,7 @@ export default function WorkflowEditorView(props: {
     const sourceInfos = backendFindings ? (backendFindings.infos ?? []) : backendInfos;
     for (const finding of sourceInfos)
     {
-      const taskId = finding.taskId ?? parseTaskIdFromMessage(finding.message);
+      const taskId = finding.taskId;
       if (!taskId)
       {
         continue;
@@ -1203,7 +1117,7 @@ export default function WorkflowEditorView(props: {
 
   const loadFromJcwf = useCallback((workflowId: string | null, jcwfUnknown: unknown) => {
     const jcwf = jcwfUnknown as JcwfFile;
-    const graph = jcwfToGraph(jcwf);
+    const graph = jcwfToGraph(jcwf, workflowId ?? (typeof jcwf.id === "string" ? jcwf.id : undefined));
     // For templates (workflowId is null), mark as dirty since it's not saved yet
     const isFromTemplate = workflowId === null;
     if (!isFromTemplate)
@@ -1464,7 +1378,7 @@ export default function WorkflowEditorView(props: {
   }, [props.workflowId, props.initialJcwf]);
 
   // Center the graph after a workflow loads.
-  const MIN_ZOOM = 0.67;
+  const MIN_ZOOM = 0.10;
   useEffect(() => {
     if (!reactFlowInstance)
     {
@@ -1995,13 +1909,106 @@ export default function WorkflowEditorView(props: {
       ? { source: rawConnection.target, target: rawConnection.source, sourceHandle: rawConnection.targetHandle, targetHandle: rawConnection.sourceHandle }
       : rawConnection;
 
-    const isDataflow = connection.sourceHandle?.startsWith("out:") && connection.targetHandle?.startsWith("in:");
-    const isControlflow =
-      connection.sourceHandle === "error-signal"
-      || connection.sourceHandle === "cf-out-normal"
-      || connection.sourceHandle === "cf-out-error"
-      || connection.targetHandle === "cf-in-normal"
-      || connection.targetHandle === "cf-in-error";
+    // Artifact-file node → task input (U3). The file node is a pure overlay; wiring it sets the
+    // consumer's file_inputs to the relative path from the consumer's wd to the file, and draws a
+    // `file:` edge (so it round-trips: graphToJcwf skips it, jcwfToGraph reconstructs from the
+    // editor_layout marker + matching file_inputs). Only file_inputs-reading tasks (shell/python/
+    // internal) accept a file node; ai_call reads via queue cntx, not file ports.
+    {
+      const fileSource = (nodes as EditorNode[]).find((n) => n.id === connection.source && n.type === "file");
+      if (fileSource && fileSource.type === "file")
+      {
+        const targetTaskNode = (nodes as EditorNode[]).find((n) => n.id === connection.target && n.type === "task");
+        if (!targetTaskNode || targetTaskNode.type !== "task" || !readsFileInputs(targetTaskNode.data.task.type))
+        {
+          setStatusText("A file can only feed a shell, python, or internal task.");
+          return;
+        }
+        const consumerWd = (targetTaskNode.data.task.working_directory ?? "") as string;
+        const inputPath = fileNodeInputPath(fileSource.data.workflowRelPath, consumerWd, loadedWorkflowId ?? props.workflowId ?? "workflow");
+        const existing: string[] = Array.isArray(targetTaskNode.data.task.file_inputs)
+          ? [...(targetTaskNode.data.task.file_inputs as string[])] : [];
+        let idx = existing.indexOf(inputPath);
+        if (idx < 0)
+        {
+          const emptyIdx = existing.findIndex((s) => s.trim().length === 0);
+          if (emptyIdx >= 0) { existing[emptyIdx] = inputPath; idx = emptyIdx; }
+          else { existing.push(inputPath); idx = existing.length - 1; }
+        }
+        const edgeId = `file:${fileSource.data.workflowRelPath}->${targetTaskNode.id}:${idx}`;
+        if (edges.some((e) => e.id === edgeId))
+        {
+          setStatusText("That file is already wired to this task.");
+          return;
+        }
+        const color = FILE_INPUT_COLORS[idx % FILE_INPUT_COLORS.length];
+        const fileEdge: EditorTaskEdge = {
+          id: edgeId,
+          source: fileSource.id,
+          target: targetTaskNode.id,
+          targetHandle: `dephandle-${idx}`,
+          type: "default",
+          style: { stroke: color, strokeWidth: 2, strokeDasharray: "1 0" },
+        };
+        const updated = (nodes as EditorNode[]).map((n) => {
+          if (n.id !== targetTaskNode.id || n.type !== "task") return n;
+          const nextTask = { ...(n.data.task as JcwfTask), file_inputs: existing };
+          const { title, subtitle } = nodeTitleFromTask(nextTask);
+          return { ...n, data: { ...n.data, task: nextTask, title, subtitle } };
+        });
+        recomputeValidation({ nodes: updated, edges: [...edges, fileEdge] });
+        setStatusText(`Wired '${fileSource.data.title}' → ${targetTaskNode.id}.`);
+        setErrorText(null);
+        return;
+      }
+    }
+
+    // Route through the shared edge classifier (U2 / S5) — one source of truth for what an edge means,
+    // also used by graphToJcwf's serialization. (The file-node → task case is a fileflow sub-case
+    // handled specially above.)
+    const edgeClass = classifyEdge(connection.sourceHandle, connection.targetHandle, connection.source ?? "", connection.target ?? "");
+    const isDataflow = edgeClass === "dataflow";
+    const isControlflow = edgeClass === "controlflow";
+
+    // Filter → task fan-out (B). Drawing the edge IS the binding: set task.filter + mode:"per_item"
+    // automatically (the user never re-types the filter id) and draw the fanout edge. The binding
+    // lives in task.filter (graphToJcwf skips the fanout edge), and jcwfToGraph re-derives the edge on
+    // load — so this is the inverse of that derivation.
+    if (edgeClass === "fanout")
+    {
+      const filterNodeId = connection.source ?? "";
+      const filterId = filterNodeId.replace(/^filter:/, "");
+      const fanoutTarget = (nodes as EditorNode[]).find((n) => n.id === connection.target && n.type === "task");
+      if (!fanoutTarget || fanoutTarget.type !== "task")
+      {
+        setStatusText("A filter can only fan out into a task.");
+        return;
+      }
+      const fanoutEdgeId = `fanout:${filterNodeId}->${fanoutTarget.id}`;
+      if (edges.some((e) => e.id === fanoutEdgeId))
+      {
+        setStatusText("That filter already fans out into this task.");
+        return;
+      }
+      const fanoutEdge: EditorTaskEdge = {
+        id: fanoutEdgeId,
+        source: filterNodeId,
+        target: fanoutTarget.id,
+        style: { strokeDasharray: "6 3", stroke: "rgba(180, 140, 255, 0.7)" },
+        label: "per_item",
+        labelStyle: { fill: "rgba(180, 140, 255, 0.9)", fontSize: 10 },
+      };
+      const updated = (nodes as EditorNode[]).map((n) => {
+        if (n.id !== fanoutTarget.id || n.type !== "task") return n;
+        const nextTask = { ...(n.data.task as JcwfTask), filter: filterId, mode: "per_item" as const };
+        const { title, subtitle } = nodeTitleFromTask(nextTask);
+        return { ...n, data: { ...n.data, task: nextTask, title, subtitle } };
+      });
+      recomputeValidation({ nodes: updated, edges: [...edges, fanoutEdge] });
+      setStatusText(`'${fanoutTarget.id}' now fans out over '${filterId}'.`);
+      setErrorText(null);
+      return;
+    }
 
     let nextEdges: EditorTaskEdge[];
     // Id of the dependency edge just created (set in the dep branch below) so the
@@ -2093,11 +2100,7 @@ export default function WorkflowEditorView(props: {
       // any of them auto-populates the input path from the upstream output AND retargets the edge to
       // the matching port (F-19 adds internal; F-23 adds ai_call — without it an edge into an
       // ai_call stayed on the hidden catch-all handle and dangled once a port appeared).
-      const targetReadsFileInputs = !!targetNode
-        && (targetNode.data.task.type === "shell"
-          || targetNode.data.task.type === "python"
-          || targetNode.data.task.type === "internal"
-          || targetNode.data.task.type === "ai_call");
+      const targetReadsFileInputs = !!targetNode && acceptsWiredInput(targetNode.data.task.type);
 
       let newInputPaths: string[] = [];
 
@@ -2273,6 +2276,96 @@ export default function WorkflowEditorView(props: {
     setStatusText(`Added node '${newId}'.`);
     setErrorText(null);
   }, [nodes, edges, reactFlowInstance, recomputeValidation, findNonOverlappingPosition]);
+
+  // Artifact-file nodes (U3 creation). A file lives in the workflow folder; its node is a `file:<rel>`
+  // overlay wired into a task input. The "+ file" button and OS drag-drop both upload the bytes via
+  // POST /api/workflows/<id>/files (which repacks the .jcwf), then place the node.
+  const fileUploadInputRef = useRef<HTMLInputElement>(null);
+  const [showFilePicker, setShowFilePicker] = useState(false);
+
+  const addFileNode = useCallback((workflowRelPath: string, dropPos?: { x: number; y: number }) => {
+    const fileNodeId = `file:${workflowRelPath}`;
+    if ((nodes as EditorNode[]).some((n) => n.id === fileNodeId))
+    {
+      setSelectedNodeId(fileNodeId);
+      setStatusText(`File '${workflowRelPath}' is already on the canvas.`);
+      return;
+    }
+    const pos = dropPos
+      ?? (reactFlowInstance ? reactFlowInstance.project({ x: window.innerWidth / 2, y: window.innerHeight / 2 }) : { x: 0, y: 0 });
+    const newNode: EditorFileNode = {
+      id: fileNodeId,
+      type: "file",
+      position: pos,
+      data: { workflowRelPath, title: workflowRelPath.split("/").pop() || workflowRelPath },
+    };
+    recomputeValidation({ nodes: [...(nodes as EditorNode[]), newNode], edges });
+    setSelectedNodeId(fileNodeId);
+    setStatusText(`Added file '${workflowRelPath}'. Drag from its dot into a shell/python/internal task.`);
+    setErrorText(null);
+  }, [nodes, edges, reactFlowInstance, recomputeValidation]);
+
+  const uploadAndAddFile = useCallback(async (file: File, dropPos?: { x: number; y: number }) => {
+    const wfId = loadedWorkflowId ?? props.workflowId;
+    if (!wfId)
+    {
+      setStatusText("Save the workflow first, then add files.");
+      return;
+    }
+    setStatusText(`Uploading '${file.name}'…`);
+    try
+    {
+      const res = await uploadWorkflowFile(wfId, file);
+      addFileNode(res.path, dropPos);
+    }
+    catch (e)
+    {
+      setErrorText(`Upload failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, [loadedWorkflowId, props.workflowId, addFileNode]);
+
+  const triggerFileUpload = useCallback(() => {
+    const wfId = loadedWorkflowId ?? props.workflowId;
+    if (!wfId)
+    {
+      setStatusText("Save the workflow first, then add files.");
+      return;
+    }
+    fileUploadInputRef.current?.click();
+  }, [loadedWorkflowId, props.workflowId]);
+
+  // "+ File" opens a picker (upload a new file OR add one already in the workflow folder as a node).
+  const openFilePicker = useCallback(() => {
+    const wfId = loadedWorkflowId ?? props.workflowId;
+    if (!wfId)
+    {
+      setStatusText("Save the workflow first, then add files.");
+      return;
+    }
+    setShowFilePicker(true);
+  }, [loadedWorkflowId, props.workflowId]);
+
+  const handleFileUploadSelected = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // reset so the same file can be re-picked
+    if (file) void uploadAndAddFile(file);
+  }, [uploadAndAddFile]);
+
+  const onCanvasDragOver = useCallback((e: React.DragEvent) => {
+    if (Array.from(e.dataTransfer.types).includes("Files"))
+    {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "copy";
+    }
+  }, []);
+
+  const onCanvasDrop = useCallback((e: React.DragEvent) => {
+    const files = e.dataTransfer.files;
+    if (!files || files.length === 0) return;
+    e.preventDefault();
+    const dropPos = reactFlowInstance ? reactFlowInstance.project({ x: e.clientX, y: e.clientY }) : undefined;
+    void uploadAndAddFile(files[0], dropPos);
+  }, [reactFlowInstance, uploadAndAddFile]);
 
   // Ctrl/Cmd+C / Ctrl/Cmd+V — copy and paste selected task node(s), single or box-selection.
   useEffect(() => {
@@ -2491,7 +2584,11 @@ export default function WorkflowEditorView(props: {
       return;
     }
 
-    let nextNodes: EditorTaskNode[] = (nodes as EditorTaskNode[]).map((n) => {
+    // Just apply the patch to the selected task. file_inputs no longer needs live propagation here:
+    // graphToJcwf derives every wired input from its edge at save time (U1), so a wd / file_outputs /
+    // PROB-name change is reflected in the saved file_inputs automatically — nothing stored to keep in
+    // sync between edits. (This deleted the F-15/F-21 PROB-rename + file_outputs/wd re-sync branches.)
+    const nextNodes: EditorTaskNode[] = (nodes as EditorTaskNode[]).map((n) => {
       if (n.id !== selectedNode.id)
       {
         return n;
@@ -2511,124 +2608,8 @@ export default function WorkflowEditorView(props: {
       };
     });
 
-    // Propagate PROB filename renames to downstream file_inputs
-    if (selectedNode.data.task.type === "ai_call" && patch.queue_binding)
-    {
-      const oldQb = (selectedNode.data.task.queue_binding ?? {}) as Record<string, unknown>;
-      const oldProbs = (oldQb.prob_files ?? []) as Array<{ path: string; content?: string } | string>;
-      const newQb = (patch.queue_binding ?? {}) as Record<string, unknown>;
-      const newProbs = (newQb.prob_files ?? []) as Array<{ path: string; content?: string } | string>;
-
-      const renames: Array<{ oldSuffix: string; newSuffix: string }> = [];
-      for (let i = 0; i < Math.max(oldProbs.length, newProbs.length); i++)
-      {
-        const oldEntry = oldProbs[i];
-        const newEntry = newProbs[i];
-        if (!oldEntry || !newEntry) continue;
-        const oldPath = typeof oldEntry === "string" ? oldEntry : oldEntry.path;
-        const newPath = typeof newEntry === "string" ? newEntry : newEntry.path;
-        if (oldPath !== newPath)
-        {
-          renames.push({
-            oldSuffix: "/" + oldPath.replace(/\.txt$/, ".output.txt"),
-            newSuffix: "/" + newPath.replace(/\.txt$/, ".output.txt"),
-          });
-        }
-      }
-
-      if (renames.length > 0)
-      {
-        nextNodes = nextNodes.map((n) => {
-          // Filter / branch nodes carry no `.task` — guard before any task access (a graph with a
-          // CSV filter otherwise throws here, aborting the keystroke's state update). See isTaskNode.
-          if (!isTaskNode(n) || !Array.isArray(n.data.task.file_inputs)) return n;
-          const fi = n.data.task.file_inputs as string[];
-          let changed = false;
-          const updatedFi = fi.map((f) => {
-            for (const r of renames)
-            {
-              if (f.endsWith(r.oldSuffix))
-              {
-                changed = true;
-                return f.slice(0, f.length - r.oldSuffix.length) + r.newSuffix;
-              }
-            }
-            return f;
-          });
-          if (!changed) return n;
-          const nextTask = { ...(n.data.task as JcwfTask), file_inputs: updatedFi };
-          const { title: t, subtitle: st } = nodeTitleFromTask(nextTask);
-          return { ...n, data: { ...n.data, task: nextTask, title: t, subtitle: st } };
-        });
-      }
-    }
-
-    // Keep wired file_inputs in sync when a task's path-determining fields change. The edge-draw
-    // auto-populate captures input paths once; without this they go stale. Anchored to each dep
-    // edge's target port (dephandle-N → file_inputs[N]) and RECOMPUTED via the same helper the
-    // auto-populate uses — so it covers empty→set (not just renames), every source type, and
-    // shell/python/internal targets (F-15/F-21):
-    //   - this task's file_outputs / working_directory changed → recompute DOWNSTREAM inputs;
-    //   - this task's working_directory changed → recompute its OWN inputs (read relative to new wd).
-    if (patch.file_outputs !== undefined || patch.working_directory !== undefined)
-    {
-      const isInputTarget = (t: JcwfTask): boolean => t.type === "shell" || t.type === "python" || t.type === "internal" || t.type === "ai_call";
-      const recompute = (targetTask: JcwfTask, incoming: EditorTaskEdge[], sourceOf: (e: EditorTaskEdge) => JcwfTask | undefined): { fi: string[]; changed: boolean } => {
-        const fi = Array.isArray(targetTask.file_inputs) ? [...(targetTask.file_inputs as string[])] : [];
-        let changed = false;
-        for (const e of incoming)
-        {
-          const src = sourceOf(e);
-          if (!src) continue;
-          const newPaths = deriveUpstreamOutputPaths(src, targetTask, loadedWorkflowId ?? props.workflowId ?? "workflow", e.sourceHandle);
-          if (newPaths.length === 0) continue;
-          const handleIdx = typeof e.targetHandle === "string" && e.targetHandle.startsWith("dephandle-")
-            ? parseInt(e.targetHandle.slice(10), 10) : -1;
-          const idx = handleIdx >= 0 && handleIdx < fi.length ? handleIdx : (fi.length === 1 ? 0 : -1);
-          if (idx >= 0 && fi[idx] !== newPaths[0]) { fi[idx] = newPaths[0]; changed = true; }
-        }
-        return { fi, changed };
-      };
-
-      const updatedSource: JcwfTask = { ...(selectedNode.data.task as JcwfTask), ...patch };
-      const depEdges = (edges as EditorTaskEdge[]).filter((e) => e.id.startsWith("dep:"));
-      const outEdges = depEdges.filter((e) => e.source === selectedNode.id);
-      const inEdges = patch.working_directory !== undefined ? depEdges.filter((e) => e.target === selectedNode.id) : [];
-      const taskById = new Map((nextNodes.filter((n) => n.type === "task") as EditorTaskNode[]).map((n) => [n.id, n.data.task] as const));
-
-      if (outEdges.length > 0 || inEdges.length > 0)
-      {
-        nextNodes = nextNodes.map((n) => {
-          if (n.type !== "task") return n;
-          const task = n.data.task as JcwfTask;
-          let fi: string[] | null = null;
-          let changed = false;
-
-          if (n.id !== selectedNode.id && isInputTarget(task))
-          {
-            const incoming = outEdges.filter((e) => e.target === n.id);
-            if (incoming.length > 0)
-            {
-              const r = recompute(task, incoming, () => updatedSource);
-              if (r.changed) { fi = r.fi; changed = true; }
-            }
-          }
-          else if (n.id === selectedNode.id && inEdges.length > 0 && isInputTarget(task))
-          {
-            const r = recompute(task, inEdges, (e) => taskById.get(e.source));
-            if (r.changed) { fi = r.fi; changed = true; }
-          }
-
-          if (!changed || fi === null) return n;
-          const nextTask = { ...task, file_inputs: fi };
-          const { title: t, subtitle: st } = nodeTitleFromTask(nextTask);
-          return { ...n, data: { ...n.data, task: nextTask, title: t, subtitle: st } };
-        });
-      }
-    }
-
     recomputeValidation({ nodes: nextNodes, edges });
-  }, [selectedNode, nodes, edges, recomputeValidation, loadedWorkflowId, props.workflowId]);
+  }, [selectedNode, nodes, edges, recomputeValidation]);
 
   const updateSelectedControlNodeField = useCallback((patch: Partial<JcwfControlNode>) => {
     if (!selectedControlNode)
@@ -3183,6 +3164,8 @@ export default function WorkflowEditorView(props: {
             <button className="btn" type="button" onClick={() => { addTaskNode("python"); }}>+ Python</button>
             <button className="btn" type="button" onClick={() => { addTaskNode("shell"); }}>+ Shell</button>
             <button className="btn" type="button" onClick={() => { addTaskNode("internal"); }}>+ Internal</button>
+            <button className="btn" type="button" title="Add a file: upload a new one, pick one already in the workflow, or drag a file onto the canvas" onClick={openFilePicker}>{"\u{1F4C4}"} + File</button>
+            <input ref={fileUploadInputRef} type="file" style={{ display: "none" }} onChange={handleFileUploadSelected} />
             <button className="btn" type="button" style={{ borderColor: "rgba(255,180,80,0.35)", color: "rgba(255,200,140,0.95)" }} onClick={addBranchNode}>+ Branch</button>
             <hr style={{ border: "none", borderTop: "1px solid rgba(255,255,255,0.08)", margin: "4px 0" }} />
             <button className="btn" type="button" style={{ borderColor: "rgba(180,140,255,0.35)", color: "rgba(200,170,255,0.95)" }} onClick={addFilterNode}>+ Filter</button>
@@ -3667,7 +3650,7 @@ export default function WorkflowEditorView(props: {
             <span style={{ fontWeight: 700 }}>{loadedWorkflowId ?? "?"}</span>
           </div>
         )}
-        <div style={{ flex: 1, position: "relative", minHeight: 0 }}>
+        <div style={{ flex: 1, position: "relative", minHeight: 0 }} onDrop={onCanvasDrop} onDragOver={onCanvasDragOver}>
           {nodes.length === 0 && (
             <div style={{
               position: "absolute", inset: 0, display: "flex", flexDirection: "column",
@@ -3857,15 +3840,6 @@ export default function WorkflowEditorView(props: {
                     )
                     : null}
 
-                  <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
-                    <input
-                      type="checkbox"
-                      checked={selectedNode.data.task.expose_error_signal === true}
-                      onChange={(e) => { updateSelectedTaskField({ expose_error_signal: e.target.checked || undefined } as Partial<JcwfTask>); }}
-                    />
-                    Expose error signal output
-                  </label>
-
                   <label className="field">
                     <div className="small">Label</div>
                     <input
@@ -3920,17 +3894,60 @@ export default function WorkflowEditorView(props: {
                     </select>
                   </label>
 
-                  {selectedNode.data.task.mode === "per_item" && (
-                    <label className="field">
-                      <div className="small">Filter ID</div>
-                      <input
-                        className="input"
-                        value={(selectedNode.data.task.filter ?? "") as string}
-                        onChange={(e) => { updateSelectedTaskField({ filter: e.target.value || undefined } as Partial<JcwfTask>); }}
-                        placeholder="filter id (e.g. work_items)"
-                      />
-                    </label>
-                  )}
+                  {selectedNode.data.task.mode === "per_item" && (() => {
+                    // Fan-out source. The filter id is an internal handle — pick from the filters
+                    // that exist on the canvas rather than re-typing it (the F-35 AI-dropdown pattern;
+                    // kills F-38/F-39's "typed the id wrong" class). A value that no longer matches a
+                    // filter is preserved as a "(not on canvas)" option so a load never silently drops it.
+                    const filterIds = (nodes as EditorNode[])
+                      .filter((n): n is EditorFilterNode => n.type === "filter")
+                      .map((n) => n.data.filter.id);
+                    const current = (selectedNode.data.task.filter ?? "") as string;
+                    const currentMissing = current.length > 0 && !filterIds.includes(current);
+                    // B: when a filter→task edge implies the binding, the id field is redundant — show a
+                    // read-only chip naming the filter (and its source) instead of the picker.
+                    const fanoutEdge = (edges as EditorTaskEdge[]).find((e) => e.target === selectedNode.id
+                      && classifyEdge(e.sourceHandle, e.targetHandle, e.source, e.target) === "fanout");
+                    if (fanoutEdge)
+                    {
+                      const filterNode = (nodes as EditorNode[]).find((n): n is EditorFilterNode =>
+                        n.id === fanoutEdge.source && n.type === "filter");
+                      const fid = filterNode?.data.filter.id ?? fanoutEdge.source.replace(/^filter:/, "");
+                      const src = filterNode?.data.filter.source;
+                      const srcLabel = src ? (src.path ?? src.query ?? src.kind ?? "") : "";
+                      return (
+                        <div className="field">
+                          <div className="small">Fans out over (filter)</div>
+                          <div
+                            className="small"
+                            style={{ marginTop: 2, padding: "4px 8px", borderRadius: 4, background: "rgba(180,140,255,0.14)", border: "1px solid rgba(180,140,255,0.4)", color: "rgba(230,220,255,0.95)" }}
+                            title="Driven by the filter → task edge — remove that edge to unbind."
+                          >
+                            {"⑂"} {fid}{srcLabel ? ` (${srcLabel})` : ""}
+                          </div>
+                        </div>
+                      );
+                    }
+                    return (
+                      <label className="field">
+                        <div className="small">Fans out over (filter)</div>
+                        <select
+                          className="input"
+                          value={current}
+                          onChange={(e) => { updateSelectedTaskField({ filter: e.target.value || undefined } as Partial<JcwfTask>); }}
+                        >
+                          <option value="">— select a filter —</option>
+                          {filterIds.map((id) => <option key={id} value={id}>{id}</option>)}
+                          {currentMissing && <option value={current}>{current} (not on canvas)</option>}
+                        </select>
+                        {filterIds.length === 0 && (
+                          <div className="small" style={{ opacity: 0.7, marginTop: 2 }}>
+                            No filter nodes yet — add a filter to the canvas to fan out over its items.
+                          </div>
+                        )}
+                      </label>
+                    );
+                  })()}
 
                   {selectedNode.data.task.type === "sub_workflow" && (
                     <>
@@ -4615,38 +4632,6 @@ export default function WorkflowEditorView(props: {
                     );
                   })()}
 
-                  <label className="field">
-                    <div className="small">
-                      {selectedNode.data.task.type === "ai_call"
-                        ? <>working_directory <span style={{ opacity: 0.5 }}>(optional, tab to accept)</span></>
-                        : <>working_directory relative to jcwf <span style={{ opacity: 0.5 }}>(tab to accept)</span></>}
-                    </div>
-                    <FilePathInput
-                      value={(selectedNode.data.task.working_directory ?? "") as string}
-                      onChange={(v) => { updateSelectedTaskField({ working_directory: v }); }}
-                      onKeyDown={(e) => {
-                        const cur = ((selectedNode.data.task.working_directory ?? "") as string).trim();
-                        if (e.key === "Tab" && cur.length === 0)
-                        {
-                          e.preventDefault();
-                          const el = e.currentTarget;
-                          updateSelectedTaskField({ working_directory: el.placeholder });
-                        }
-                      }}
-                      placeholder={
-                        selectedNode.data.task.type === "ai_call"
-                          ? (() => {
-                            const wfId = loadedWorkflowId ?? props.workflowId ?? "workflowId";
-                            const aiNodes = (nodes.filter((n) => n.type === "task") as EditorTaskNode[]).filter((n) => n.data.task.type === "ai_call");
-                            const idx = aiNodes.findIndex((n) => n.id === selectedNode.id);
-                            const num = String(idx >= 0 ? idx + 1 : aiNodes.length + 1).padStart(2, "0");
-                            return `../queue/${wfId}/${num}_${selectedNode.id}`;
-                          })()
-                          : `${loadedWorkflowId ?? props.workflowId ?? "workflowId"}/01_taskName`
-                      }
-                    />
-                  </label>
-
                   {(selectedNode.data.task.type === "shell" || selectedNode.data.task.type === "python" || selectedNode.data.task.type === "ai_call" || selectedNode.data.task.type === "internal") && (() => {
                     // Inputs the upstream tasks wired by an edge into this task actually write —
                     // offered as a datalist dropdown and used to pre-fill "+ file_input" so the
@@ -4664,6 +4649,21 @@ export default function WorkflowEditorView(props: {
                     const datalistId = `fileInputCandidates-${selectedNode.id}`;
                     const curInputs = Array.isArray(selectedNode.data.task.file_inputs) ? selectedNode.data.task.file_inputs as string[] : [];
                     const unusedCandidates = candidatePaths.filter((p) => !curInputs.includes(p));
+                    // Area E (U1 display half): a wired input shows its friendly source (the file node or
+                    // upstream task it comes from) instead of leaving the user staring at a raw ../../
+                    // path. Map each input port (dephandle-N) to the node that feeds it via an edge.
+                    const wiredSourceByPort = new Map<number, string>();
+                    for (const e of edges as EditorTaskEdge[])
+                    {
+                      if (e.target !== selectedNode.id) continue;
+                      if (typeof e.targetHandle !== "string" || !e.targetHandle.startsWith("dephandle-")) continue;
+                      const pi = parseInt(e.targetHandle.slice(10), 10);
+                      if (pi < 0) continue;
+                      const src = (nodes as EditorNode[]).find((n) => n.id === e.source);
+                      if (!src) continue;
+                      if (src.type === "file") wiredSourceByPort.set(pi, `\u{1F4C4} ${src.data.title}`);
+                      else if (src.type === "task") wiredSourceByPort.set(pi, `← ${src.id}`);
+                    }
                     return (
                     <div className="field">
                       <div className="small">file_inputs</div>
@@ -4677,29 +4677,40 @@ export default function WorkflowEditorView(props: {
                           {candidatePaths.map((p) => <option key={p} value={p} />)}
                         </datalist>
                       )}
-                      {curInputs.map((fi, idx) => (
+                      {curInputs.map((fi, idx) => {
+                        const wiredFrom = wiredSourceByPort.get(idx);
+                        return (
                         <div key={`fi-${idx}`} style={{ display: "flex", gap: 4, alignItems: "center" }}>
                           <span style={{
                             display: "inline-block", width: 8, height: 8, borderRadius: "50%",
                             background: FILE_INPUT_COLORS[idx % FILE_INPUT_COLORS.length], flexShrink: 0,
                           }} title={`Input ${idx + 1}`} />
                           <span style={{ fontSize: 10, color: FILE_INPUT_COLORS[idx % FILE_INPUT_COLORS.length], fontWeight: 600, flexShrink: 0 }}>{idx + 1}</span>
-                          <FilePathInput
-                            style={{ fontSize: 12, padding: "4px 8px", flex: 1 }}
-                            value={fi}
-                            listId={candidatePaths.length > 0 ? datalistId : undefined}
-                            onChange={(v) => {
-                              const list = [...(Array.isArray(selectedNode.data.task.file_inputs) ? selectedNode.data.task.file_inputs as string[] : [])];
-                              list[idx] = v;
-                              updateSelectedTaskField({ file_inputs: list } as Partial<JcwfTask>);
-                            }}
-                          />
+                          {wiredFrom ? (
+                            // Wired input — show the friendly source; the synthesized path is in the tooltip.
+                            <span
+                              style={{ flex: 1, fontSize: 12, padding: "4px 8px", borderRadius: 4, background: "rgba(120,170,210,0.14)", border: "1px solid rgba(120,170,210,0.35)", color: "rgba(220,235,250,0.95)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                              title={`from ${wiredFrom} — ${fi}`}
+                            >{wiredFrom}</span>
+                          ) : (
+                            <FilePathInput
+                              style={{ fontSize: 12, padding: "4px 8px", flex: 1 }}
+                              value={fi}
+                              listId={candidatePaths.length > 0 ? datalistId : undefined}
+                              onChange={(v) => {
+                                const list = [...(Array.isArray(selectedNode.data.task.file_inputs) ? selectedNode.data.task.file_inputs as string[] : [])];
+                                list[idx] = v;
+                                updateSelectedTaskField({ file_inputs: list } as Partial<JcwfTask>);
+                              }}
+                            />
+                          )}
                           <button className="btn" type="button" style={{ padding: "2px 6px", fontSize: 10, color: "#ff8a8a" }} onClick={() => {
                             const list = (Array.isArray(selectedNode.data.task.file_inputs) ? selectedNode.data.task.file_inputs as string[] : []).filter((_, i) => i !== idx);
                             updateSelectedTaskField({ file_inputs: list.length > 0 ? list : undefined } as Partial<JcwfTask>);
                           }}>x</button>
                         </div>
-                      ))}
+                        );
+                      })}
                       <button className="btn" type="button" style={{ padding: "3px 8px", fontSize: 11 }} onClick={() => {
                         // Pre-fill the new row with the next wired-but-unused upstream output, if any.
                         const list = [...(Array.isArray(selectedNode.data.task.file_inputs) ? selectedNode.data.task.file_inputs as string[] : []), unusedCandidates[0] ?? ""];
@@ -4709,10 +4720,19 @@ export default function WorkflowEditorView(props: {
                     );
                   })()}
 
-                  {(selectedNode.data.task.type === "shell" || selectedNode.data.task.type === "python" || selectedNode.data.task.type === "ai_call" || selectedNode.data.task.type === "internal") && (
+                  {(selectedNode.data.task.type === "shell" || selectedNode.data.task.type === "python" || selectedNode.data.task.type === "ai_call" || selectedNode.data.task.type === "internal") && (() => {
+                    const curOutputs = Array.isArray(selectedNode.data.task.file_outputs) ? selectedNode.data.task.file_outputs as string[] : [];
+                    // Suggest a conventional `<stem>.output.<ext>` name from the task's first input — a
+                    // one-click default instead of typing an output filename (area G). Hidden once the
+                    // suggestion is already present so it never nags.
+                    const firstInput = (Array.isArray(selectedNode.data.task.file_inputs) ? selectedNode.data.task.file_inputs as string[] : [])
+                      .find((p) => p.trim().length > 0);
+                    const suggestion = firstInput ? suggestOutputName(firstInput) : "";
+                    const showSuggestion = suggestion.length > 0 && !curOutputs.includes(suggestion);
+                    return (
                     <div className="field">
                       <div className="small">file_outputs</div>
-                      {(Array.isArray(selectedNode.data.task.file_outputs) ? selectedNode.data.task.file_outputs as string[] : []).map((fo, idx) => (
+                      {curOutputs.map((fo, idx) => (
                         <div key={`fo-${idx}`} style={{ display: "flex", gap: 4, alignItems: "center" }}>
                           <FilePathInput
                             style={{ fontSize: 12, padding: "4px 8px", flex: 1 }}
@@ -4729,12 +4749,24 @@ export default function WorkflowEditorView(props: {
                           }}>x</button>
                         </div>
                       ))}
-                      <button className="btn" type="button" style={{ padding: "3px 8px", fontSize: 11 }} onClick={() => {
-                        const list = [...(Array.isArray(selectedNode.data.task.file_outputs) ? selectedNode.data.task.file_outputs as string[] : []), ""];
-                        updateSelectedTaskField({ file_outputs: list } as Partial<JcwfTask>);
-                      }}>+ file_output</button>
+                      <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", marginTop: 2 }}>
+                        <button className="btn" type="button" style={{ padding: "3px 8px", fontSize: 11 }} onClick={() => {
+                          const list = [...curOutputs, ""];
+                          updateSelectedTaskField({ file_outputs: list } as Partial<JcwfTask>);
+                        }}>+ file_output</button>
+                        {showSuggestion && (
+                          <button
+                            className="btn"
+                            type="button"
+                            style={{ padding: "3px 8px", fontSize: 11, borderColor: "rgba(100,210,180,0.45)", color: "rgba(140,230,200,0.95)" }}
+                            title={`Add ${suggestion} (from input ${firstInput})`}
+                            onClick={() => { updateSelectedTaskField({ file_outputs: [...curOutputs, suggestion] } as Partial<JcwfTask>); }}
+                          >+ {suggestion}</button>
+                        )}
+                      </div>
                     </div>
-                  )}
+                    );
+                  })()}
 
                   {(selectedNode.data.task.type === "shell" || selectedNode.data.task.type === "python" || selectedNode.data.task.type === "internal") && (() => {
                     const mat = (selectedNode.data.task.materialize ?? {}) as Record<string, string>;
@@ -4874,6 +4906,20 @@ export default function WorkflowEditorView(props: {
                                 writeSlots(key, rebuilt);
                               }}
                             />
+                            <select
+                              className="input"
+                              style={{ fontSize: 11, padding: "3px 4px", width: 72 }}
+                              value={spec?.type ?? "string"}
+                              onChange={(e) => {
+                                const rebuilt: Record<string, unknown> = {};
+                                entries.forEach(([k, v], i) => { rebuilt[k] = i === idx ? { ...v, type: e.target.value } : v; });
+                                writeSlots(key, rebuilt);
+                              }}
+                            >
+                              <option value="string">string</option>
+                              <option value="object">object</option>
+                              <option value="number">number</option>
+                            </select>
                             <label className="small" style={{ display: "flex", alignItems: "center", gap: 3 }}>
                               <input
                                 type="checkbox"
@@ -4881,7 +4927,9 @@ export default function WorkflowEditorView(props: {
                                 onChange={(e) => {
                                   const rebuilt: Record<string, unknown> = {};
                                   entries.forEach(([k, v], i) => {
-                                    rebuilt[k] = i === idx ? { type: "string", ...(e.target.checked ? { required: true } : {}) } : v;
+                                    rebuilt[k] = i === idx
+                                      ? { type: v?.type ?? "string", ...(e.target.checked ? { required: true } : {}) }
+                                      : v;
                                   });
                                   writeSlots(key, rebuilt);
                                 }}
@@ -4910,12 +4958,13 @@ export default function WorkflowEditorView(props: {
                     return (
                       <details className="field" style={{ borderLeft: "2px solid rgba(100,210,180,0.4)", paddingLeft: 8 }} open={hasSlots}>
                         <summary style={{ cursor: "pointer", fontSize: 12, color: "rgba(100,210,180,0.95)" }}>
-                          Dataflow slots (named output → input){hasSlots ? " ✓" : ""}
+                          Named value inputs/outputs — advanced{hasSlots ? " ✓" : ""}
                         </summary>
                         <div className="small" style={{ marginTop: 6, opacity: 0.8 }}>
-                          Declare named output/input slots to pass values between tasks. Declared slots show as
-                          round ports on the node face — drag an output port to a downstream input port to wire a
-                          dataflow edge.
+                          For passing a <em>value</em> to a script parameter — not a file. Declare a named output on the
+                          producer and a matching named input on the consumer; both show as round ports on the node face,
+                          and drawing an output→input wire passes the value. Most workflows use file_inputs/file_outputs
+                          instead and never need this.
                         </div>
                         <div className="small" style={{ marginTop: 6, fontWeight: 600 }}>outputs</div>
                         {renderSlotList("outputs", outputEntries)}
@@ -4924,17 +4973,6 @@ export default function WorkflowEditorView(props: {
                       </details>
                     );
                   })()}
-
-                  <label className="field">
-                    <div className="small">doc</div>
-                    <textarea
-                      className="input"
-                      value={typeof selectedNode.data.task.doc === "string" ? selectedNode.data.task.doc : ""}
-                      onChange={(e) => { updateSelectedTaskField({ doc: e.target.value }); }}
-                      placeholder="(optional, string)"
-                      rows={4}
-                    />
-                  </label>
 
                   {selectedNode.data.task.type === "shell" ? (() => {
                     const shellParams = (selectedNode.data.task.params ?? {}) as Record<string, unknown>;
@@ -5057,45 +5095,28 @@ export default function WorkflowEditorView(props: {
                         </div>
                       </div>
                     );
-                  })() : (
-                    <label className="field">
-                      <div className="small">params (JSON)</div>
-                      <textarea
-                        className="input codeInput"
-                        value={JSON.stringify(selectedNode.data.task.params ?? {}, null, 2)}
-                        onChange={(e) => {
-                          try
-                          {
-                            const parsed = JSON.parse(e.target.value) as Record<string, unknown>;
-                            updateSelectedTaskField({ params: parsed });
-                            setErrorText(null);
-                          }
-                          catch
-                          {
-                            setErrorText("params is not valid JSON.");
-                          }
-                        }}
-                        rows={8}
-                      />
-                    </label>
-                  )}
+                  })() : null}
 
-                  <label className="field">
-                    <div className="small">timeout_ms</div>
-                    <input
-                      className="input"
-                      type="number"
-                      style={{ fontSize: 12, padding: "4px 8px" }}
-                      value={selectedNode.data.task.timeout_ms !== undefined ? String(selectedNode.data.task.timeout_ms) : ""}
-                      onChange={(e) => {
-                        const raw = e.target.value;
-                        const val = raw.length > 0 ? Math.max(0, Number(raw)) : undefined;
-                        updateSelectedTaskField({ timeout_ms: (val !== undefined && isNaN(val)) ? undefined : val } as Partial<JcwfTask>);
-                      }}
-                      min={0}
-                      placeholder="(inherits workflow default)"
-                    />
-                  </label>
+                  {selectedNode.data.task.type === "ai_call" && selectedNode.data.task.mode === "per_item"
+                    && typeof selectedNode.data.task.filter === "string" && selectedNode.data.task.filter.length > 0
+                    && (() => {
+                      const fid = selectedNode.data.task.filter as string;
+                      const filterNode = (nodes as EditorNode[]).find((n): n is EditorFilterNode =>
+                        n.type === "filter" && n.data.filter.id === fid);
+                      if (!filterNode) return null;
+                      return (
+                        <FanoutBuilder
+                          filter={filterNode.data.filter}
+                          workflowId={loadedWorkflowId ?? props.workflowId ?? null}
+                          onApply={(entry) => {
+                            const qb = { ...((selectedNode.data.task.queue_binding ?? {}) as JcwfQueueBinding) };
+                            qb.prob_files = [entry];
+                            updateSelectedTaskField({ queue_binding: qb } as Partial<JcwfTask>);
+                            setStatusText(`Fan-out prompt applied — one AI call per row of '${fid}'.`);
+                          }}
+                        />
+                      );
+                    })()}
 
                   {selectedNode.data.task.type === "ai_call" && (
                     <QueueBindingEditor
@@ -5105,72 +5126,116 @@ export default function WorkflowEditorView(props: {
                     />
                   )}
 
-                  <div className="field">
-                    <div className="small" style={{ fontWeight: 600 }}>inputs</div>
-                    {Object.entries((selectedNode.data.task.inputs as Record<string, Record<string, unknown>> | undefined) ?? {}).map(([name, slot]) => (
-                      <div key={`in-${name}`} style={{ display: "flex", gap: 4, alignItems: "center", flexWrap: "wrap" }}>
-                        <input className="input" style={{ fontSize: 11, padding: "3px 6px", width: 80 }} value={name} readOnly title="Input name (edit via rename)" />
-                        <select className="input" style={{ fontSize: 11, padding: "3px 4px", width: 72 }} value={(slot.type as string) ?? "string"} onChange={(e) => {
-                          const inputs = { ...((selectedNode.data.task.inputs as Record<string, Record<string, unknown>>) ?? {}) };
-                          inputs[name] = { ...inputs[name], type: e.target.value };
-                          updateSelectedTaskField({ inputs } as Partial<JcwfTask>);
-                        }}>
-                          <option value="string">string</option>
-                          <option value="object">object</option>
-                          <option value="number">number</option>
-                        </select>
-                        <label style={{ fontSize: 10, display: "flex", alignItems: "center", gap: 3 }}>
-                          <input type="checkbox" checked={slot.required === true} onChange={(e) => {
-                            const inputs = { ...((selectedNode.data.task.inputs as Record<string, Record<string, unknown>>) ?? {}) };
-                            inputs[name] = { ...inputs[name], required: e.target.checked || undefined };
-                            updateSelectedTaskField({ inputs } as Partial<JcwfTask>);
-                          }} />req
-                        </label>
-                        <button className="btn" type="button" style={{ padding: "2px 6px", fontSize: 10, color: "#ff8a8a" }} onClick={() => {
-                          const inputs = { ...((selectedNode.data.task.inputs as Record<string, Record<string, unknown>>) ?? {}) };
-                          delete inputs[name];
-                          updateSelectedTaskField({ inputs: Object.keys(inputs).length > 0 ? inputs : undefined } as Partial<JcwfTask>);
-                        }}>x</button>
-                      </div>
-                    ))}
-                    <button className="btn" type="button" style={{ padding: "3px 8px", fontSize: 11 }} onClick={() => {
-                      const inputs = { ...((selectedNode.data.task.inputs as Record<string, Record<string, unknown>>) ?? {}) };
-                      let idx = Object.keys(inputs).length + 1;
-                      while (inputs[`input_${idx}`]) { idx++; }
-                      inputs[`input_${idx}`] = { type: "string" };
-                      updateSelectedTaskField({ inputs } as Partial<JcwfTask>);
-                    }}>+ input</button>
-                  </div>
+                  {/* Advanced — fields rarely or never touched in a typical workflow. Collapsed by
+                      default so the essentials above aren't buried under a wall of inputs (U5). */}
+                  <details className="field" style={{ borderLeft: "2px solid rgba(255,255,255,0.15)", paddingLeft: 8 }}>
+                    <summary style={{ cursor: "pointer", fontSize: 12, opacity: 0.85 }}>Advanced</summary>
 
-                  <div className="field">
-                    <div className="small" style={{ fontWeight: 600 }}>outputs</div>
-                    {Object.entries((selectedNode.data.task.outputs as Record<string, Record<string, unknown>> | undefined) ?? {}).map(([name, slot]) => (
-                      <div key={`out-${name}`} style={{ display: "flex", gap: 4, alignItems: "center" }}>
-                        <input className="input" style={{ fontSize: 11, padding: "3px 6px", width: 80 }} value={name} readOnly title="Output name (edit via rename)" />
-                        <select className="input" style={{ fontSize: 11, padding: "3px 4px", width: 72 }} value={(slot.type as string) ?? "string"} onChange={(e) => {
-                          const outputs = { ...((selectedNode.data.task.outputs as Record<string, Record<string, unknown>>) ?? {}) };
-                          outputs[name] = { ...outputs[name], type: e.target.value };
-                          updateSelectedTaskField({ outputs } as Partial<JcwfTask>);
-                        }}>
-                          <option value="string">string</option>
-                          <option value="object">object</option>
-                          <option value="number">number</option>
-                        </select>
-                        <button className="btn" type="button" style={{ padding: "2px 6px", fontSize: 10, color: "#ff8a8a" }} onClick={() => {
-                          const outputs = { ...((selectedNode.data.task.outputs as Record<string, Record<string, unknown>>) ?? {}) };
-                          delete outputs[name];
-                          updateSelectedTaskField({ outputs: Object.keys(outputs).length > 0 ? outputs : undefined } as Partial<JcwfTask>);
-                        }}>x</button>
+                    <label className="field" style={{ marginTop: 6 }}>
+                      <div className="small">
+                        {selectedNode.data.task.type === "ai_call"
+                          ? <>working_directory <span style={{ opacity: 0.5 }}>(optional, tab to accept)</span></>
+                          : <>working_directory relative to jcwf <span style={{ opacity: 0.5 }}>(tab to accept)</span></>}
                       </div>
-                    ))}
-                    <button className="btn" type="button" style={{ padding: "3px 8px", fontSize: 11 }} onClick={() => {
-                      const outputs = { ...((selectedNode.data.task.outputs as Record<string, Record<string, unknown>>) ?? {}) };
-                      let idx = Object.keys(outputs).length + 1;
-                      while (outputs[`output_${idx}`]) { idx++; }
-                      outputs[`output_${idx}`] = { type: "string" };
-                      updateSelectedTaskField({ outputs } as Partial<JcwfTask>);
-                    }}>+ output</button>
-                  </div>
+                      <FilePathInput
+                        value={(selectedNode.data.task.working_directory ?? "") as string}
+                        onChange={(v) => { updateSelectedTaskField({ working_directory: v }); }}
+                        onKeyDown={(e) => {
+                          const cur = ((selectedNode.data.task.working_directory ?? "") as string).trim();
+                          if (e.key === "Tab" && cur.length === 0)
+                          {
+                            e.preventDefault();
+                            const el = e.currentTarget;
+                            updateSelectedTaskField({ working_directory: el.placeholder });
+                          }
+                        }}
+                        placeholder={
+                          selectedNode.data.task.type === "ai_call"
+                            ? (() => {
+                              const wfId = loadedWorkflowId ?? props.workflowId ?? "workflowId";
+                              const aiNodes = (nodes.filter((n) => n.type === "task") as EditorTaskNode[]).filter((n) => n.data.task.type === "ai_call");
+                              const idx = aiNodes.findIndex((n) => n.id === selectedNode.id);
+                              const num = String(idx >= 0 ? idx + 1 : aiNodes.length + 1).padStart(2, "0");
+                              return `../queue/${wfId}/${num}_${selectedNode.id}`;
+                            })()
+                            : `${loadedWorkflowId ?? props.workflowId ?? "workflowId"}/01_taskName`
+                        }
+                      />
+                      {(() => {
+                        // Friendly "runs in" hint (area E): show where the task actually runs — resolved
+                        // through the same base-leaf-strip the runtime uses — so the user reads a real
+                        // location instead of decoding a raw ../ traversal. Empty wd ⇒ the workflow folder.
+                        const wfId = loadedWorkflowId ?? props.workflowId ?? "workflowId";
+                        const wd = ((selectedNode.data.task.working_directory ?? "") as string).trim();
+                        const resolved = resolveTaskDirSegments(wfId, wd).join("/");
+                        return (
+                          <div className="small" style={{ opacity: 0.7, marginTop: 2 }}>
+                            runs in: <code>{resolved}/</code>{wd.length === 0 ? " (the workflow folder — leave blank for this)" : ""}
+                          </div>
+                        );
+                      })()}
+                    </label>
+
+                    {selectedNode.data.task.type !== "shell" && selectedNode.data.task.type !== "python" && (
+                      <label className="field" style={{ marginTop: 6 }}>
+                        <div className="small">params (JSON)</div>
+                        <textarea
+                          className="input codeInput"
+                          value={JSON.stringify(selectedNode.data.task.params ?? {}, null, 2)}
+                          onChange={(e) => {
+                            try
+                            {
+                              const parsed = JSON.parse(e.target.value) as Record<string, unknown>;
+                              updateSelectedTaskField({ params: parsed });
+                              setErrorText(null);
+                            }
+                            catch
+                            {
+                              setErrorText("params is not valid JSON.");
+                            }
+                          }}
+                          rows={8}
+                        />
+                      </label>
+                    )}
+
+                    <label className="field" style={{ marginTop: 6 }}>
+                      <div className="small">timeout_ms</div>
+                      <input
+                        className="input"
+                        type="number"
+                        style={{ fontSize: 12, padding: "4px 8px" }}
+                        value={selectedNode.data.task.timeout_ms !== undefined ? String(selectedNode.data.task.timeout_ms) : ""}
+                        onChange={(e) => {
+                          const raw = e.target.value;
+                          const val = raw.length > 0 ? Math.max(0, Number(raw)) : undefined;
+                          updateSelectedTaskField({ timeout_ms: (val !== undefined && isNaN(val)) ? undefined : val } as Partial<JcwfTask>);
+                        }}
+                        min={0}
+                        placeholder="(inherits workflow default)"
+                      />
+                    </label>
+
+                    <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, marginTop: 8 }}>
+                      <input
+                        type="checkbox"
+                        checked={selectedNode.data.task.expose_error_signal === true}
+                        onChange={(e) => { updateSelectedTaskField({ expose_error_signal: e.target.checked || undefined } as Partial<JcwfTask>); }}
+                      />
+                      Expose error signal output
+                    </label>
+
+                    <label className="field" style={{ marginTop: 8 }}>
+                      <div className="small">doc</div>
+                      <textarea
+                        className="input"
+                        value={typeof selectedNode.data.task.doc === "string" ? selectedNode.data.task.doc : ""}
+                        onChange={(e) => { updateSelectedTaskField({ doc: e.target.value }); }}
+                        placeholder="(optional, string)"
+                        rows={4}
+                      />
+                    </label>
+                  </details>
 
                   {selectedNode.data.validationErrors && selectedNode.data.validationErrors.length > 0
                     ? (
@@ -5223,6 +5288,19 @@ export default function WorkflowEditorView(props: {
           filter={editingFilter}
           onSave={onFilterBuilderSave}
           onCancel={() => { setShowFilterBuilder(false); setEditingFilter(null); }}
+        />
+      )}
+
+      {showFilePicker && (loadedWorkflowId || props.workflowId) && (
+        <FilePickerDialog
+          workflowId={loadedWorkflowId ?? props.workflowId!}
+          canvasFileName={`${loadedWorkflowId ?? props.workflowId!}.json`}
+          existingFileNodeRelPaths={new Set(
+            (nodes as EditorNode[]).filter((n): n is EditorFileNode => n.type === "file").map((n) => n.data.workflowRelPath),
+          )}
+          onPick={(relPath) => { addFileNode(relPath); }}
+          onUploadNew={triggerFileUpload}
+          onClose={() => { setShowFilePicker(false); }}
         />
       )}
 

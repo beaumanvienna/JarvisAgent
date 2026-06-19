@@ -1,5 +1,8 @@
 import type { EditorControlNode, EditorGraph, EditorFilterNode, EditorTaskEdge, EditorTaskNode, EditorNode } from "./types";
 import type { JcwfControlNode, JcwfControlflowEdge, JcwfControlflowKind, JcwfDataflowEntry, JcwfFile, JcwfFilter, JcwfTask } from "../jcwf/types";
+import { deriveUpstreamOutputPaths, fileNodeInputPath } from "./pathSynthesis";
+import { readsFileInputs } from "./taskCapabilities";
+import { classifyEdge } from "./edgeClassify";
 
 type CycleError = { ok: false; message: string; cycleNodes: string[]; };
 type Ok = { ok: true; jcwf: JcwfFile; };
@@ -14,8 +17,11 @@ function buildAdjacency(graph: EditorGraph): Map<string, string[]>
 
   for (const edge of graph.edges)
   {
-    // Ignore dataflow edges (slot wiring) and filter fanout edges in orchestration cycle detection.
-    if (edge.id.startsWith("df:") || edge.id.startsWith("fanout:"))
+    // Ignore dataflow edges (slot wiring), filter fanout edges, and artifact-file edges (an external
+    // file feeding a task — U3; a file node never participates in an orchestration cycle). Classified
+    // via the shared classifier (U2) rather than re-reading the id prefix.
+    const cls = classifyEdge(edge.sourceHandle, edge.targetHandle, edge.source, edge.target);
+    if (cls === "dataflow" || cls === "fanout" || edge.source.startsWith("file:"))
     {
       continue;
     }
@@ -149,8 +155,12 @@ export function graphToJcwf(graph: EditorGraph, workflowId: string): Ok | CycleE
 
   for (const edge of graph.edges as EditorTaskEdge[])
   {
-    // Dataflow edges have df: prefix and encode output/input in sourceHandle/targetHandle
-    if (edge.id.startsWith("df:") && edge.sourceHandle && edge.targetHandle)
+    // One classifier decides the edge's meaning from its handles + endpoints (U2 / S5); the id prefix
+    // is just the persisted encoding of this.
+    const cls = classifyEdge(edge.sourceHandle, edge.targetHandle, edge.source, edge.target);
+
+    // Dataflow edge — named output/input slots.
+    if (cls === "dataflow" && edge.sourceHandle && edge.targetHandle)
     {
       const fromOutput = edge.sourceHandle.startsWith("out:") ? edge.sourceHandle.slice(4) : edge.sourceHandle;
       const toInput = edge.targetHandle.startsWith("in:") ? edge.targetHandle.slice(3) : edge.targetHandle;
@@ -163,14 +173,22 @@ export function graphToJcwf(graph: EditorGraph, workflowId: string): Ok | CycleE
       continue;
     }
 
-    // Skip fanout edges (auto-generated from filter → per_item task)
-    if (edge.id.startsWith("fanout:"))
+    // Skip fanout edges (auto-generated from filter → per_item task; binding lives in task.filter).
+    if (cls === "fanout")
     {
       continue;
     }
 
-    // Controlflow edges (branching) are persisted separately.
-    if (edge.id.startsWith("cf:") && edge.sourceHandle && edge.targetHandle)
+    // Skip artifact-file edges (file node → task input). The file node is a pure editor overlay (no
+    // JCWF task); the consumer's file_inputs path is the persisted artifact, not this edge (U3). This
+    // is a fileflow edge distinguished from a task dependency by its file-node source.
+    if (edge.source.startsWith("file:"))
+    {
+      continue;
+    }
+
+    // Controlflow edge (branching) — persisted separately.
+    if (cls === "controlflow" && edge.sourceHandle && edge.targetHandle)
     {
       const kind: JcwfControlflowKind =
         edge.sourceHandle === "cf-out-error" ? "on_error"
@@ -189,8 +207,8 @@ export function graphToJcwf(graph: EditorGraph, workflowId: string): Ok | CycleE
       continue;
     }
 
-    // Only dep:* edges participate in depends_on.
-    if (!edge.id.startsWith("dep:"))
+    // Only fileflow (task→task dependency) edges participate in depends_on.
+    if (cls !== "fileflow")
     {
       continue;
     }
@@ -230,6 +248,57 @@ export function graphToJcwf(graph: EditorGraph, workflowId: string): Ok | CycleE
       return a.source.localeCompare(b.source);
     });
     tasks[taskId].depends_on = deps.map((d) => d.source);
+  }
+
+  // U1 — derive file_inputs from incoming data edges at SAVE time. The edge is the authoritative
+  // hand-off: a port fed by an edge (a `dep:` edge from an upstream task output, or a `file:` edge
+  // from an artifact-file node) gets its path synthesized from the producer, replacing whatever was
+  // stored. This kills the stored-path drift cluster — nothing to keep in sync because the path no
+  // longer lives on the task between edits. Ports with NO incoming edge keep their stored entry (an
+  // external input that isn't an artifact node yet — S2 transition rule). Only file_inputs-reading
+  // types (shell/python/internal) participate; ai_call reads via queue cntx, so its stored file_inputs
+  // are left untouched. The path synth mirrors the backend TaskPathResolver (incl. the base-leaf-strip
+  // for `<wfId>/…` working dirs), verified zero-drift against all five shipped examples.
+  for (const taskId of Object.keys(tasks))
+  {
+    const task = tasks[taskId];
+    if (!readsFileInputs(task.type)) continue;
+
+    const consumerWd = (task.working_directory ?? "") as string;
+    const stored = Array.isArray(task.file_inputs) ? [...(task.file_inputs as string[])] : [];
+
+    const derivedByPort = new Map<number, string>();
+    for (const edge of graph.edges as EditorTaskEdge[])
+    {
+      if (edge.target !== taskId) continue;
+      if (typeof edge.targetHandle !== "string" || !edge.targetHandle.startsWith("dephandle-")) continue;
+      const portIdx = parseInt(edge.targetHandle.slice(10), 10);
+      if (!(portIdx >= 0)) continue;
+
+      let derived = "";
+      if (edge.id.startsWith("file:"))
+      {
+        const relPath = edge.source.startsWith("file:") ? edge.source.slice("file:".length) : "";
+        if (relPath) derived = fileNodeInputPath(relPath, consumerWd, workflowId);
+      }
+      else
+      {
+        const srcTask = tasks[edge.source];
+        if (srcTask) derived = deriveUpstreamOutputPaths(srcTask, task, workflowId, edge.sourceHandle)[0] ?? "";
+      }
+      if (derived.length > 0) derivedByPort.set(portIdx, derived);
+    }
+
+    if (derivedByPort.size === 0) continue; // no wired ports — leave stored file_inputs as authored
+
+    const maxLen = Math.max(stored.length, Math.max(...derivedByPort.keys()) + 1);
+    const merged: string[] = [];
+    for (let i = 0; i < maxLen; i += 1)
+    {
+      merged.push(derivedByPort.has(i) ? derivedByPort.get(i)! : (i < stored.length ? stored[i] : ""));
+    }
+    while (merged.length > 0 && merged[merged.length - 1].trim().length === 0) merged.pop();
+    task.file_inputs = merged.length > 0 ? merged : undefined;
   }
 
   // Ensure every ai_call task has a complete environment (STNG, TASK, CNTX).

@@ -98,6 +98,9 @@ python3 test/hardening/test_email_watch_persistence.py --admin-key "$J9T_TOKEN"
 # KeyManager keystore parse caps (subprocess sandbox; crafts encrypted keys.json.enc fixtures)
 python3 test/hardening/test_keymanager_caps.py
 
+# Workflow-folder files endpoints (GET list + POST upload): basename-strip, path confinement, 25 MB cap, auth split
+python3 test/hardening/test_workflow_files_endpoint.py --admin-key "$J9T_TOKEN"
+
 # Live S3 round-trip via the consolidated SigV4 signer (needs an S3 connection online, e.g. minio)
 python3 test/dispatch/test_s3_roundtrip.py --admin-key "$J9T_TOKEN"
 

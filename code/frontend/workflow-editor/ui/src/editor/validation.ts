@@ -17,8 +17,9 @@ export function validateGraph(graph: EditorGraph): ValidationResult
 
   for (const node of graph.nodes)
   {
-    // Filter nodes are not validated here
-    if (node.type === "filter" || node.type === "branch")
+    // Filter, branch, and file nodes carry no task to validate. File nodes are pure editor
+    // overlays whose data has no `.task` field, so reading task.type below would throw.
+    if (node.type === "filter" || node.type === "branch" || node.type === "file")
     {
       continue;
     }
